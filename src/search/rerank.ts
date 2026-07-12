@@ -80,14 +80,27 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
   score += Math.min(1.6, overlap * (isImpl ? 0.14 : 0.1));
 
   // --- Implementation-first penalties / boosts ---
-  if (/(^|\/)(examples?|demo|samples?|fixtures?)(\/|$)/i.test(chunk.path)) {
-    score -= 1.25;
+  if (/(^|\/)(examples?|demo|samples?|fixtures?|benchmarks?|fuzzing)(\/|$)/i.test(chunk.path)) {
+    score -= 1.3;
   }
-  if (/(^|\/)(test|tests|__tests__|spec)(\/|$)/i.test(chunk.path)) {
-    score -= 0.85;
+  // Multi-lang test layouts: jvmTest, androidHostTest, *_test.go, *_test.rs, *Test.java
+  if (
+    /(^|\/)(test|tests|__tests__|spec|jvmTest|androidHostTest|androidTest|commonTest|hostTest)(\/|$)/i.test(
+      chunk.path,
+    )
+  ) {
+    score -= 1.15;
   }
-  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) score -= 0.85;
-  if (/\b(test|spec|mock|fixture)\b/i.test(chunk.path)) score -= 0.25;
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) score -= 1.0;
+  if (/_test\.(c|cc|cpp|cxx|go|rs|java|kt|kts|py)$/i.test(chunk.path)) {
+    score -= 1.05;
+  }
+  if (/Test\.(java|kt|kts)$/i.test(chunk.path)) score -= 1.05;
+  if (/\b(test|spec|mock|fixture|bench)\b/i.test(chunk.path)) score -= 0.3;
+  // Prefer .c/.cc implementation over headers when scores are close
+  if (/\.(h|hpp|hxx|hh)$/i.test(chunk.path) && q.intent !== "path") {
+    score -= 0.35;
+  }
 
   // Docs / marketing / eval writeups steal Top-1 on conceptual queries
   if (

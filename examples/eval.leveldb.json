@@ -1,0 +1,38 @@
+[
+  {
+    "id": "db-impl",
+    "query": "DBImpl Put Get Write compaction",
+    "expectPaths": ["db_impl"],
+    "topK": 10
+  },
+  {
+    "id": "table",
+    "query": "Table Builder block handle sstable",
+    "expectPaths": ["table"],
+    "topK": 8
+  },
+  {
+    "id": "memtable",
+    "query": "MemTable Add Get skiplist",
+    "expectPaths": ["memtable"],
+    "topK": 8
+  },
+  {
+    "id": "version",
+    "query": "VersionSet LogAndApply current version",
+    "expectPaths": ["version_set"],
+    "topK": 8
+  },
+  {
+    "id": "writebatch",
+    "query": "WriteBatch Put Delete Iterate handler",
+    "expectPaths": ["write_batch"],
+    "topK": 8
+  },
+  {
+    "id": "nl-compaction",
+    "query": "how does leveldb compact levels and merge tables",
+    "expectPaths": ["db_impl", "version_set", "compaction"],
+    "topK": 10
+  }
+]

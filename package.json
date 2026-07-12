@@ -34,6 +34,7 @@
     "eval:self": "npm run build && node dist/cli.js eval --self --reindex",
     "eval:express": "npm run build && node scripts/practice-eval.mjs --root ${EXPRESS_ROOT:-/tmp/ce-bench/express} --cases examples/eval.express.json",
     "bench:suite": "node scripts/bench-suite.mjs",
+    "bench:multilang": "node scripts/bench-multilang.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

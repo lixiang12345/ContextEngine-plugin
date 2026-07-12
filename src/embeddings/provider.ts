@@ -46,8 +46,8 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
 
   private async embedRaw(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-    // Batch to avoid oversized payloads
-    const batchSize = 64;
+    // Smaller batches avoid OOM on 12GB GPUs when embedding long code chunks.
+    const batchSize = Number(process.env.CONTEXTENGINE_EMBED_BATCH || 16);
     const all: number[][] = [];
     for (let i = 0; i < texts.length; i += batchSize) {
       const batch = texts.slice(i, i + batchSize).map((t) => t.slice(0, 8000));

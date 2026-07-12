@@ -1,0 +1,44 @@
+[
+  {
+    "id": "optional",
+    "query": "Optional ofNullable orElse transform absent",
+    "expectPaths": ["Optional.java"],
+    "topK": 10
+  },
+  {
+    "id": "immutable-list",
+    "query": "ImmutableList builder copyOf of",
+    "expectPaths": ["ImmutableList.java"],
+    "topK": 8
+  },
+  {
+    "id": "preconditions",
+    "query": "checkArgument checkNotNull Preconditions",
+    "expectPaths": ["Preconditions.java"],
+    "topK": 8
+  },
+  {
+    "id": "strings",
+    "query": "Strings isNullOrEmpty emptyToNull padStart",
+    "expectPaths": ["Strings.java"],
+    "topK": 8
+  },
+  {
+    "id": "joiner",
+    "query": "Joiner on skipNulls join iterable",
+    "expectPaths": ["Joiner.java"],
+    "topK": 8
+  },
+  {
+    "id": "splitter",
+    "query": "Splitter on split trimResults omitEmptyStrings",
+    "expectPaths": ["Splitter.java"],
+    "topK": 8
+  },
+  {
+    "id": "nl-cache",
+    "query": "how does LoadingCache get and load values",
+    "expectPaths": ["cache", "LoadingCache", "LocalCache"],
+    "topK": 10
+  }
+]

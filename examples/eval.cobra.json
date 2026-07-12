@@ -1,0 +1,38 @@
+[
+  {
+    "id": "command",
+    "query": "Command Execute RunE flags args cobra",
+    "expectPaths": ["command.go"],
+    "topK": 10
+  },
+  {
+    "id": "args",
+    "query": "PositionalArgs MinimumNArgs ExactArgs validation",
+    "expectPaths": ["args.go"],
+    "topK": 8
+  },
+  {
+    "id": "flag",
+    "query": "persistent flags local flags Flags annotation",
+    "expectPaths": ["command.go"],
+    "topK": 8
+  },
+  {
+    "id": "completions",
+    "query": "shell completion bash zsh fish",
+    "expectPaths": ["completions.go"],
+    "topK": 8
+  },
+  {
+    "id": "help",
+    "query": "help function usage template",
+    "expectPaths": ["command.go"],
+    "topK": 8
+  },
+  {
+    "id": "nl-subcommand",
+    "query": "how to add nested subcommands to a root command",
+    "expectPaths": ["command.go"],
+    "topK": 8
+  }
+]

@@ -1,0 +1,44 @@
+[
+  {
+    "id": "server",
+    "query": "serverMain redis server event loop aeMain",
+    "expectPaths": ["server.c"],
+    "topK": 10
+  },
+  {
+    "id": "networking",
+    "query": "acceptTcpHandler createClient readQueryFromClient",
+    "expectPaths": ["networking.c"],
+    "topK": 8
+  },
+  {
+    "id": "object",
+    "query": "createObject robj incrRefCount decrRefCount",
+    "expectPaths": ["object.c"],
+    "topK": 8
+  },
+  {
+    "id": "db",
+    "query": "lookupKey dbAdd dbDelete selectDb",
+    "expectPaths": ["db.c"],
+    "topK": 8
+  },
+  {
+    "id": "aof",
+    "query": "AOF rewrite feedAppendOnlyFile",
+    "expectPaths": ["aof.c"],
+    "topK": 8
+  },
+  {
+    "id": "rdb",
+    "query": "RDB save load rdbSave rdbLoad",
+    "expectPaths": ["rdb.c"],
+    "topK": 8
+  },
+  {
+    "id": "nl-expire",
+    "query": "how does key expiration and eviction work",
+    "expectPaths": ["expire.c", "evict.c", "db.c"],
+    "topK": 10
+  }
+]

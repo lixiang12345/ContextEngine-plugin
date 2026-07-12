@@ -191,3 +191,12 @@ node scripts/bench-suite.mjs
 # export OPENAI_API_KEY=... ; export OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 # node scripts/bench-suite.mjs
 ```
+
+
+## 7. Multi-language semantic bench (2026-07-12)
+
+See **[docs/MULTILANG_BENCH.md](./docs/MULTILANG_BENCH.md)** and `eval-results/multilang-summary.json`.
+
+**MACRO (9 suites, Qwen3-Embedding-0.6B):** mean Top1≈0.66, Top5≈0.93, MRR≈0.78, Recall≈0.93.
+
+Languages covered: JS, Go, Python, C, C++, Java, Kotlin, Rust.

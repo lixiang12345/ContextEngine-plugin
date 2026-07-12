@@ -1,0 +1,38 @@
+[
+  {
+    "id": "api",
+    "query": "request get post Session api",
+    "expectPaths": ["api.py", "sessions.py"],
+    "topK": 10
+  },
+  {
+    "id": "sessions",
+    "query": "Session prepare_request send adapters",
+    "expectPaths": ["sessions.py"],
+    "topK": 8
+  },
+  {
+    "id": "models",
+    "query": "Response Request prepare content status_code",
+    "expectPaths": ["models.py"],
+    "topK": 8
+  },
+  {
+    "id": "adapters",
+    "query": "HTTPAdapter send cert verify pool",
+    "expectPaths": ["adapters.py"],
+    "topK": 8
+  },
+  {
+    "id": "auth",
+    "query": "HTTPBasicAuth AuthBase authorization header",
+    "expectPaths": ["auth.py"],
+    "topK": 8
+  },
+  {
+    "id": "nl-timeout",
+    "query": "how are request timeouts handled",
+    "expectPaths": ["adapters.py", "sessions.py", "models.py"],
+    "topK": 10
+  }
+]

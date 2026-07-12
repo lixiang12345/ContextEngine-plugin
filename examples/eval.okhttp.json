@@ -1,0 +1,38 @@
+[
+  {
+    "id": "okhttpclient",
+    "query": "OkHttpClient Builder call factory dispatcher",
+    "expectPaths": ["OkHttpClient.kt"],
+    "topK": 10
+  },
+  {
+    "id": "request",
+    "query": "Request Builder url header method body",
+    "expectPaths": ["Request.kt"],
+    "topK": 8
+  },
+  {
+    "id": "response",
+    "query": "Response body code headers close",
+    "expectPaths": ["Response.kt"],
+    "topK": 8
+  },
+  {
+    "id": "interceptor",
+    "query": "Interceptor chain proceed application interceptor",
+    "expectPaths": ["Interceptor.kt"],
+    "topK": 8
+  },
+  {
+    "id": "call",
+    "query": "RealCall enqueue execute async",
+    "expectPaths": ["RealCall.kt"],
+    "topK": 8
+  },
+  {
+    "id": "nl-timeout",
+    "query": "how are connect read write timeouts configured on OkHttpClient",
+    "expectPaths": ["OkHttpClient.kt"],
+    "topK": 10
+  }
+]

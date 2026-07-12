@@ -1,0 +1,50 @@
+[
+  {
+    "id": "engine",
+    "query": "HTTP engine serve request router handler",
+    "expectPaths": ["gin.go"],
+    "topK": 10
+  },
+  {
+    "id": "context",
+    "query": "Context JSON bind query param should bind",
+    "expectPaths": ["context.go"],
+    "topK": 8
+  },
+  {
+    "id": "router",
+    "query": "tree node path addRoute getValue",
+    "expectPaths": ["tree.go"],
+    "topK": 8
+  },
+  {
+    "id": "recovery",
+    "query": "panic recovery middleware recover",
+    "expectPaths": ["recovery.go"],
+    "topK": 8
+  },
+  {
+    "id": "logger",
+    "query": "Logger middleware request log format",
+    "expectPaths": ["logger.go"],
+    "topK": 8
+  },
+  {
+    "id": "routergroup",
+    "query": "RouterGroup Group Use POST GET handlers",
+    "expectPaths": ["routergroup.go"],
+    "topK": 8
+  },
+  {
+    "id": "mode",
+    "query": "SetMode debug release test mode",
+    "expectPaths": ["mode.go"],
+    "topK": 8
+  },
+  {
+    "id": "nl-bind",
+    "query": "how does gin bind JSON request body to struct",
+    "expectPaths": ["binding", "context.go"],
+    "topK": 10
+  }
+]
