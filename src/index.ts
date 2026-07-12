@@ -20,12 +20,21 @@ export { chunkFile } from "./chunker/code-chunker.js";
 export { Bm25Index, tokenize } from "./search/bm25.js";
 export { HybridSearcher } from "./search/hybrid.js";
 export { analyzeQuery, toFtsQuery } from "./search/query-analyzer.js";
-export { featureScore, mmrSelect, rrfFuse } from "./search/rerank.js";
+export {
+  featureScore,
+  combineFinal,
+  mmrSelect,
+  preferImplementation,
+  rrfFuse,
+} from "./search/rerank.js";
 export { indexWorkspace, parseExtraRootsFromEnv } from "./indexer/indexer.js";
 export { watchAndIndex } from "./indexer/watch.js";
 export { SqliteStore } from "./store/sqlite-store.js";
 export { exportIndex, importIndex } from "./store/export-import.js";
-export { createEmbeddingProvider } from "./embeddings/provider.js";
+export {
+  createEmbeddingProvider,
+  CODE_RETRIEVAL_QUERY_INSTRUCT,
+} from "./embeddings/provider.js";
 export { buildSymbolGraph, expandViaGraph } from "./graph/symbol-graph.js";
 export { harvestCommits, commitsToChunks, isGitRepo } from "./lineage/commits.js";
 export { runEval, defaultSelfEvalCases } from "./eval/harness.js";

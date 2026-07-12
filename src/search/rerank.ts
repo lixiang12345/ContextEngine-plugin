@@ -18,15 +18,6 @@ export interface RankedCandidate {
   final: number;
 }
 
-function norm(map: Map<string, number>): Map<string, number> {
-  let max = 0;
-  for (const v of map.values()) max = Math.max(max, v);
-  if (max <= 0) return map;
-  const out = new Map<string, number>();
-  for (const [k, v] of map) out.set(k, v / max);
-  return out;
-}
-
 /** Reciprocal Rank Fusion over ranked id lists. */
 export function rrfFuse(
   lists: Array<Array<{ id: string; score: number }>>,
@@ -41,9 +32,15 @@ export function rrfFuse(
   return fused;
 }
 
+const IMPL_EXT =
+  /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|rb|php|c|cc|cpp|h|hpp|cs|swift|vue|svelte)$/i;
+
+const DOC_NOISE =
+  /^(readme|changelog|contributing|license|roadmap|architecture|comparison|evaluation|agents)(\.|$)/i;
+
 /**
- * Code-aware feature score. Compensates for generic embeddings.
- * Higher is better, roughly 0..1+ .
+ * Code-aware feature score — implementation-first ranking.
+ * Higher is better.
  */
 export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
   let score = 0;
@@ -52,20 +49,26 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
   const symbolLower = (chunk.symbol ?? "").toLowerCase();
   const contentTok = new Set(tokenize(chunk.content.slice(0, 4000)));
   const pathTok = new Set(tokenize(chunk.path));
+  const isImpl =
+    IMPL_EXT.test(chunk.path) &&
+    chunk.language !== "markdown" &&
+    chunk.language !== "git-commit";
 
   // Exact / fuzzy identifier hits
   for (const id of q.identifiers) {
     const idL = id.toLowerCase();
-    if (symbolLower === idL) score += 1.2;
-    else if (symbolLower.includes(idL)) score += 0.7;
-    if (base.includes(idL)) score += 0.5;
-    if (chunk.content.includes(id)) score += 0.45;
-    else if (chunk.content.toLowerCase().includes(idL)) score += 0.25;
+    if (symbolLower === idL) score += 1.35;
+    else if (symbolLower.includes(idL)) score += 0.75;
+    if (base.includes(idL)) score += 0.55;
+    if (chunk.content.includes(id)) score += isImpl ? 0.55 : 0.3;
+    else if (chunk.content.toLowerCase().includes(idL)) {
+      score += isImpl ? 0.3 : 0.15;
+    }
   }
 
   // Path hints
   for (const hint of q.pathHints) {
-    if (pathLower.includes(hint.toLowerCase())) score += 0.9;
+    if (pathLower.includes(hint.toLowerCase())) score += 0.95;
   }
 
   // Token overlap (content + path)
@@ -74,46 +77,66 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
     if (contentTok.has(t)) overlap += 1;
     if (pathTok.has(t)) overlap += 1.5;
   }
-  score += Math.min(1.5, overlap * 0.12);
+  score += Math.min(1.6, overlap * (isImpl ? 0.14 : 0.1));
 
-  // Prefer implementation over examples/tests/docs (critical on mid-size repos
-  // like Express/Commander/Koa where docs & examples flood lexical matches).
+  // --- Implementation-first penalties / boosts ---
   if (/(^|\/)(examples?|demo|samples?|fixtures?)(\/|$)/i.test(chunk.path)) {
-    score -= 1.1;
+    score -= 1.25;
   }
   if (/(^|\/)(test|tests|__tests__|spec)(\/|$)/i.test(chunk.path)) {
-    score -= 0.7;
+    score -= 0.85;
   }
-  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) score -= 0.7;
-  if (/\b(test|spec|mock|fixture)\b/i.test(chunk.path)) score -= 0.2;
-  // API markdown / guides often mirror symbol names and steal Top-1 without embeddings
-  if (/(^|\/)(docs?|documentation|guide|guides|website|bench|benchmark)(\/|$)/i.test(chunk.path)) {
-    score -= 0.9;
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) score -= 0.85;
+  if (/\b(test|spec|mock|fixture)\b/i.test(chunk.path)) score -= 0.25;
+
+  // Docs / marketing / eval writeups steal Top-1 on conceptual queries
+  if (
+    /(^|\/)(docs?|documentation|guide|guides|website|bench|benchmark|examples)(\/|$)/i.test(
+      chunk.path,
+    )
+  ) {
+    score -= 1.15;
+  }
+  // Root-level project markdown (README, ROADMAP, COMPARISON, …)
+  if (
+    chunk.language === "markdown" ||
+    /\.mdx?$/i.test(chunk.path) ||
+    DOC_NOISE.test(base)
+  ) {
+    // Keep a little signal for pure doc questions, crush for code tasks
+    if (q.intent === "symbol" || q.intent === "path") score -= 1.35;
+    else if (q.intent === "history") score -= 0.35;
+    else score -= 1.05;
   }
   if (/\.d\.ts$/i.test(chunk.path) || /(^|\/)typings?(\/|$)/i.test(chunk.path)) {
-    score -= 0.75;
-  }
-  if (chunk.language === "markdown") {
-    score -= q.intent === "symbol" ? 0.55 : 0.35;
-  }
-  // Boost primary source trees common in small/mid repos
-  if (/(^|\/)(lib|src|source|app|pkg|internal)(\/|$)/i.test(chunk.path)) {
-    score += 0.55;
-  }
-  // Basename exact-ish match for last path segment without extension
-  const baseNoExt = base.replace(/\.[^.]+$/, "");
-  for (const t of q.tokens) {
-    if (t.length >= 4 && baseNoExt === t) score += 0.45;
-  }
-  for (const id of q.identifiers) {
-    if (baseNoExt.toLowerCase() === id.toLowerCase()) score += 0.6;
-  }
-  if (chunk.language === "git-commit") {
-    score += q.prefersCommits ? 0.6 : -0.4;
+    score -= 0.85;
   }
 
-  // Density: shorter focused chunks with symbol often better
-  if (chunk.symbol && chunk.content.length < 2500) score += 0.1;
+  // Primary source trees
+  if (/(^|\/)(lib|src|source|app|pkg|internal|core)(\/|$)/i.test(chunk.path)) {
+    score += 0.85;
+  }
+  // Implementation file extension boost
+  if (isImpl) score += 0.65;
+
+  // Basename match
+  const baseNoExt = base.replace(/\.[^.]+$/, "");
+  for (const t of q.tokens) {
+    if (t.length >= 4 && baseNoExt === t) score += 0.5;
+  }
+  for (const id of q.identifiers) {
+    if (baseNoExt.toLowerCase() === id.toLowerCase()) score += 0.7;
+  }
+
+  if (chunk.language === "git-commit") {
+    score += q.prefersCommits ? 0.7 : -0.85;
+  }
+
+  // Dense symbol-bearing implementation chunks
+  if (isImpl && chunk.symbol && chunk.content.length < 2800) score += 0.2;
+  if (isImpl && chunk.content.length > 80 && chunk.content.length < 3500) {
+    score += 0.1;
+  }
 
   return score;
 }
@@ -123,34 +146,52 @@ export function combineFinal(
   features: number,
   semanticNorm: number,
   intent: AnalyzedQuery["intent"],
+  hasSemantic = true,
 ): number {
-  // Intent-weighted blend
-  let wRrf = 0.45;
-  let wFeat = 0.4;
-  let wSem = 0.15;
-  if (intent === "symbol" || intent === "path") {
+  // When dense vectors are available, trust them heavily for concept/mixed.
+  // Features keep symbol/path sharp and crush docs. Lexical RRF is secondary.
+  let wRrf = 0.22;
+  let wFeat = 0.33;
+  let wSem = 0.45;
+  if (!hasSemantic || semanticNorm <= 0) {
+    wRrf = 0.45;
     wFeat = 0.55;
-    wRrf = 0.35;
-    wSem = 0.1;
+    wSem = 0;
+  } else if (intent === "symbol" || intent === "path") {
+    wFeat = 0.48;
+    wSem = 0.28;
+    wRrf = 0.24;
   } else if (intent === "concept") {
-    wSem = 0.35;
-    wRrf = 0.35;
-    wFeat = 0.3;
+    wSem = 0.55;
+    wFeat = 0.28;
+    wRrf = 0.17;
   } else if (intent === "history") {
     wFeat = 0.5;
-    wRrf = 0.4;
-    wSem = 0.1;
+    wRrf = 0.32;
+    wSem = 0.18;
+  } else if (intent === "mixed") {
+    wSem = 0.48;
+    wFeat = 0.32;
+    wRrf = 0.2;
   }
-  return wRrf * rrf + wFeat * Math.tanh(features / 2) + wSem * semanticNorm;
+  // Feature tanh keeps large positive impl boosts from dominating completely
+  let score =
+    wRrf * rrf + wFeat * Math.tanh(features / 2.2) + wSem * semanticNorm;
+  // Extra lift when semantic and implementation features agree
+  if (hasSemantic && semanticNorm >= 0.85 && features >= 0.8) {
+    score += 0.06;
+  }
+  return score;
 }
 
 /**
  * Maximal Marginal Relevance — diversify packed results by path.
+ * Prefer keeping implementation hits when scores are close.
  */
 export function mmrSelect(
   ranked: RankedCandidate[],
   k: number,
-  lambda = 0.7,
+  lambda = 0.78,
 ): RankedCandidate[] {
   if (ranked.length <= k) return ranked;
   const selected: RankedCandidate[] = [];
@@ -167,7 +208,9 @@ export function mmrSelect(
         const sim = pathSimilarity(cand.chunk.path, s.chunk.path);
         if (sim > maxSim) maxSim = sim;
       }
-      const mmr = lambda * rel - (1 - lambda) * maxSim;
+      // Slight preference for implementation when diversifying
+      const implBonus = IMPL_EXT.test(cand.chunk.path) ? 0.02 : 0;
+      const mmr = lambda * rel - (1 - lambda) * maxSim + implBonus;
       if (mmr > bestScore) {
         bestScore = mmr;
         bestIdx = i;
@@ -192,4 +235,12 @@ function pathSimilarity(a: string, b: string): number {
   return common / Math.max(pa.length, pb.length);
 }
 
-export { norm };
+/** Stable tie-break: prefer implementation paths when finals are close. */
+export function preferImplementation(a: RankedCandidate, b: RankedCandidate): number {
+  const da = a.final - b.final;
+  if (Math.abs(da) > 0.02) return da > 0 ? -1 : 1;
+  const ia = IMPL_EXT.test(a.chunk.path) ? 1 : 0;
+  const ib = IMPL_EXT.test(b.chunk.path) ? 1 : 0;
+  if (ia !== ib) return ib - ia;
+  return a.chunk.path.localeCompare(b.chunk.path);
+}

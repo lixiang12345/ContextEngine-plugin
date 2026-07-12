@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { featureScore, mmrSelect, rrfFuse } from "../src/search/rerank.js";
+import {
+  featureScore,
+  mmrSelect,
+  preferImplementation,
+  rrfFuse,
+} from "../src/search/rerank.js";
 import { analyzeQuery } from "../src/search/query-analyzer.js";
 import type { CodeChunk } from "../src/types.js";
 
@@ -25,6 +30,59 @@ describe("rerank", () => {
       content: "export function other() {}",
     };
     assert.ok(featureScore(chunk, q) > featureScore(other, q));
+  });
+
+  it("prefers implementation files over README markdown", () => {
+    const q = analyzeQuery("hybrid search reciprocal rank fusion");
+    const impl: CodeChunk = {
+      id: "1",
+      path: "src/search/hybrid.ts",
+      language: "typescript",
+      startLine: 1,
+      endLine: 40,
+      content: "export class HybridSearcher { search() {} }",
+      symbol: "HybridSearcher",
+      hash: "a",
+    };
+    const readme: CodeChunk = {
+      id: "2",
+      path: "README.md",
+      language: "markdown",
+      startLine: 1,
+      endLine: 40,
+      content: "Hybrid BM25 + semantic search for coding agents.",
+      symbol: "Hybrid",
+      hash: "b",
+    };
+    assert.ok(
+      featureScore(impl, q) > featureScore(readme, q),
+      "impl should outrank readme",
+    );
+  });
+
+  it("preferImplementation tie-breaks toward source files", () => {
+    const a = {
+      id: "1",
+      chunk: {
+        id: "1",
+        path: "README.md",
+        language: "markdown",
+        startLine: 1,
+        endLine: 2,
+        content: "x",
+        hash: "1",
+      },
+      channels: {},
+      rrf: 0.5,
+      features: 0.5,
+      final: 0.5,
+    };
+    const b = {
+      ...a,
+      id: "2",
+      chunk: { ...a.chunk, id: "2", path: "src/search/hybrid.ts", language: "typescript" },
+    };
+    assert.ok(preferImplementation(b, a) < 0);
   });
 
   it("rrf fuses lists", () => {

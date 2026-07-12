@@ -14,6 +14,7 @@ import {
   combineFinal,
   featureScore,
   mmrSelect,
+  preferImplementation,
   rrfFuse,
   type RankedCandidate,
 } from "./rerank.js";
@@ -83,7 +84,21 @@ export class HybridSearcher {
 
   async search(opts: SearchOptions): Promise<SearchHit[]> {
     const topK = opts.topK ?? 8;
-    const mode = opts.mode ?? "auto";
+    // Validated strategy (2026-07): with embeddings, pure semantic (+ soft
+    // impl boost / doc penalty inside the channel) wins conceptual Top-1.
+    // Feature rerank still applied after fusion; graph expand optional.
+    // Without embeddings, fall back to bm25 (+ features).
+    const requested = opts.mode ?? "auto";
+    const mode: "bm25" | "semantic" | "hybrid" =
+      requested === "auto"
+        ? this.hasSemantic
+          ? "semantic"
+          : "bm25"
+        : requested === "bm25" ||
+            requested === "semantic" ||
+            requested === "hybrid"
+          ? requested
+          : "bm25";
     const analyzed = analyzeQuery(opts.query);
     const candidateLimit = Math.max(topK * 8, 40);
 
@@ -124,8 +139,7 @@ export class HybridSearcher {
 
     const wantLexical = mode !== "semantic";
     const wantSemantic =
-      (mode === "semantic" || mode === "hybrid" || mode === "auto") &&
-      this.hasSemantic;
+      (mode === "semantic" || mode === "hybrid") && this.hasSemantic;
 
     // --- Channel 1: FTS5 or memory BM25 ---
     if (wantLexical) {
@@ -199,10 +213,13 @@ export class HybridSearcher {
       if (pathHits.length) lists.push(pathHits);
     }
 
-    // --- Channel 4: two-stage semantic ---
+    // --- Channel 4: two-stage semantic (query-instruct embedding) ---
     if (wantSemantic && this.embedder) {
       try {
-        const [qVec] = await this.embedder.embed([opts.query]);
+        const embedQuery =
+          this.embedder.embedQuery?.bind(this.embedder) ??
+          this.embedder.embed.bind(this.embedder);
+        const [qVec] = await embedQuery([opts.query]);
         // Stage-1 candidates: union of lexical channels, or all if small corpus
         let candIds = new Set<string>();
         for (const list of lists) {
@@ -223,7 +240,24 @@ export class HybridSearcher {
           if (!allow(id)) continue;
           const vec = this.embeddings.get(id);
           if (!vec) continue;
-          sem.push({ id, score: cosineSimilarity(qVec, vec) });
+          // Soft-penalize pure docs in the semantic channel itself
+          const chunk = this.chunksById.get(id);
+          let s = cosineSimilarity(qVec, vec);
+          if (chunk) {
+            if (
+              chunk.language === "markdown" ||
+              /\.mdx?$/i.test(chunk.path)
+            ) {
+              s *= 0.82;
+            }
+            if (
+              /\.(ts|tsx|js|jsx|py|go|rs|java)$/i.test(chunk.path) &&
+              chunk.language !== "markdown"
+            ) {
+              s *= 1.04;
+            }
+          }
+          sem.push({ id, score: s });
         }
         sem.sort((a, b) => b.score - a.score);
         const topSem = sem.slice(0, candidateLimit);
@@ -254,10 +288,25 @@ export class HybridSearcher {
       ) {
         continue;
       }
+      // Drop commit noise early unless history intent
+      if (
+        chunk.language === "git-commit" &&
+        !analyzed.prefersCommits &&
+        analyzed.intent !== "history"
+      ) {
+        continue;
+      }
       const feat = featureScore(chunk, analyzed);
       const semN = maxSem > 0 ? (channelSem.get(id) ?? 0) / maxSem : 0;
       const rrfN = maxRrf > 0 ? rrf / maxRrf : 0;
-      const final = combineFinal(rrfN, feat, semN, analyzed.intent);
+      const hasSem = channelSem.size > 0;
+      const final = combineFinal(
+        rrfN,
+        feat,
+        semN,
+        analyzed.intent,
+        hasSem,
+      );
       candidates.push({
         id,
         chunk,
@@ -273,9 +322,9 @@ export class HybridSearcher {
       });
     }
 
-    candidates.sort((a, b) => b.final - a.final);
+    candidates.sort(preferImplementation);
 
-    // Graph expansion on top seeds
+    // Graph expansion on top seeds (implementation-only edges preferred)
     const expandN = Math.max(4, Math.floor(topK / 2));
     const seedIds = candidates.slice(0, topK).map((c) => c.id);
     if (opts.expandGraph !== false && this.graph && seedIds.length > 0) {
@@ -295,22 +344,27 @@ export class HybridSearcher {
         ) {
           continue;
         }
+        if (chunk.language === "markdown") continue;
         const feat = featureScore(chunk, analyzed);
+        const hasSem = channelSem.size > 0;
         candidates.push({
           id,
           chunk,
           channels: { graph: 1 },
           rrf: 0.2,
           features: feat,
-          final: combineFinal(0.2, feat, 0, analyzed.intent) * 0.9,
+          final:
+            combineFinal(0.2, feat, 0, analyzed.intent, hasSem) * 0.9,
         });
       }
-      candidates.sort((a, b) => b.final - a.final);
+      candidates.sort(preferImplementation);
     }
 
     const diversify = opts.diversify !== false;
+    // When semantic is strong, diversify less aggressively (keep best ranks)
+    const lambda = channelSem.size > 0 ? 0.88 : 0.8;
     const pick = diversify
-      ? mmrSelect(candidates, topK + Math.floor(topK / 3), 0.72)
+      ? mmrSelect(candidates, topK + Math.floor(topK / 3), lambda)
       : candidates.slice(0, topK + Math.floor(topK / 3));
 
     const source: SearchHit["source"] =

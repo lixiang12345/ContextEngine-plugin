@@ -3,7 +3,13 @@ import type { EmbeddingsConfig } from "../types.js";
 export interface EmbeddingProvider {
   readonly model: string;
   embed(texts: string[]): Promise<number[][]>;
+  /** Query-time embedding with retrieval instruction (Qwen3 / Jina-style). */
+  embedQuery?(texts: string[]): Promise<number[][]>;
 }
+
+/** Default instruct for code retrieval queries (Qwen3-Embedding recommended). */
+export const CODE_RETRIEVAL_QUERY_INSTRUCT =
+  "Instruct: Given a programming task or natural language question about a codebase, retrieve the most relevant source code implementation.\nQuery:";
 
 /** OpenAI-compatible embeddings API (OpenAI, Azure, Ollama, Voyage-compatible proxies, etc.). */
 export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
@@ -11,15 +17,34 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly dimensions?: number;
+  private readonly queryInstruct: string;
 
   constructor(config: EmbeddingsConfig) {
     this.apiKey = config.apiKey;
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.model = config.model;
     this.dimensions = config.dimensions;
+    this.queryInstruct =
+      process.env.CONTEXTENGINE_EMBED_QUERY_INSTRUCT?.trim() ||
+      CODE_RETRIEVAL_QUERY_INSTRUCT;
   }
 
   async embed(texts: string[]): Promise<number[][]> {
+    return this.embedRaw(texts);
+  }
+
+  async embedQuery(texts: string[]): Promise<number[][]> {
+    // Document vectors are stored without instruct; only queries get the prefix.
+    const prefixed = texts.map((t) => {
+      const body = t.trim();
+      if (!body) return body;
+      if (body.startsWith("Instruct:") || body.startsWith("Query:")) return body;
+      return `${this.queryInstruct}${body}`;
+    });
+    return this.embedRaw(prefixed);
+  }
+
+  private async embedRaw(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
     // Batch to avoid oversized payloads
     const batchSize = 64;
