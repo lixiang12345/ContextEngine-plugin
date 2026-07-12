@@ -4,6 +4,8 @@
 
 Multi-signal retrieval (FTS5 + symbols + path + optional embeddings + graph + MMR) so agents spend fewer tokens grepping and more turns shipping correct changes.
 
+**中文文档：** [README.zh-CN.md](./README.zh-CN.md)
+
 See [ARCHITECTURE.md](./ARCHITECTURE.md) and honest [COMPARISON.md](./COMPARISON.md) vs Augment.
 
 **New here?** Start with the path that matches your setup:
