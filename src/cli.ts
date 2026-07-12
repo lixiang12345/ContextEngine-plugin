@@ -13,27 +13,54 @@ program
   .description(
     "Portable Context Engine for AI coding agents — index, search, and pack codebase context.",
   )
-  .version("0.3.1");
+  .version("0.4.0");
 
 program
   .command("index")
-  .description("Index a workspace (incremental)")
+  .description("Index a workspace (incremental, multi-root via --extra or env)")
   .argument("[root]", "workspace root", process.cwd())
   .option("-d, --data-dir <dir>", "index data directory")
+  .option(
+    "-e, --extra <specs...>",
+    "extra roots name:path (e.g. docs:../docs api:../api)",
+  )
   .option("-q, --quiet", "less output")
-  .action(async (root: string, opts: { dataDir?: string; quiet?: boolean }) => {
+  .action(
+    async (
+      root: string,
+      opts: { dataDir?: string; quiet?: boolean; extra?: string[] },
+    ) => {
+    const extraRoots = (opts.extra ?? []).flatMap((spec) => {
+      const colon = spec.indexOf(":");
+      if (colon <= 0) return [];
+      return [
+        {
+          name: spec.slice(0, colon),
+          path: path.resolve(spec.slice(colon + 1)),
+          kind: spec.startsWith("docs")
+            ? ("docs" as const)
+            : ("code" as const),
+        },
+      ];
+    });
     const config = resolveEngineConfig({
       root: path.resolve(root),
       dataDir: opts.dataDir,
+      extraRoots: extraRoots.length ? extraRoots : undefined,
     });
     const engine = new ContextEngine(config);
     if (!opts.quiet) {
       console.log(`Indexing ${config.root}`);
+      if (config.extraRoots?.length) {
+        console.log(
+          `Extra roots: ${config.extraRoots.map((r) => r.name + ":" + r.path).join(", ")}`,
+        );
+      }
       console.log(`Data dir: ${config.dataDir}`);
       console.log(
         config.embeddings
           ? `Embeddings: ${config.embeddings.model} @ ${config.embeddings.baseUrl}`
-          : "Embeddings: off (BM25-only mode — set OPENAI_API_KEY or CONTEXTENGINE_EMBEDDING_API_KEY for semantic search)",
+          : "Embeddings: off (multi-signal FTS+symbol still on — set OPENAI_API_KEY for semantic)",
       );
     }
     let lastMsg = "";
@@ -60,7 +87,8 @@ program
         2,
       ),
     );
-  });
+  },
+  );
 
 program
   .command("search")

@@ -1,7 +1,7 @@
 {
   "name": "contextengine-plugin",
-  "version": "0.3.1",
-  "description": "A portable Context Engine for AI coding agents — hybrid BM25 + semantic retrieval over your codebase, exposed via MCP and CLI.",
+  "version": "0.4.0",
+  "description": "Augment-class portable Context Engine — multi-signal FTS/symbol/semantic retrieval, graph expand, MMR pack, MCP for coding agents.",
   "type": "module",
   "bin": {
     "contextengine": "./dist/cli.js",

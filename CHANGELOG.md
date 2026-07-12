@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — Augment-class retrieval stack
+
+- Multi-signal retrieval: FTS5 BM25 + symbol table + path hints + optional two-stage semantic
+- Query analyzer (symbol / path / concept / history intents)
+- Feature reranker + RRF fusion + MMR diversity packing
+- Multi-root indexing (`--extra docs:path`, `CONTEXTENGINE_EXTRA_ROOTS`)
+- Primary MCP tool: `codebase_retrieval` (Augment-style)
+- Eval metrics: Recall@k, MRR, nDCG@k
+- Architecture doc: `ARCHITECTURE.md`
+
 ## 0.3.1
 
 - CI workflow (build, test, self-eval)

@@ -1,8 +1,10 @@
 # ContextEngine Plugin
 
-**Portable codebase context for AI coding agents.**
+**Portable, Augment-class codebase context for AI coding agents.**
 
-Index your repository once. Give any MCP-compatible agent (Claude Code, Cursor, Codex, Zed, …) hybrid **BM25 + semantic** retrieval so it spends fewer tokens grepping and more turns shipping correct changes.
+Multi-signal retrieval (FTS5 + symbols + path + optional embeddings + graph + MMR) so agents spend fewer tokens grepping and more turns shipping correct changes.
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) and honest [COMPARISON.md](./COMPARISON.md) vs Augment.
 
 ```bash
 # index
@@ -25,21 +27,20 @@ Most coding agents explore large repos with repeated `grep` / `find` tool calls.
 
 | Capability | Status |
 |------------|--------|
-| Code chunking | Language-aware heuristics (TS/JS/Python/Go/Rust/Java/MD/…) |
-| Lexical search | BM25 over path + symbol + content |
-| Semantic search | Optional OpenAI-compatible embeddings |
-| Fusion | Reciprocal Rank Fusion (hybrid) |
-| Symbol / import graph | Expand hits via related files & symbols (Phase 2) |
-| Commit lineage | Recent git history as searchable context (Phase 2) |
-| Watch mode | Debounced incremental re-index (`contextengine watch`) |
-| Storage | Local SQLite (`node:sqlite`, no native compile) |
-| Agent interface | MCP tools + CLI + library API |
-| Incremental index | Content-hash skip for unchanged files |
-| Eval harness | `contextengine eval --self` path-recall checks |
-| Multi-repo profiles | Switch roots via `contextengine profile` |
-| Index share | `export-index` / `import-index` (SQLite file) |
+| Query understanding | Intent + identifier / path extraction |
+| Lexical search | SQLite **FTS5 BM25** (scales) |
+| Symbol search | Exact / prefix symbol table |
+| Semantic search | Optional embeddings, **two-stage** on candidates |
+| Fusion + rerank | RRF + code-aware feature scorer |
+| Diversity pack | MMR by path under token budget |
+| Symbol / import graph | Expand related files |
+| Multi-root | Code + docs/extra repos in one index |
+| Commit lineage | Recent git history chunks |
+| Watch mode | Debounced incremental re-index |
+| MCP | `codebase_retrieval` (primary) + search/file/index tools |
+| Eval | Recall@k, **MRR**, **nDCG@k** |
 
-**Honest comparison with Augment Context Engine:** [COMPARISON.md](./COMPARISON.md)
+**Honest comparison with Augment:** [COMPARISON.md](./COMPARISON.md) · **Design:** [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 ---
 
@@ -295,6 +296,14 @@ npm run mcp
 - Multi-repo profiles (`contextengine profile`)
 - Example MCP configs under `examples/`
 - CI, index export/import, comparison doc vs Augment
+
+### Phase 4 — ✅ `0.4.0` (Augment-class stack)
+
+- FTS5 + symbol + path multi-signal retrieval
+- Query analyzer, feature rerank, MMR pack
+- Multi-root / docs roots
+- `codebase_retrieval` MCP tool
+- MRR + nDCG metrics
 
 ---
 

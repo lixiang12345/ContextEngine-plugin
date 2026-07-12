@@ -28,10 +28,22 @@
 - [x] Index export / import for offline share
 - [x] COMPARISON vs Augment Context Engine
 
-## Future (optional, not blocking 1.0-usable)
+## Phase 4 — Augment-class quality (0.4.x) ✅
+
+- [x] Query analyzer + intent routing
+- [x] SQLite FTS5 scalable BM25
+- [x] Symbol table + path channel
+- [x] Feature rerank + RRF + MMR pack
+- [x] Two-stage semantic (candidate → embed score)
+- [x] Multi-root / docs roots
+- [x] `codebase_retrieval` MCP primary tool
+- [x] MRR + nDCG eval metrics
+
+## Future (optional)
 
 - [ ] Code-specialized embeddings / hard-negative training
 - [ ] SCIP / tsc / gopls symbol providers
-- [ ] Docs / wiki connectors
+- [ ] HTTP docs / wiki connectors + auto-sync
 - [ ] Distributed / remote index for huge monorepos
+- [ ] Open PR-generation benchmark suite
 - [ ] npm publish automation

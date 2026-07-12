@@ -4,7 +4,7 @@ This document is an honest capability gap analysis.
 **ContextEngine-plugin** is an open, portable retrieval layer.  
 **Augment Context Engine** is a commercial, productized context platform.
 
-Last updated: 2026-07-13 (based on public Augment product pages / MCP docs).
+Last updated: 2026-07-13 · ContextEngine **v0.4.0** (based on public Augment product pages / MCP docs).
 
 ---
 
@@ -23,17 +23,17 @@ Last updated: 2026-07-13 (based on public Augment product pages / MCP docs).
 | Capability | ContextEngine-plugin | Augment Context Engine | Gap severity |
 |------------|----------------------|------------------------|--------------|
 | MCP for Claude Code / Cursor / Zed | ✅ stdio MCP tools | ✅ polished multi-client MCP | Low |
-| Hybrid lexical + semantic search | ✅ BM25 + optional embeddings + RRF | ✅ specialized semantic retrieval | **High** (model quality) |
-| Code-native embeddings | ⚠️ Bring-your-own OpenAI-compatible API | ✅ **paired / trained retrieval models** for code | **High** |
+| Hybrid lexical + semantic search | ✅ FTS5 + symbol + path + RRF + feature rerank + optional embeddings | ✅ specialized semantic retrieval | **Medium** (model still theirs) |
+| Code-native embeddings | ⚠️ BYO OpenAI-compatible; two-stage rerank | ✅ **paired / trained retrieval models** for code | **High** |
 | Real-time local indexing | ✅ hash incremental + `watch` | ✅ local indexer, “next query reflects edits” | Medium |
-| Large monorepo scale | ⚠️ SQLite in-process; OK for small–medium | ✅ production indexing at monorepo scale | **High** |
-| Multi-repo / org index | ⚠️ local multi-**profiles** (switch roots) | ✅ multi-repo connectors, org-wide index | **High** |
-| Non-code sources (docs, wikis, tickets) | ❌ not built | ✅ Context Connectors (docs, GitHub/GitLab, …) | **High** |
+| Large monorepo scale | ⚠️ SQLite FTS5 in-process; better than v0.3 | ✅ production indexing at monorepo scale | **High** |
+| Multi-repo / org index | ✅ multi-root in one index + profiles | ✅ multi-repo connectors, org-wide index | Medium |
+| Non-code sources (docs, wikis, tickets) | ⚠️ docs/extra roots (local trees) | ✅ Context Connectors (docs, GitHub/GitLab, …) | Medium–High |
 | Commit / history context | ✅ recent git log as searchable chunks | ✅ deeper Context Lineage / history products | Medium |
-| Symbol / dependency awareness | ⚠️ lightweight import/symbol graph | ✅ deeper codebase understanding (proprietary) | **High** |
+| Symbol / dependency awareness | ✅ symbol table + import graph expand | ✅ deeper codebase understanding (proprietary) | Medium |
 | Team index sharing | ⚠️ file export/import of SQLite | ✅ share indexes across team | Medium |
 | Enterprise security / auth | ❌ none | ✅ private repos, proof-of-possession, trust center | **High** |
-| Benchmarked agent quality lift | ⚠️ small self-eval harness | ✅ published PR benchmarks (e.g. Elasticsearch 300 PRs) | **High** |
+| Benchmarked agent quality lift | ✅ Recall/MRR/nDCG harness (not full PR eval) | ✅ published PR benchmarks (e.g. Elasticsearch 300 PRs) | **High** |
 | Agent quality / token efficiency claims | Not claimed | Claims fewer tool calls, faster completion | Product |
 | Open source / self-host | ✅ | ❌ (product) | Our advantage |
 | Offline / no SaaS | ✅ BM25-only works offline | Partial (local indexer, cloud product) | Our advantage |

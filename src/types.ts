@@ -18,6 +18,15 @@ export interface SearchHit {
   /** bm25 | semantic | hybrid */
   source: "bm25" | "semantic" | "hybrid";
   preview: string;
+  /** Per-channel scores when multi-signal retrieval is used */
+  channels?: {
+    fts?: number;
+    symbol?: number;
+    path?: number;
+    semantic?: number;
+    graph?: number;
+  };
+  intent?: string;
 }
 
 export interface IndexStats {
@@ -29,6 +38,7 @@ export interface IndexStats {
   embeddingModel: string | null;
   lastIndexedAt: string | null;
   indexVersion: number;
+  hasFts?: boolean;
 }
 
 export interface EmbeddingsConfig {
@@ -38,9 +48,21 @@ export interface EmbeddingsConfig {
   dimensions?: number;
 }
 
+/** Additional root to index (multi-repo / docs). */
+export interface IndexRoot {
+  /** Short alias used as path prefix when multiple roots exist. */
+  name: string;
+  /** Absolute path */
+  path: string;
+  /** code | docs */
+  kind?: "code" | "docs";
+}
+
 export interface EngineConfig {
-  /** Absolute path to the workspace / repo root. */
+  /** Absolute path to the primary workspace / repo root. */
   root: string;
+  /** Extra roots (other repos, docs trees). */
+  extraRoots?: IndexRoot[];
   /** Directory that stores the SQLite index (default: <root>/.contextengine). */
   dataDir: string;
   embeddings?: EmbeddingsConfig;
@@ -61,6 +83,8 @@ export interface SearchOptions {
   expandGraph?: boolean;
   /** Include git commit lineage chunks (default true). */
   includeCommits?: boolean;
+  /** MMR path diversity when packing ranking (default true). */
+  diversify?: boolean;
 }
 
 export interface TaskContextOptions {
@@ -68,6 +92,8 @@ export interface TaskContextOptions {
   topK?: number;
   maxTokens?: number;
   pathPrefix?: string;
+  /** Use MMR diversification (default true). */
+  diversify?: boolean;
 }
 
 export interface PackedContext {

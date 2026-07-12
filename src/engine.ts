@@ -1,6 +1,7 @@
 import path from "node:path";
 import type {
   EngineConfig,
+  IndexRoot,
   IndexStats,
   PackedContext,
   SearchHit,
@@ -8,15 +9,19 @@ import type {
   TaskContextOptions,
 } from "./types.js";
 import { dbPathFor, resolveEngineConfig } from "./config.js";
-import { indexWorkspace, type IndexResult } from "./indexer/indexer.js";
+import {
+  indexWorkspace,
+  parseExtraRootsFromEnv,
+  type IndexResult,
+} from "./indexer/indexer.js";
 import { SqliteStore, storeExists } from "./store/sqlite-store.js";
 import { HybridSearcher } from "./search/hybrid.js";
 import { createEmbeddingProvider } from "./embeddings/provider.js";
 import { readTextFile } from "./util/fs.js";
+import { analyzeQuery } from "./search/query-analyzer.js";
 
 /**
- * High-level Context Engine API.
- * Safe to use from CLI, MCP, or as a library.
+ * High-level Context Engine API (v0.4 multi-signal retrieval).
  */
 export class ContextEngine {
   readonly config: EngineConfig;
@@ -30,8 +35,15 @@ export class ContextEngine {
   static open(opts: {
     root?: string;
     dataDir?: string;
+    extraRoots?: IndexRoot[];
   } = {}): ContextEngine {
-    return new ContextEngine(resolveEngineConfig(opts));
+    const cfg = resolveEngineConfig(opts);
+    if (opts.extraRoots) cfg.extraRoots = opts.extraRoots;
+    else if (!cfg.extraRoots?.length) {
+      const envRoots = parseExtraRootsFromEnv();
+      if (envRoots.length) cfg.extraRoots = envRoots;
+    }
+    return new ContextEngine(cfg);
   }
 
   get dbPath(): string {
@@ -43,7 +55,6 @@ export class ContextEngine {
   ): Promise<IndexResult> {
     this.close();
     const result = await indexWorkspace(this.config, onProgress);
-    // reopen after index
     this.ensureStore();
     this.reloadSearcher();
     return result;
@@ -64,33 +75,46 @@ export class ContextEngine {
   }
 
   /**
-   * Pack high-signal context for a natural-language engineering task.
-   * Designed for coding agents: path + line range + content under a token budget.
+   * Pack high-signal context for an engineering task (MMR + budget).
+   * Primary agent entrypoint — mirrors Augment-style "retrieve then edit".
    */
   async getTaskContext(opts: TaskContextOptions): Promise<PackedContext> {
     const topK = opts.topK ?? 12;
     const maxTokens = opts.maxTokens ?? 6000;
+    const analyzed = analyzeQuery(opts.task);
+
     const hits = await this.search({
       query: opts.task,
       topK,
       pathPrefix: opts.pathPrefix,
       mode: "auto",
+      diversify: opts.diversify !== false,
+      includeCommits: analyzed.prefersCommits ? true : undefined,
     });
 
     const parts: string[] = [
       `# Task context`,
       ``,
       `Task: ${opts.task}`,
+      `Intent: ${analyzed.intent}`,
+      analyzed.identifiers.length
+        ? `Identifiers: ${analyzed.identifiers.slice(0, 8).join(", ")}`
+        : null,
       ``,
-      `Retrieved ${hits.length} chunks (ranked).`,
+      `Retrieved ${hits.length} chunks (multi-signal rank + diversity).`,
       ``,
-    ];
+    ].filter((x): x is string => x !== null);
 
     let tokens = estimateTokens(parts.join("\n"));
     let truncated = false;
     const used: SearchHit[] = [];
+    const seenPaths = new Set<string>();
 
     for (const hit of hits) {
+      // Soft cap: avoid flooding same file unless high score
+      const pathCount = [...seenPaths].filter((p) => p === hit.chunk.path).length;
+      if (pathCount >= 2 && hit.score < 0.55 && used.length >= 3) continue;
+
       const block = formatHit(hit);
       const blockTokens = estimateTokens(block);
       if (tokens + blockTokens > maxTokens && used.length > 0) {
@@ -100,6 +124,7 @@ export class ContextEngine {
       parts.push(block);
       tokens += blockTokens;
       used.push(hit);
+      seenPaths.add(hit.chunk.path);
     }
 
     return {
@@ -111,20 +136,46 @@ export class ContextEngine {
     };
   }
 
-  /** Read a file (optionally a line range) from the workspace. */
+  /**
+   * Augment-style single-shot codebase retrieval for agents.
+   */
+  async codebaseRetrieval(
+    informationRequest: string,
+    opts?: { topK?: number; maxTokens?: number },
+  ): Promise<PackedContext> {
+    return this.getTaskContext({
+      task: informationRequest,
+      topK: opts?.topK ?? 14,
+      maxTokens: opts?.maxTokens ?? 8000,
+      diversify: true,
+    });
+  }
+
   getFileContext(
     relPath: string,
     startLine?: number,
     endLine?: number,
   ): { path: string; content: string; startLine: number; endLine: number } | null {
-    const abs = path.join(this.config.root, relPath);
-    const text = readTextFile(abs);
-    if (text === null) return null;
-    const lines = text.replace(/\r\n/g, "\n").split("\n");
-    const s = Math.max(1, startLine ?? 1);
-    const e = Math.min(lines.length, endLine ?? lines.length);
-    const slice = lines.slice(s - 1, e).join("\n");
-    return { path: relPath, content: slice, startLine: s, endLine: e };
+    // Support multi-root prefixed paths: main/src/x.ts or docs/guide.md
+    const extras = this.config.extraRoots ?? [];
+    if (extras.length > 0 || relPath.includes("/")) {
+      const first = relPath.split("/")[0];
+      if (first === "main") {
+        const rest = relPath.slice("main/".length);
+        return readRange(path.join(this.config.root, rest), relPath, startLine, endLine);
+      }
+      const match = extras.find((r) => r.name === first);
+      if (match) {
+        const rest = relPath.slice(first.length + 1);
+        return readRange(path.join(match.path, rest), relPath, startLine, endLine);
+      }
+    }
+    return readRange(
+      path.join(this.config.root, relPath),
+      relPath,
+      startLine,
+      endLine,
+    );
   }
 
   close(): void {
@@ -155,23 +206,48 @@ export class ContextEngine {
   private reloadSearcher(): void {
     const store = this.ensureStore();
     const embedder = createEmbeddingProvider(this.config.embeddings);
-    const model = embedder?.model ?? store.getMeta("embedding_model") ?? undefined;
+    const model =
+      embedder?.model ?? store.getMeta("embedding_model") ?? undefined;
     const searcher = new HybridSearcher();
+    // For large indexes keep chunks in memory for graph/feature scoring;
+    // FTS/symbol queries hit SQLite.
     searcher.load({
       chunks: store.getAllChunks(),
       embeddings: store.getEmbeddings(model),
       embedder,
+      store,
     });
     this.searcher = searcher;
   }
 }
 
+function readRange(
+  abs: string,
+  displayPath: string,
+  startLine?: number,
+  endLine?: number,
+): { path: string; content: string; startLine: number; endLine: number } | null {
+  const text = readTextFile(abs);
+  if (text === null) return null;
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const s = Math.max(1, startLine ?? 1);
+  const e = Math.min(lines.length, endLine ?? lines.length);
+  const slice = lines.slice(s - 1, e).join("\n");
+  return { path: displayPath, content: slice, startLine: s, endLine: e };
+}
+
 function formatHit(hit: SearchHit): string {
-  const { chunk, score, source } = hit;
-  const header = [
+  const { chunk, score, source, channels, intent } = hit;
+  const ch = channels
+    ? Object.entries(channels)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}=${(v as number).toFixed(3)}`)
+        .join(" ")
+    : "";
+  return [
     `## ${chunk.path}:${chunk.startLine}-${chunk.endLine}`,
     chunk.symbol ? `symbol: ${chunk.symbol}` : null,
-    `lang: ${chunk.language} · score: ${score.toFixed(4)} · via: ${source}`,
+    `lang: ${chunk.language} · score: ${score.toFixed(4)} · via: ${source}${intent ? ` · intent: ${intent}` : ""}${ch ? ` · ${ch}` : ""}`,
     "```" + (chunk.language === "tsx" ? "tsx" : chunk.language),
     chunk.content,
     "```",
@@ -179,10 +255,8 @@ function formatHit(hit: SearchHit): string {
   ]
     .filter(Boolean)
     .join("\n");
-  return header;
 }
 
-/** Rough token estimate (~4 chars / token). */
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }

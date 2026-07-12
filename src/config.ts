@@ -58,6 +58,7 @@ export function resolveEngineConfig(opts: {
   dataDir?: string;
   maxFileBytes?: number;
   maxChunkChars?: number;
+  extraRoots?: import("./types.js").IndexRoot[];
 }): EngineConfig {
   const root = path.resolve(opts.root ?? process.cwd());
   const dataDir = path.resolve(
@@ -66,6 +67,7 @@ export function resolveEngineConfig(opts: {
   return {
     root,
     dataDir,
+    extraRoots: opts.extraRoots,
     embeddings: resolveEmbeddingsConfig(),
     maxFileBytes: opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
     maxChunkChars: opts.maxChunkChars ?? DEFAULT_MAX_CHUNK_CHARS,

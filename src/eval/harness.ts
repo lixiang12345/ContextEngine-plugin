@@ -1,13 +1,9 @@
 import type { ContextEngine } from "../engine.js";
 
 export interface EvalCase {
-  /** Unique id */
   id: string;
-  /** Natural language query / task */
   query: string;
-  /** Paths that should appear in top results (substring match on path) */
   expectPaths: string[];
-  /** Optional symbols that should appear */
   expectSymbols?: string[];
   topK?: number;
 }
@@ -17,6 +13,10 @@ export interface EvalCaseResult {
   query: string;
   hitPaths: string[];
   recallAtK: number;
+  /** Reciprocal rank of first relevant path (0 if none) */
+  mrr: number;
+  /** nDCG@k treating expected paths as graded 1 */
+  ndcgAtK: number;
   pathHits: number;
   expected: number;
   symbolHits: number;
@@ -28,12 +28,41 @@ export interface EvalReport {
   passed: number;
   failed: number;
   meanRecallAtK: number;
+  meanMrr: number;
+  meanNdcgAtK: number;
   cases: EvalCaseResult[];
 }
 
-/**
- * Lightweight retrieval eval: did we surface the right files for each task?
- */
+function dcg(rels: number[]): number {
+  let s = 0;
+  for (let i = 0; i < rels.length; i++) {
+    s += rels[i] / Math.log2(i + 2);
+  }
+  return s;
+}
+
+function ndcgAtK(hitPaths: string[], expectPaths: string[], k: number): number {
+  const rels = hitPaths.slice(0, k).map((p) =>
+    expectPaths.some((e) => p.includes(e)) ? 1 : 0,
+  );
+  const ideal = [
+    ...Array(Math.min(expectPaths.length, k)).fill(1),
+    ...Array(Math.max(0, k - expectPaths.length)).fill(0),
+  ].slice(0, k);
+  const idcg = dcg(ideal);
+  if (idcg <= 0) return 0;
+  return Math.min(1, dcg(rels) / idcg);
+}
+
+function mrrOf(hitPaths: string[], expectPaths: string[]): number {
+  for (let i = 0; i < hitPaths.length; i++) {
+    if (expectPaths.some((e) => hitPaths[i].includes(e))) {
+      return 1 / (i + 1);
+    }
+  }
+  return 0;
+}
+
 export async function runEval(
   engine: ContextEngine,
   cases: EvalCase[],
@@ -47,6 +76,7 @@ export async function runEval(
       topK,
       mode: "auto",
       expandGraph: true,
+      diversify: true,
     });
     const hitPaths = hits.map((h) => h.chunk.path);
     const hitSymbols = hits
@@ -59,6 +89,8 @@ export async function runEval(
     }
     const expected = c.expectPaths.length || 1;
     const recallAtK = pathHits / expected;
+    const mrr = mrrOf(hitPaths, c.expectPaths);
+    const ndcgAtKScore = ndcgAtK(hitPaths, c.expectPaths, topK);
 
     let symbolHits = 0;
     for (const sym of c.expectSymbols ?? []) {
@@ -67,6 +99,7 @@ export async function runEval(
 
     const passed =
       pathHits === expected &&
+      mrr > 0 &&
       (c.expectSymbols?.length
         ? symbolHits >= Math.min(1, c.expectSymbols.length)
         : true);
@@ -76,6 +109,8 @@ export async function runEval(
       query: c.query,
       hitPaths,
       recallAtK,
+      mrr,
+      ndcgAtK: ndcgAtKScore,
       pathHits,
       expected,
       symbolHits,
@@ -84,19 +119,19 @@ export async function runEval(
   }
 
   const passed = results.filter((r) => r.passed).length;
-  const meanRecallAtK =
-    results.reduce((s, r) => s + r.recallAtK, 0) / (results.length || 1);
+  const n = results.length || 1;
 
   return {
     total: results.length,
     passed,
     failed: results.length - passed,
-    meanRecallAtK,
+    meanRecallAtK: results.reduce((s, r) => s + r.recallAtK, 0) / n,
+    meanMrr: results.reduce((s, r) => s + r.mrr, 0) / n,
+    meanNdcgAtK: results.reduce((s, r) => s + r.ndcgAtK, 0) / n,
     cases: results,
   };
 }
 
-/** Built-in smoke cases targeting this repository's own sources. */
 export function defaultSelfEvalCases(): EvalCase[] {
   return [
     {
@@ -123,6 +158,22 @@ export function defaultSelfEvalCases(): EvalCase[] {
       id: "commits",
       query: "git commit lineage harvest history",
       expectPaths: ["src/lineage/commits.ts"],
+    },
+    {
+      id: "symbol-exact",
+      query: "analyzeQuery",
+      expectPaths: ["src/search/query-analyzer.ts"],
+      expectSymbols: ["analyzeQuery"],
+    },
+    {
+      id: "rerank",
+      query: "featureScore mmrSelect code-aware ranking",
+      expectPaths: ["src/search/rerank.ts"],
+    },
+    {
+      id: "fts-store",
+      query: "FTS5 chunks_fts symbol table sqlite store",
+      expectPaths: ["src/store/sqlite-store.ts"],
     },
   ];
 }

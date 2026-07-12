@@ -19,7 +19,9 @@ export { resolveEngineConfig, resolveEmbeddingsConfig, loadDotEnv } from "./conf
 export { chunkFile } from "./chunker/code-chunker.js";
 export { Bm25Index, tokenize } from "./search/bm25.js";
 export { HybridSearcher } from "./search/hybrid.js";
-export { indexWorkspace } from "./indexer/indexer.js";
+export { analyzeQuery, toFtsQuery } from "./search/query-analyzer.js";
+export { featureScore, mmrSelect, rrfFuse } from "./search/rerank.js";
+export { indexWorkspace, parseExtraRootsFromEnv } from "./indexer/indexer.js";
 export { watchAndIndex } from "./indexer/watch.js";
 export { SqliteStore } from "./store/sqlite-store.js";
 export { exportIndex, importIndex } from "./store/export-import.js";
@@ -40,6 +42,7 @@ export type {
   EvalReport,
 } from "./eval/harness.js";
 export type { RepoProfile, MultiRepoConfig } from "./config/profiles.js";
+export type { AnalyzedQuery, QueryIntent } from "./search/query-analyzer.js";
 
 export type {
   CodeChunk,
@@ -51,4 +54,5 @@ export type {
   EngineConfig,
   EmbeddingsConfig,
   IndexProgress,
+  IndexRoot,
 } from "./types.js";
