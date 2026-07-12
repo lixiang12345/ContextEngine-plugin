@@ -24,11 +24,20 @@ program
     "-e, --extra <specs...>",
     "extra roots name:path (e.g. docs:../docs api:../api)",
   )
+  .option(
+    "--exclude <patterns...>",
+    "extra gitignore-style exclude patterns (repeatable)",
+  )
   .option("-q, --quiet", "less output")
   .action(
     async (
       root: string,
-      opts: { dataDir?: string; quiet?: boolean; extra?: string[] },
+      opts: {
+        dataDir?: string;
+        quiet?: boolean;
+        extra?: string[];
+        exclude?: string[];
+      },
     ) => {
     const extraRoots = (opts.extra ?? []).flatMap((spec) => {
       const colon = spec.indexOf(":");
@@ -47,6 +56,7 @@ program
       root: path.resolve(root),
       dataDir: opts.dataDir,
       extraRoots: extraRoots.length ? extraRoots : undefined,
+      extraIgnores: opts.exclude,
     });
     const engine = new ContextEngine(config);
     if (!opts.quiet) {

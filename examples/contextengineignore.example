@@ -1,0 +1,12 @@
+# Copy to repo root as .contextengineignore (or use .augmentignore — both work)
+# Gitignore syntax. Applied after .gitignore.
+
+# Large fixtures / generated
+**/fixtures/
+**/testdata/
+**/*.generated.*
+**/generated/
+
+# Local-only
+.tmp/
+scratch/

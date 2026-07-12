@@ -16,9 +16,19 @@ const SPLIT_PATTERNS: Record<string, RegExp> = {
     /^(?:public|private|protected|static|final|abstract|\s)*(?:class|interface|enum|record)\s+\w+/,
   kotlin:
     /^(?:public|private|protected|internal|\s)*(?:fun|class|interface|object|data class|sealed class)\s+/,
+  scala:
+    /^(?:(?:private|protected|override|final|abstract|sealed|case)\s+)*(?:class|object|trait|def|val|var|type)\s+/,
   ruby: /^(?:module|class|def)\s+/,
   csharp:
     /^(?:public|private|protected|internal|static|sealed|abstract|\s)*(?:class|interface|struct|enum|record)\s+\w+/,
+  // C / C++: functions, structs, classes, namespaces
+  c: /^(?:(?:static|inline|extern|const|unsigned|signed|struct|enum|union)\s+)*[\w\s\*]+\s+\**[A-Za-z_][\w]*\s*\(|^(?:typedef\s+)?(?:struct|enum|union)\s+[A-Za-z_]/,
+  cpp: /^(?:(?:template\s*<[^>]*>\s*)?(?:(?:inline|static|virtual|constexpr|explicit|friend)\s+)*(?:class|struct|enum|namespace|using)\s+)|^(?:(?:template\s*<[^>]*>\s*)?(?:[\w:<>\*&~\s]+)\s+[A-Za-z_~][\w]*\s*\()/,
+  "objective-c": /^(?:@interface|@implementation|@protocol)\b|^(?:[-+]\s*\()/,
+  "objective-cpp": /^(?:@interface|@implementation|@protocol)\b|^(?:[-+]\s*\()/,
+  swift: /^(?:(?:public|private|internal|open|fileprivate|static|final|override)\s+)*(?:func|class|struct|enum|protocol|extension|actor)\s+/,
+  dart: /^(?:(?:abstract|class|mixin|extension|enum|typedef)\s+)|^(?:(?:static|final|const|Future|void|[\w<>,\s]+)\s+)?[A-Za-z_][\w]*\s*\(/,
+  php: /^(?:(?:public|private|protected|static|final|abstract)\s+)*(?:function|class|interface|trait|enum)\s+/,
   markdown: /^#{1,3}\s+/,
 };
 
@@ -31,17 +41,25 @@ const BRACE_LANGS = new Set([
   "rust",
   "java",
   "kotlin",
+  "scala",
   "csharp",
   "c",
   "cpp",
+  "objective-c",
+  "objective-cpp",
+  "swift",
+  "dart",
+  "php",
 ]);
 
 const SYMBOL_EXTRACTORS: Array<{ re: RegExp; group: number }> = [
   {
-    re: /(?:function\*?|class|interface|type|enum|def|fn|struct|trait|mod|fun)\s+([A-Za-z_][\w]*)/,
+    re: /(?:function\*?|class|interface|type|enum|def|fn|struct|trait|mod|fun|protocol|extension|namespace|record)\s+([A-Za-z_][\w]*)/,
     group: 1,
   },
-  { re: /(?:const|let|var)\s+([A-Za-z_][\w]*)\s*=/, group: 1 },
+  { re: /(?:const|let|var|val)\s+([A-Za-z_][\w]*)\s*=/, group: 1 },
+  // C/C++-ish function name before (
+  { re: /\b([A-Za-z_][\w]*)\s*\([^;]*\)\s*\{/, group: 1 },
   { re: /^#+\s+(.+)$/m, group: 1 },
 ];
 

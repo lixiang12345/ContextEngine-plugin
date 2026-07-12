@@ -70,6 +70,11 @@ export interface EngineConfig {
   maxFileBytes: number;
   /** Preferred max characters per chunk. */
   maxChunkChars: number;
+  /**
+   * Extra gitignore-style exclude patterns (CLI --exclude / CONTEXTENGINE_EXCLUDE).
+   * Applied on top of defaults + .gitignore + .augmentignore + .contextengineignore.
+   */
+  extraIgnores?: string[];
 }
 
 export interface SearchOptions {

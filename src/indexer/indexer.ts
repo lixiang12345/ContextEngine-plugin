@@ -90,9 +90,15 @@ export async function indexWorkspace(
     size: number;
   };
 
+  const extraIgnores = [
+    ...(config.extraIgnores ?? []),
+    ...parseExcludeEnv(),
+  ];
   const jobs: FileJob[] = [];
   for (const root of roots) {
-    const files = walkSourceFiles(root.absPath, config.maxFileBytes);
+    const files = walkSourceFiles(root.absPath, config.maxFileBytes, {
+      extraIgnores,
+    });
     for (const f of files) {
       jobs.push({
         root,
@@ -307,4 +313,14 @@ export function parseExtraRootsFromEnv(): IndexRoot[] {
     }
   }
   return out;
+}
+
+/** CONTEXTENGINE_EXCLUDE=vendor/,*.generated.ts,tmp/** */
+export function parseExcludeEnv(): string[] {
+  const raw = process.env.CONTEXTENGINE_EXCLUDE ?? "";
+  if (!raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }

@@ -217,8 +217,26 @@ contextengine import-index ./share.db
 | `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API base |
 | `OPENAI_EMBEDDING_MODEL` / `CONTEXTENGINE_EMBEDDING_MODEL` | Model name |
 
-Ignore rules: respects `.gitignore` plus built-in defaults (`node_modules`, `dist`, binaries, …).  
-Optional: `.contextengineignore` (gitignore syntax).
+### Ignore / exclude rules (Augment-compatible)
+
+Indexing **filters** files like Augment Context Connectors:
+
+1. **Built-in smart filters** — `node_modules/`, `vendor/`, `dist/`, `build/`, `target/`, binaries, locks, `.env` secrets, IDE junk, …
+2. **`.gitignore`** (root + nested directory rules)
+3. **`.augmentignore`** (same semantics as Augment; supports `!` re-include)
+4. **`.contextengineignore`** (product-specific)
+5. **CLI / env** — `contextengine index --exclude 'vendor/**' '**/*.generated.*'` or `CONTEXTENGINE_EXCLUDE=...`
+
+Example `.augmentignore` (from Augment docs pattern):
+
+```bash
+# re-include something that is gitignored
+!some-tracked-deps/
+
+# exclude fixtures / local data
+data/test.json
+*.tmp
+```
 
 ---
 
