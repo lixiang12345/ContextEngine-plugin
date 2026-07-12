@@ -39,11 +39,19 @@
 - [x] `codebase_retrieval` MCP primary tool
 - [x] MRR + nDCG eval metrics
 
+## Phase 5 — Closer to Augment-class quality (in progress)
+
+- [x] Optional neural `/v1/rerank` second stage (`CONTEXTENGINE_NEURAL_RERANK=1`)
+- [x] Production hybrid defaults + adaptive embed batch (prior)
+- [x] Getting-started + deploy docs for Path A/B/C
+- [ ] Default-on neural rerank after code-tuned eval (currently opt-in)
+- [ ] SCIP / tsc / gopls symbol providers (optional peer)
+- [ ] Stronger task-query rewrite / multi-hop subqueries
+
 ## Future (optional)
 
 - [ ] Code-specialized embeddings / hard-negative training
-- [ ] SCIP / tsc / gopls symbol providers
-- [ ] HTTP docs / wiki connectors + auto-sync
+- [ ] HTTP docs / wiki / GitHub connectors + auto-sync
 - [ ] Distributed / remote index for huge monorepos
-- [ ] Open PR-generation benchmark suite
+- [ ] Open PR-generation / agent task benchmark suite
 - [ ] npm publish automation

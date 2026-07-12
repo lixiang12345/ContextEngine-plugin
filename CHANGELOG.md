@@ -2,11 +2,12 @@
 
 ## Unreleased
 
+- Optional neural `/v1/rerank` second stage (`CONTEXTENGINE_NEURAL_RERANK=1`) blended after hybrid+feature scoring
 - Production hybrid retrieval defaults (auto → hybrid when embeddings exist)
 - Stronger multi-lang implementation-first rerank (tests/headers/docs penalties)
 - Adaptive embedding batch + `CONTEXTENGINE_EMBED_MAX_CHARS` for 12GB GPUs
 - Default ignores for heavy `jvmTest` / android test / testdata trees
-- Docs: GPU deploy guide (`docs/DEPLOY_EMBED_RERANK.md`), multilang bench refresh
+- Docs: GPU deploy guide, getting-started paths, multilang bench refresh
 - Ship `scripts/embed_rerank_server.py` (OpenAI-compatible embed + optional Qwen3 rerank)
 
 ## 0.4.0 — Augment-class retrieval stack

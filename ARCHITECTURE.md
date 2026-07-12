@@ -22,6 +22,7 @@ understand query → multi-signal retrieve → fuse → rerank → expand → pa
 | Semantic | Optional embeddings, **two-stage**: FTS candidates → embed rerank | Quality of hybrid without scanning all vectors every time |
 | Fusion | Reciprocal Rank Fusion across channels | Robust when one channel is wrong |
 | Rerank | Feature scorer (symbol/path/ident/overlap/lang) | Cheap “code-aware” ranking without a cross-encoder |
+| Neural rerank | Optional `/v1/rerank` blend on top-N (`CONTEXTENGINE_NEURAL_RERANK`) | Cross-encoder style second stage when GPU server is available |
 | Expand | Import/symbol graph | Related files Augment-style |
 | Pack | MMR diversity + token budget | Fewer tokens, less duplicate noise |
 | Multi-source | Multi-root + docs roots in one index | Partial multi-source story |
@@ -52,9 +53,13 @@ Those are product/company investments. v0.4 maximizes **open, local quality**.
                        ▼
                  Feature rerank
                        ▼
+              Neural rerank* (opt-in)
+                       ▼
                  Graph expand
                        ▼
                   MMR pack ──► agent / MCP
 ```
+
+\*Neural: `POST /v1/rerank` on top-N candidates; disabled unless `CONTEXTENGINE_NEURAL_RERANK=1`.
 
 \*Semantic: embed query once; score only top‑N FTS/symbol candidates when corpus is large.

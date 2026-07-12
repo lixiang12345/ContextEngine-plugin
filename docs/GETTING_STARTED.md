@@ -205,6 +205,9 @@ Templates:
 | `CONTEXTENGINE_EMBED_BATCH` | Chunks per embed request (default `8`; lower on OOM) |
 | `CONTEXTENGINE_EMBED_MAX_CHARS` | Truncate chunk text before embed |
 | `CONTEXTENGINE_EMBED_QUERY_INSTRUCT` | Override query instruct prefix (Qwen3-style) |
+| `CONTEXTENGINE_NEURAL_RERANK` | `1` = optional neural `/v1/rerank` second stage |
+| `CONTEXTENGINE_RERANK_MODEL` | Rerank model (default Qwen3-Reranker-0.6B) |
+| `CONTEXTENGINE_RERANK_TOP_N` / `_WEIGHT` | Candidates + blend weight |
 
 Full CLI: see root [README.md](../README.md).
 

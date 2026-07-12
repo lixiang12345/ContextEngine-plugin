@@ -18,6 +18,12 @@ import {
   rrfFuse,
   type RankedCandidate,
 } from "./rerank.js";
+import {
+  blendNeuralScores,
+  formatRerankDocument,
+  neuralRerankScores,
+  type NeuralRerankConfig,
+} from "./neural-rerank.js";
 import type { SqliteStore } from "../store/sqlite-store.js";
 
 export interface HybridSearchInput {
@@ -26,6 +32,8 @@ export interface HybridSearchInput {
   embedder?: EmbeddingProvider | null;
   /** When set, use FTS5 + symbol tables for scalable retrieval */
   store?: SqliteStore | null;
+  /** Optional neural / cross-encoder rerank (Phase 5 alignment). */
+  neuralRerank?: NeuralRerankConfig | null;
 }
 
 function previewOf(content: string, max = 220): string {
@@ -44,6 +52,7 @@ export class HybridSearcher {
   private embedder: EmbeddingProvider | null = null;
   private graph: SymbolGraph | null = null;
   private store: SqliteStore | null = null;
+  private neuralRerank: NeuralRerankConfig | null = null;
   private useMemoryBm25 = true;
 
   load(input: HybridSearchInput): void {
@@ -52,6 +61,7 @@ export class HybridSearcher {
     this.embeddings.clear();
     this.embedder = input.embedder ?? null;
     this.store = input.store ?? null;
+    this.neuralRerank = input.neuralRerank ?? null;
 
     const useFts = Boolean(this.store?.hasFts);
     this.useMemoryBm25 = !useFts;
@@ -322,6 +332,36 @@ export class HybridSearcher {
     }
 
     candidates.sort(preferImplementation);
+
+    // Optional neural / cross-encoder rerank on top candidates (Augment-class second stage)
+    const wantNeural =
+      opts.neuralRerank === true
+        ? this.neuralRerank !== null
+        : opts.neuralRerank === false
+          ? false
+          : this.neuralRerank !== null;
+    if (wantNeural && this.neuralRerank && candidates.length > 1) {
+      try {
+        const cfg = this.neuralRerank;
+        const slice = candidates.slice(0, Math.min(cfg.topN, candidates.length));
+        const docs = slice.map((c) => ({
+          id: c.id,
+          text: formatRerankDocument({
+            path: c.chunk.path,
+            symbol: c.chunk.symbol,
+            language: c.chunk.language,
+            content: c.chunk.content,
+            maxChars: cfg.maxDocChars,
+          }),
+        }));
+        const scores = await neuralRerankScores(cfg, opts.query, docs);
+        blendNeuralScores(slice, scores, cfg.weight);
+        // Re-sort full list: blended slice keeps new finals; rest unchanged
+        candidates.sort(preferImplementation);
+      } catch {
+        // Neural rerank is best-effort; keep feature/hybrid ranking
+      }
+    }
 
     // Graph expansion on top seeds (implementation-only edges preferred)
     const expandN = Math.max(4, Math.floor(topK / 2));

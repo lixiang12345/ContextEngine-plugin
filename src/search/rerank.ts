@@ -12,6 +12,7 @@ export interface RankedCandidate {
     path?: number;
     semantic?: number;
     graph?: number;
+    neural?: number;
   };
   rrf: number;
   features: number;

@@ -1,6 +1,13 @@
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { EmbeddingsConfig, EngineConfig } from "./types.js";
+import {
+  resolveNeuralRerankConfig,
+  type NeuralRerankConfig,
+} from "./search/neural-rerank.js";
+
+export type { NeuralRerankConfig };
+export { resolveNeuralRerankConfig };
 
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
 const DEFAULT_MAX_CHUNK_CHARS = 2400;
@@ -71,6 +78,7 @@ export function resolveEngineConfig(opts: {
     extraRoots: opts.extraRoots,
     extraIgnores: opts.extraIgnores,
     embeddings: resolveEmbeddingsConfig(),
+    neuralRerank: resolveNeuralRerankConfig(),
     maxFileBytes: opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
     maxChunkChars: opts.maxChunkChars ?? DEFAULT_MAX_CHUNK_CHARS,
   };

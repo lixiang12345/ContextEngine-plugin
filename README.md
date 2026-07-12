@@ -248,6 +248,13 @@ contextengine import-index ./share.db
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | Enable embeddings |
 | `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API base |
 | `OPENAI_EMBEDDING_MODEL` / `CONTEXTENGINE_EMBEDDING_MODEL` | Model name |
+| `CONTEXTENGINE_EMBED_BATCH` | Embed batch size (default `8`) |
+| `CONTEXTENGINE_EMBED_MAX_CHARS` | Truncate chunk text before embed |
+| `CONTEXTENGINE_NEURAL_RERANK` | `1` = enable optional neural `/v1/rerank` second stage |
+| `CONTEXTENGINE_RERANK_MODEL` | Rerank model id (default `Qwen/Qwen3-Reranker-0.6B`) |
+| `CONTEXTENGINE_RERANK_BASE_URL` | Rerank API base (defaults to embed base) |
+| `CONTEXTENGINE_RERANK_TOP_N` | Candidates sent to reranker (default `20`) |
+| `CONTEXTENGINE_RERANK_WEIGHT` | Blend weight into final score (default `0.32`) |
 
 ### Ignore / exclude rules (Augment-compatible)
 

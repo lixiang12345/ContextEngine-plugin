@@ -205,6 +205,9 @@ export OPENAI_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
 # Safer defaults on 12GB GPUs
 export CONTEXTENGINE_EMBED_BATCH=8
 export CONTEXTENGINE_EMBED_MAX_CHARS=3000
+# optional second-stage neural rerank (needs RERANK_MODEL on the server):
+# export CONTEXTENGINE_NEURAL_RERANK=1
+# export CONTEXTENGINE_RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
 
 cd /path/to/ContextEngine-plugin
 npm run build
@@ -274,8 +277,26 @@ WantedBy=multi-user.target
 |------------|--------|
 | Dense embeddings for index + search | **Yes** (required for production semantic mode) |
 | Query-time instruct prefix | **Yes** (`CODE_RETRIEVAL_QUERY_INSTRUCT`) |
-| Neural `/v1/rerank` in default search path | **Optional / not default** (feature + hybrid ranking already production-grade; neural rerank can boost docs over code if misused) |
+| Neural `/v1/rerank` in search path | **Optional** — set `CONTEXTENGINE_NEURAL_RERANK=1` (blends top-N after hybrid+features; default off so mis-tuned rerankers cannot promote docs over code) |
 | Multi-language structural chunking | **Yes** (see `docs/CHUNKING.md`) |
+
+### Enable neural rerank (optional second stage)
+
+Requires the same GPU server with `RERANK_MODEL` loaded (or any compatible `/v1/rerank`).
+
+```bash
+export CONTEXTENGINE_NEURAL_RERANK=1
+export CONTEXTENGINE_RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
+# optional overrides (default = same host as embeddings):
+# export CONTEXTENGINE_RERANK_BASE_URL=http://127.0.0.1:18000/v1
+# export CONTEXTENGINE_RERANK_TOP_N=20
+# export CONTEXTENGINE_RERANK_WEIGHT=0.32
+
+contextengine search "how does authentication work" --mode auto
+```
+
+Pipeline position: hybrid fuse + feature score → **neural blend on top-N** → graph expand → MMR pack.  
+Failures are best-effort (falls back to hybrid ranking).
 
 ---
 

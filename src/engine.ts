@@ -216,6 +216,7 @@ export class ContextEngine {
       embeddings: store.getEmbeddings(model),
       embedder,
       store,
+      neuralRerank: this.config.neuralRerank ?? null,
     });
     this.searcher = searcher;
   }

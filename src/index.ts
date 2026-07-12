@@ -15,7 +15,12 @@
  */
 
 export { ContextEngine, estimateTokens } from "./engine.js";
-export { resolveEngineConfig, resolveEmbeddingsConfig, loadDotEnv } from "./config.js";
+export {
+  resolveEngineConfig,
+  resolveEmbeddingsConfig,
+  resolveNeuralRerankConfig,
+  loadDotEnv,
+} from "./config.js";
 export { chunkFile } from "./chunker/code-chunker.js";
 export { Bm25Index, tokenize } from "./search/bm25.js";
 export { HybridSearcher } from "./search/hybrid.js";
@@ -27,6 +32,11 @@ export {
   preferImplementation,
   rrfFuse,
 } from "./search/rerank.js";
+export {
+  blendNeuralScores,
+  formatRerankDocument,
+  neuralRerankScores,
+} from "./search/neural-rerank.js";
 export { indexWorkspace, parseExtraRootsFromEnv } from "./indexer/indexer.js";
 export { watchAndIndex } from "./indexer/watch.js";
 export { SqliteStore } from "./store/sqlite-store.js";

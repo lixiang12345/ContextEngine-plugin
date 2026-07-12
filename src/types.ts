@@ -25,6 +25,8 @@ export interface SearchHit {
     path?: number;
     semantic?: number;
     graph?: number;
+    /** Neural / cross-encoder rerank (optional) */
+    neural?: number;
   };
   intent?: string;
 }
@@ -66,6 +68,18 @@ export interface EngineConfig {
   /** Directory that stores the SQLite index (default: <root>/.contextengine). */
   dataDir: string;
   embeddings?: EmbeddingsConfig;
+  /**
+   * Optional neural / cross-encoder rerank (CONTEXTENGINE_NEURAL_RERANK=1).
+   * Resolved at engine open time from env.
+   */
+  neuralRerank?: {
+    apiKey: string;
+    baseUrl: string;
+    model: string;
+    topN: number;
+    weight: number;
+    maxDocChars: number;
+  };
   /** Max file size in bytes to index. */
   maxFileBytes: number;
   /** Preferred max characters per chunk. */
@@ -90,6 +104,11 @@ export interface SearchOptions {
   includeCommits?: boolean;
   /** MMR path diversity when packing ranking (default true). */
   diversify?: boolean;
+  /**
+   * Override neural rerank for this call.
+   * undefined = use engine default; false = force off; true = force on if configured.
+   */
+  neuralRerank?: boolean;
 }
 
 export interface TaskContextOptions {
