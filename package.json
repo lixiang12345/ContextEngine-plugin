@@ -30,6 +30,7 @@
     "mcp": "node --import tsx src/mcp-server.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
     "eval:self": "npm run build && node dist/cli.js eval --self --reindex",
+    "eval:express": "npm run build && node scripts/practice-eval.mjs --root ${EXPRESS_ROOT:-/tmp/ce-midsize-eval/express4} --cases examples/eval.express.json",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

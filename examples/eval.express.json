@@ -1,0 +1,86 @@
+[
+  {
+    "id": "router",
+    "query": "how does Express Router match routes and handle requests",
+    "expectPaths": ["lib/router"],
+    "topK": 10
+  },
+  {
+    "id": "application",
+    "query": "application app.use middleware stack setup",
+    "expectPaths": ["lib/application.js"],
+    "topK": 10
+  },
+  {
+    "id": "request",
+    "query": "request prototype req.get header accept",
+    "expectPaths": ["lib/request.js"],
+    "topK": 8
+  },
+  {
+    "id": "response",
+    "query": "response send json status redirect",
+    "expectPaths": ["lib/response.js"],
+    "topK": 8
+  },
+  {
+    "id": "layer",
+    "query": "Layer path regexp match handle_request",
+    "expectPaths": ["lib/router/layer.js"],
+    "topK": 8
+  },
+  {
+    "id": "route",
+    "query": "Route methods get post put delete handlers",
+    "expectPaths": ["lib/router/route.js"],
+    "topK": 8
+  },
+  {
+    "id": "query-mw",
+    "query": "query string middleware parse url query",
+    "expectPaths": ["lib/middleware/query.js"],
+    "topK": 8
+  },
+  {
+    "id": "init-mw",
+    "query": "middleware init request response prototype",
+    "expectPaths": ["lib/middleware/init.js"],
+    "topK": 8
+  },
+  {
+    "id": "symbol-createApp",
+    "query": "createApplication",
+    "expectPaths": ["lib/express.js", "lib/application.js"],
+    "topK": 8
+  },
+  {
+    "id": "view",
+    "query": "view engine render template lookup",
+    "expectPaths": ["lib/view.js"],
+    "topK": 8
+  },
+  {
+    "id": "utils",
+    "query": "flatten compileETag compileQueryParser utils",
+    "expectPaths": ["lib/utils.js"],
+    "topK": 8
+  },
+  {
+    "id": "nl-error",
+    "query": "where are default error handling and 404 finalhandler wired",
+    "expectPaths": ["lib/application.js", "lib/express.js"],
+    "topK": 10
+  },
+  {
+    "id": "path-router-index",
+    "query": "lib/router/index.js",
+    "expectPaths": ["lib/router/index.js"],
+    "topK": 5
+  },
+  {
+    "id": "proto-req-param",
+    "query": "req.param req.query req.body parameter lookup",
+    "expectPaths": ["lib/request.js"],
+    "topK": 8
+  }
+]

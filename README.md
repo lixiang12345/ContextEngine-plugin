@@ -260,7 +260,13 @@ contextengine eval --self --reindex
 
 # Custom cases
 contextengine eval --cases examples/eval.sample.json --root /path/to/repo
+
+# Mid-size practice (Express 4.x layout) — IR metrics + incremental timing
+# git clone --depth 1 --branch 4.21.2 https://github.com/expressjs/express.git /tmp/express4
+node scripts/practice-eval.mjs --root /tmp/express4 --cases examples/eval.express.json
 ```
+
+Practice report (methodology + Express results + watch behavior): **[EVALUATION.md](./EVALUATION.md)**.
 
 ## Development
 

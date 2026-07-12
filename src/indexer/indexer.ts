@@ -177,7 +177,7 @@ export async function indexWorkspace(
     });
   }
 
-  // Commit lineage from primary root only
+  // Commit lineage from primary root only (skip rewrite when head set unchanged)
   const commitLimit = Number(process.env.CONTEXTENGINE_COMMIT_LIMIT ?? 80);
   if (commitLimit > 0) {
     onProgress?.({
@@ -188,24 +188,29 @@ export async function indexWorkspace(
       message: "Indexing commit lineage…",
     });
     const commits = harvestCommits(config.root, commitLimit);
-    const commitChunks = commitsToChunks(commits);
-    store.transaction(() => {
-      for (const p of store.listFilePaths()) {
-        if (p.startsWith(".git/commits/")) store.deleteFile(p);
-      }
-      for (const chunk of commitChunks) {
-        store.upsertFile({
-          path: chunk.path,
-          hash: chunk.hash,
-          language: "git-commit",
-          mtimeMs: Date.now(),
-          size: chunk.content.length,
-          rootAlias: "main",
-        });
-        store.replaceChunksForFile(chunk.path, [chunk], "main");
-        chunksWritten++;
-      }
-    });
+    const lineageKey = commits.map((c) => c.hash).join(",");
+    const prevKey = store.getMeta("commit_lineage_key");
+    if (lineageKey !== prevKey) {
+      const commitChunks = commitsToChunks(commits);
+      store.transaction(() => {
+        for (const p of store.listFilePaths()) {
+          if (p.startsWith(".git/commits/")) store.deleteFile(p);
+        }
+        for (const chunk of commitChunks) {
+          store.upsertFile({
+            path: chunk.path,
+            hash: chunk.hash,
+            language: "git-commit",
+            mtimeMs: Date.now(),
+            size: chunk.content.length,
+            rootAlias: "main",
+          });
+          store.replaceChunksForFile(chunk.path, [chunk], "main");
+          chunksWritten++;
+        }
+      });
+      store.setMeta("commit_lineage_key", lineageKey);
+    }
   }
 
   let embeddingsWritten = 0;

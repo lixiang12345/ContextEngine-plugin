@@ -76,8 +76,19 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
   }
   score += Math.min(1.5, overlap * 0.12);
 
-  // Prefer implementation over tests/docs slightly for "how does X work"
+  // Prefer implementation over examples/tests/docs (critical on mid-size repos
+  // like Express where examples/ floods lexical matches).
+  if (/(^|\/)(examples?|demo|samples?|fixtures?)(\/|$)/i.test(chunk.path)) {
+    score -= 0.85;
+  }
+  if (/(^|\/)(test|tests|__tests__|spec)(\/|$)/i.test(chunk.path)) {
+    score -= 0.45;
+  }
   if (/\b(test|spec|mock|fixture)\b/i.test(chunk.path)) score -= 0.15;
+  // Boost primary source trees common in small/mid repos
+  if (/(^|\/)(lib|src|app|pkg|internal)(\/|$)/i.test(chunk.path)) {
+    score += 0.35;
+  }
   if (chunk.language === "markdown" && q.intent === "symbol") score -= 0.2;
   if (chunk.language === "git-commit") {
     score += q.prefersCommits ? 0.6 : -0.4;
