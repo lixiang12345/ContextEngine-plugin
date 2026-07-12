@@ -6,6 +6,14 @@ Multi-signal retrieval (FTS5 + symbols + path + optional embeddings + graph + MM
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) and honest [COMPARISON.md](./COMPARISON.md) vs Augment.
 
+**New here?** Start with the path that matches your setup:
+
+| Path | Doc |
+|------|-----|
+| BM25-only / cloud embed / self-host GPU | **[docs/GETTING_STARTED.md](./docs/GETTING_STARTED.md)** |
+| GPU ops (Qwen3 embed+rerank) | [docs/DEPLOY_EMBED_RERANK.md](./docs/DEPLOY_EMBED_RERANK.md) |
+| Multi-lang IR numbers | [docs/MULTILANG_BENCH.md](./docs/MULTILANG_BENCH.md) |
+
 ```bash
 # index
 npx contextengine-plugin index

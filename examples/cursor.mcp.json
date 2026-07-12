@@ -5,7 +5,11 @@
       "args": ["/absolute/path/to/ContextEngine-plugin/dist/mcp-server.js"],
       "env": {
         "CONTEXTENGINE_ROOT": "/absolute/path/to/your/repo",
-        "CONTEXTENGINE_AUTO_INDEX": "1"
+        "CONTEXTENGINE_AUTO_INDEX": "1",
+        "OPENAI_BASE_URL": "http://127.0.0.1:18000/v1",
+        "OPENAI_API_KEY": "ce-local-key",
+        "OPENAI_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-0.6B",
+        "CONTEXTENGINE_EMBED_BATCH": "8"
       }
     }
   }

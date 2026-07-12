@@ -5,6 +5,20 @@
 **Embedding:** `Qwen/Qwen3-Embedding-0.6B` @ RTX 3080 Ti (`OPENAI_BASE_URL` SSH tunnel)  
 **Deploy guide:** [DEPLOY_EMBED_RERANK.md](./DEPLOY_EMBED_RERANK.md)
 
+## Is this a real benchmark?
+
+**Yes — offline, reproducible IR eval on real cloned OSS**, not a mocked score.
+
+| Claim | Evidence |
+|-------|----------|
+| Real repos | GitHub clones under `/tmp/ce-bench-ml/*` (Express, Gin, Redis, Guava, …) |
+| Real embeddings | `hasEmbeddings: true`, model `Qwen/Qwen3-Embedding-0.6B`, base tunnel `http://127.0.0.1:18000/v1` |
+| Real metrics | Recall@k / MRR / nDCG / Top1–5 from path-gold cases in `examples/eval.*.json` |
+| Artifacts on disk | `eval-results/multilang-summary.json` + per-suite JSON (timestamp `2026-07-12T20:45:02Z`) |
+| Runner | `npm run bench:multilang` → `scripts/bench-multilang.mjs` |
+
+**What it is not:** a public leaderboard (MTEB/CoIR), human-judged relevance, or 100M-LOC monorepo stress test. Gold labels are **path prefixes** we authored (6–14 queries/repo). Keeping the GPU on is **not** required to preserve these numbers — they are already written to disk.
+
 ## Scope of validation
 
 | Tier | What we ran | Scale |
