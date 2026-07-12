@@ -13,7 +13,7 @@ program
   .description(
     "Portable Context Engine for AI coding agents — index, search, and pack codebase context.",
   )
-  .version("0.2.0");
+  .version("0.3.0");
 
 program
   .command("index")
@@ -230,6 +230,116 @@ program
       };
       process.on("SIGINT", stop);
       process.on("SIGTERM", stop);
+    },
+  );
+
+program
+  .command("eval")
+  .description("Run retrieval evaluation cases (JSON file or built-in self-eval)")
+  .option("-r, --root <dir>", "workspace root", process.cwd())
+  .option("-d, --data-dir <dir>", "index data directory")
+  .option("-c, --cases <file>", "JSON file of eval cases")
+  .option("--self", "run built-in self-eval against this repo's sources")
+  .option("--reindex", "reindex before eval")
+  .action(
+    async (opts: {
+      root: string;
+      dataDir?: string;
+      cases?: string;
+      self?: boolean;
+      reindex?: boolean;
+    }) => {
+      const { readFileSync } = await import("node:fs");
+      const {
+        runEval,
+        defaultSelfEvalCases,
+      } = await import("./eval/harness.js");
+      const engine = ContextEngine.open({
+        root: path.resolve(opts.root),
+        dataDir: opts.dataDir,
+      });
+      if (opts.reindex || !engine.hasIndex()) {
+        await engine.index();
+      }
+      let cases;
+      if (opts.cases) {
+        cases = JSON.parse(readFileSync(opts.cases, "utf8"));
+      } else if (opts.self || !opts.cases) {
+        cases = defaultSelfEvalCases();
+      } else {
+        cases = [];
+      }
+      const report = await runEval(engine, cases);
+      engine.close();
+      console.log(JSON.stringify(report, null, 2));
+      if (report.failed > 0) process.exitCode = 1;
+    },
+  );
+
+program
+  .command("profile")
+  .description("Manage multi-repo profiles (contextengine.profiles.json)")
+  .argument("<action>", "list | add | use")
+  .argument("[name]", "profile name")
+  .option("--root <dir>", "repo root when adding")
+  .option("--data-dir <dir>", "data dir when adding")
+  .option("-f, --file <path>", "profiles file path")
+  .action(
+    async (
+      action: string,
+      name: string | undefined,
+      opts: { root?: string; dataDir?: string; file?: string },
+    ) => {
+      const {
+        loadProfiles,
+        saveProfiles,
+        upsertProfile,
+        resolveProfile,
+      } = await import("./config/profiles.js");
+
+      if (action === "list") {
+        console.log(JSON.stringify(loadProfiles(opts.file), null, 2));
+        return;
+      }
+      if (action === "add") {
+        if (!name || !opts.root) {
+          console.error("Usage: contextengine profile add <name> --root <dir>");
+          process.exitCode = 1;
+          return;
+        }
+        const cfg = upsertProfile(
+          {
+            name,
+            root: path.resolve(opts.root),
+            dataDir: opts.dataDir ? path.resolve(opts.dataDir) : undefined,
+          },
+          opts.file,
+        );
+        console.log(JSON.stringify(cfg, null, 2));
+        return;
+      }
+      if (action === "use") {
+        if (!name) {
+          console.error("Usage: contextengine profile use <name>");
+          process.exitCode = 1;
+          return;
+        }
+        const cfg = loadProfiles(opts.file);
+        if (!cfg.profiles.some((p) => p.name === name)) {
+          console.error(`Unknown profile: ${name}`);
+          process.exitCode = 1;
+          return;
+        }
+        cfg.default = name;
+        saveProfiles(cfg, opts.file);
+        const engineCfg = resolveProfile(name, opts.file);
+        console.log(
+          JSON.stringify({ ok: true, default: name, config: engineCfg }, null, 2),
+        );
+        return;
+      }
+      console.error(`Unknown action: ${action}. Use list | add | use`);
+      process.exitCode = 1;
     },
   );
 

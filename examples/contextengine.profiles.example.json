@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "default": "app",
+  "profiles": [
+    {
+      "name": "app",
+      "root": "/Users/you/work/my-app"
+    },
+    {
+      "name": "api",
+      "root": "/Users/you/work/my-api",
+      "dataDir": "/Users/you/work/my-api/.contextengine"
+    },
+    {
+      "name": "infra",
+      "root": "/Users/you/work/infra"
+    }
+  ]
+}

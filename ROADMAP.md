@@ -18,10 +18,11 @@
 - [x] Commit lineage: recent commits as searchable pseudo-chunks
 - [ ] Better TypeScript/Python AST chunking (tree-sitter optional peer)
 
-## Phase 3 — Productization (0.3.x)
+## Phase 3 — Productization (0.3.x) ✅
 
-- [ ] Retrieval eval harness + golden tasks
-- [ ] Multi-repo profiles
-- [ ] Remote index sharing (optional)
-- [ ] Published npm package CI
-- [ ] Example configs for Claude Code / Cursor / Codex
+- [x] Retrieval eval harness + self-eval cases (`contextengine eval`)
+- [x] Multi-repo profiles (`contextengine profile`)
+- [x] Example MCP configs (Claude Code / Cursor)
+- [x] CONTRIBUTING + release checklist
+- [ ] Remote index sharing (optional, later)
+- [ ] Published npm package CI (later)

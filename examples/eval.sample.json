@@ -1,0 +1,14 @@
+[
+  {
+    "id": "auth",
+    "query": "user login authentication password",
+    "expectPaths": ["src/auth"],
+    "topK": 8
+  },
+  {
+    "id": "payments",
+    "query": "stripe payment webhook",
+    "expectPaths": ["src/payments", "src/billing"],
+    "topK": 10
+  }
+]

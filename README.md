@@ -193,6 +193,8 @@ contextengine context <task> [--max-tokens N] [--json]
 contextengine status
 contextengine watch [root] [--debounce 800]   # live re-index
 contextengine serve [--auto-index]            # MCP stdio
+contextengine eval [--self | --cases file.json] [--reindex]
+contextengine profile list|add|use …
 ```
 
 ---
@@ -233,12 +235,34 @@ engine.close();
 
 ---
 
+## Multi-repo profiles
+
+```bash
+contextengine profile add app --root ~/work/my-app
+contextengine profile add api --root ~/work/my-api
+contextengine profile use app
+contextengine profile list
+```
+
+Writes `contextengine.profiles.json` (see `examples/contextengine.profiles.example.json`).
+
+## Eval
+
+```bash
+# Built-in cases against this repository
+contextengine eval --self --reindex
+
+# Custom cases
+contextengine eval --cases examples/eval.sample.json --root /path/to/repo
+```
+
 ## Development
 
 ```bash
 npm install
 npm run build
 npm test
+npm run eval:self
 npm run cli -- index
 npm run mcp
 ```
@@ -260,11 +284,11 @@ npm run mcp
 - Watch-mode incremental indexer
 - Commit lineage (recent git history in the index)
 
-### Phase 3 — planned
+### Phase 3 — ✅ `0.3.0`
 
-- Eval harness (task → retrieval quality)
-- Multi-root / multi-repo profiles
-- npm package polish & release automation
+- Eval harness (`contextengine eval --self`)
+- Multi-repo profiles (`contextengine profile`)
+- Example MCP configs under `examples/`
 
 ---
 

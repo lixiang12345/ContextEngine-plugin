@@ -25,6 +25,20 @@ export { SqliteStore } from "./store/sqlite-store.js";
 export { createEmbeddingProvider } from "./embeddings/provider.js";
 export { buildSymbolGraph, expandViaGraph } from "./graph/symbol-graph.js";
 export { harvestCommits, commitsToChunks, isGitRepo } from "./lineage/commits.js";
+export { runEval, defaultSelfEvalCases } from "./eval/harness.js";
+export {
+  loadProfiles,
+  saveProfiles,
+  upsertProfile,
+  resolveProfile,
+} from "./config/profiles.js";
+
+export type {
+  EvalCase,
+  EvalCaseResult,
+  EvalReport,
+} from "./eval/harness.js";
+export type { RepoProfile, MultiRepoConfig } from "./config/profiles.js";
 
 export type {
   CodeChunk,

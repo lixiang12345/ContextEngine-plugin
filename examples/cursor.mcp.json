@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "contextengine": {
+      "command": "node",
+      "args": ["/absolute/path/to/ContextEngine-plugin/dist/mcp-server.js"],
+      "env": {
+        "CONTEXTENGINE_ROOT": "/absolute/path/to/your/repo",
+        "CONTEXTENGINE_AUTO_INDEX": "1"
+      }
+    }
+  }
+}

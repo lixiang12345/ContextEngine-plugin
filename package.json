@@ -1,6 +1,6 @@
 {
   "name": "contextengine-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A portable Context Engine for AI coding agents — hybrid BM25 + semantic retrieval over your codebase, exposed via MCP and CLI.",
   "type": "module",
   "bin": {
@@ -26,6 +26,7 @@
     "cli": "node --import tsx src/cli.ts",
     "mcp": "node --import tsx src/mcp-server.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
+    "eval:self": "npm run build && node dist/cli.js eval --self --reindex",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
