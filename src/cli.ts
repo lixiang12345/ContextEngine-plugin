@@ -13,7 +13,7 @@ program
   .description(
     "Portable Context Engine for AI coding agents — index, search, and pack codebase context.",
   )
-  .version("0.3.0");
+  .version("0.3.1");
 
 program
   .command("index")
@@ -232,6 +232,39 @@ program
       process.on("SIGTERM", stop);
     },
   );
+
+program
+  .command("export-index")
+  .description("Export the SQLite index to a portable file (for backup/team share)")
+  .argument("<dest>", "destination path (e.g. ./index-share.db)")
+  .option("-r, --root <dir>", "workspace root", process.cwd())
+  .option("-d, --data-dir <dir>", "index data directory")
+  .action(async (dest: string, opts: { root: string; dataDir?: string }) => {
+    const config = resolveEngineConfig({
+      root: path.resolve(opts.root),
+      dataDir: opts.dataDir,
+    });
+    const { exportIndex } = await import("./store/export-import.js");
+    const dbPath = path.join(config.dataDir, "index.db");
+    const result = exportIndex(dbPath, path.resolve(dest));
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+program
+  .command("import-index")
+  .description("Import a shared SQLite index into the workspace data dir")
+  .argument("<source>", "source index.db path")
+  .option("-r, --root <dir>", "workspace root", process.cwd())
+  .option("-d, --data-dir <dir>", "index data directory")
+  .action(async (source: string, opts: { root: string; dataDir?: string }) => {
+    const config = resolveEngineConfig({
+      root: path.resolve(opts.root),
+      dataDir: opts.dataDir,
+    });
+    const { importIndex } = await import("./store/export-import.js");
+    const result = importIndex(path.resolve(source), config.dataDir);
+    console.log(JSON.stringify(result, null, 2));
+  });
 
 program
   .command("eval")

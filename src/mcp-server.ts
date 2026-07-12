@@ -51,7 +51,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
 
   const server = new McpServer({
     name: "contextengine",
-    version: "0.3.0",
+    version: "0.3.1",
   });
 
   server.tool(

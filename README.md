@@ -35,8 +35,11 @@ Most coding agents explore large repos with repeated `grep` / `find` tool calls.
 | Storage | Local SQLite (`node:sqlite`, no native compile) |
 | Agent interface | MCP tools + CLI + library API |
 | Incremental index | Content-hash skip for unchanged files |
+| Eval harness | `contextengine eval --self` path-recall checks |
+| Multi-repo profiles | Switch roots via `contextengine profile` |
+| Index share | `export-index` / `import-index` (SQLite file) |
 
-Phase 3 adds eval harness & multi-repo polish — see [ROADMAP](#roadmap).
+**Honest comparison with Augment Context Engine:** [COMPARISON.md](./COMPARISON.md)
 
 ---
 
@@ -195,6 +198,8 @@ contextengine watch [root] [--debounce 800]   # live re-index
 contextengine serve [--auto-index]            # MCP stdio
 contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
+contextengine export-index ./share.db
+contextengine import-index ./share.db
 ```
 
 ---
@@ -284,13 +289,28 @@ npm run mcp
 - Watch-mode incremental indexer
 - Commit lineage (recent git history in the index)
 
-### Phase 3 — ✅ `0.3.0`
+### Phase 3 — ✅ `0.3.x`
 
 - Eval harness (`contextengine eval --self`)
 - Multi-repo profiles (`contextengine profile`)
 - Example MCP configs under `examples/`
+- CI, index export/import, comparison doc vs Augment
 
 ---
+
+## vs Augment Context Engine
+
+We are an **open portable component**, not a full commercial context platform.
+
+| | This repo | Augment |
+|--|-----------|---------|
+| Custom code retrieval models | ❌ BYO embeddings | ✅ |
+| Multi-source (docs/wikis/org) | ❌ | ✅ |
+| Monorepo / enterprise scale | ⚠️ medium | ✅ |
+| Open source / offline | ✅ | ❌ product |
+| MCP + hybrid search | ✅ | ✅ |
+
+Details: **[COMPARISON.md](./COMPARISON.md)**.
 
 ## Design notes
 
@@ -298,6 +318,7 @@ npm run mcp
 2. **Works offline** — BM25 alone is a valid mode; embeddings are an upgrade.
 3. **Zero native addons** — Node 22 `node:sqlite` only; easy to install.
 4. **Composable** — use as MCP plugin, CLI, or embed in your own agent loop.
+5. **Honest scope** — optimize for ownership and hackability; do not claim Augment parity.
 
 ---
 

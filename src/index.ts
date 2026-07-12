@@ -22,6 +22,7 @@ export { HybridSearcher } from "./search/hybrid.js";
 export { indexWorkspace } from "./indexer/indexer.js";
 export { watchAndIndex } from "./indexer/watch.js";
 export { SqliteStore } from "./store/sqlite-store.js";
+export { exportIndex, importIndex } from "./store/export-import.js";
 export { createEmbeddingProvider } from "./embeddings/provider.js";
 export { buildSymbolGraph, expandViaGraph } from "./graph/symbol-graph.js";
 export { harvestCommits, commitsToChunks, isGitRepo } from "./lineage/commits.js";

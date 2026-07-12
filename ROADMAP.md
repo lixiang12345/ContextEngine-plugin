@@ -16,7 +16,7 @@
 - [x] Import / symbol graph expansion on search
 - [x] Watch-mode incremental indexer (`contextengine watch`)
 - [x] Commit lineage: recent commits as searchable pseudo-chunks
-- [ ] Better TypeScript/Python AST chunking (tree-sitter optional peer)
+- [x] Brace/indent-aware unit chunking (pure JS, no native tree-sitter)
 
 ## Phase 3 — Productization (0.3.x) ✅
 
@@ -24,5 +24,14 @@
 - [x] Multi-repo profiles (`contextengine profile`)
 - [x] Example MCP configs (Claude Code / Cursor)
 - [x] CONTRIBUTING + release checklist
-- [ ] Remote index sharing (optional, later)
-- [ ] Published npm package CI (later)
+- [x] GitHub Actions CI
+- [x] Index export / import for offline share
+- [x] COMPARISON vs Augment Context Engine
+
+## Future (optional, not blocking 1.0-usable)
+
+- [ ] Code-specialized embeddings / hard-negative training
+- [ ] SCIP / tsc / gopls symbol providers
+- [ ] Docs / wiki connectors
+- [ ] Distributed / remote index for huge monorepos
+- [ ] npm publish automation
