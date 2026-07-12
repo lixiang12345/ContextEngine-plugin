@@ -47,39 +47,55 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
   private async embedRaw(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
     // Smaller batches avoid OOM on 12GB GPUs when embedding long code chunks.
-    const batchSize = Number(process.env.CONTEXTENGINE_EMBED_BATCH || 16);
+    let batchSize = Number(process.env.CONTEXTENGINE_EMBED_BATCH || 8);
+    if (!Number.isFinite(batchSize) || batchSize < 1) batchSize = 8;
+    const maxChars = Number(process.env.CONTEXTENGINE_EMBED_MAX_CHARS || 4000);
     const all: number[][] = [];
-    for (let i = 0; i < texts.length; i += batchSize) {
-      const batch = texts.slice(i, i + batchSize).map((t) => t.slice(0, 8000));
-      const body: Record<string, unknown> = {
-        model: this.model,
-        input: batch,
-      };
-      if (this.dimensions) body.dimensions = this.dimensions;
-
-      const res = await fetch(`${this.baseUrl}/embeddings`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        throw new Error(
-          `Embedding API ${res.status}: ${errText.slice(0, 400)}`,
-        );
-      }
-      const json = (await res.json()) as {
-        data: Array<{ embedding: number[]; index: number }>;
-      };
-      const ordered = [...json.data].sort((a, b) => a.index - b.index);
-      for (const row of ordered) {
-        all.push(normalize(row.embedding));
+    for (let i = 0; i < texts.length; ) {
+      const batch = texts
+        .slice(i, i + batchSize)
+        .map((t) => t.slice(0, maxChars));
+      try {
+        const vectors = await this.embedBatchOnce(batch);
+        all.push(...vectors);
+        i += batchSize;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Adaptive shrink on 5xx / OOM-ish failures
+        if (batchSize > 1 && /5\d\d|OOM|memory|Internal/i.test(msg)) {
+          batchSize = Math.max(1, Math.floor(batchSize / 2));
+          continue;
+        }
+        throw err;
       }
     }
     return all;
+  }
+
+  private async embedBatchOnce(batch: string[]): Promise<number[][]> {
+    const body: Record<string, unknown> = {
+      model: this.model,
+      input: batch,
+    };
+    if (this.dimensions) body.dimensions = this.dimensions;
+
+    const res = await fetch(`${this.baseUrl}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`Embedding API ${res.status}: ${errText.slice(0, 400)}`);
+    }
+    const json = (await res.json()) as {
+      data: Array<{ embedding: number[]; index: number }>;
+    };
+    const ordered = [...json.data].sort((a, b) => a.index - b.index);
+    return ordered.map((row) => normalize(row.embedding));
   }
 }
 

@@ -45,20 +45,30 @@ contextengine index
 
 | Model | Notes |
 |-------|--------|
+| **`Qwen/Qwen3-Embedding-0.6B`** | **Production default** in our multi-lang bench (~2GB VRAM w/ reranker); instruct-aware |
 | **`nomic-embed-code`** / Nomic code embeds | Strong open code retrieval line |
 | **`jina-embeddings-v2-base-code`** | Code-focused, embed via TEI / local server |
 | **`BAAI/bge-code-*`** (if available in your stack) | Code retrieval family |
 | **`Salesforce/SFR-Embedding-Code`** | Research-grade code embedders |
-| **`microsoft/codebert-base`** (older) | Baseline, usually weaker than 2024–2026 embeds |
 
-Serve any of these behind an **OpenAI-compatible** `/v1/embeddings` (e.g. [Ollama](https://ollama.com), [llama.cpp server](https://github.com/ggerganov/llama.cpp), [Hugging Face TEI](https://github.com/huggingface/text-embeddings-inference), [vLLM](https://github.com/vllm-project/vllm)):
+**GPU deploy (Qwen3 embed + optional Qwen3 rerank):**  
+→ full guide [DEPLOY_EMBED_RERANK.md](./DEPLOY_EMBED_RERANK.md) · server script `scripts/embed_rerank_server.py`
+
+Serve any of these behind an **OpenAI-compatible** `/v1/embeddings` (e.g. our FastAPI server, [Ollama](https://ollama.com), [llama.cpp server](https://github.com/ggerganov/llama.cpp), [Hugging Face TEI](https://github.com/huggingface/text-embeddings-inference), [vLLM](https://github.com/vllm-project/vllm)):
 
 ```bash
-export OPENAI_BASE_URL=http://127.0.0.1:11434/v1   # example Ollama
-export OPENAI_API_KEY=ollama
-export OPENAI_EMBEDDING_MODEL=nomic-embed-text      # replace with code model name
-```
+# Production path used for multilang bench (SSH tunnel to GPU box)
+export OPENAI_BASE_URL=http://127.0.0.1:18000/v1
+export OPENAI_API_KEY=ce-local-key
+export OPENAI_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+export CONTEXTENGINE_EMBED_BATCH=8
+export CONTEXTENGINE_EMBED_MAX_CHARS=3000
 
+# Or Ollama-style local:
+# export OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+# export OPENAI_API_KEY=ollama
+# export OPENAI_EMBEDDING_MODEL=nomic-embed-text
+```
 ### 3. What Augment has that we don’t
 
 Augment trains **paired** query–code retrieval models on private + public code with hard negatives and agent-task feedback.  
@@ -97,11 +107,19 @@ Without an API key, semantic channel is **off**; FTS/symbol/rerank still run.
 
 ## Current environment note
 
-This machine’s benchmark run had **no** `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY`, so suite numbers are **lexical-only**.  
-Re-run after setting a code embedder to measure the semantic lift:
+Multi-language production numbers (semantic ON, Qwen3-Embedding-0.6B):
+
+| Metric | Macro mean |
+|--------|------------|
+| Top5 | ~0.98 |
+| MRR | ~0.93 |
+| Recall@k | ~1.00 |
+
+See [MULTILANG_BENCH.md](./MULTILANG_BENCH.md) and `eval-results/multilang-summary.json`.
 
 ```bash
-export OPENAI_API_KEY=...
-export OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-node scripts/bench-suite.mjs
+export OPENAI_BASE_URL=http://127.0.0.1:18000/v1
+export OPENAI_API_KEY=ce-local-key
+export OPENAI_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+npm run bench:multilang
 ```

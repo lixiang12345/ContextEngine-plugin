@@ -84,15 +84,14 @@ export class HybridSearcher {
 
   async search(opts: SearchOptions): Promise<SearchHit[]> {
     const topK = opts.topK ?? 8;
-    // Validated strategy (2026-07): with embeddings, pure semantic (+ soft
-    // impl boost / doc penalty inside the channel) wins conceptual Top-1.
-    // Feature rerank still applied after fusion; graph expand optional.
-    // Without embeddings, fall back to bm25 (+ features).
+    // Production strategy: with embeddings use hybrid (FTS+symbol+semantic)
+    // so exact identifiers and path cues still fire; without embeddings use bm25.
+    // Soft doc/test penalties + query-instruct embeddings keep Top-1 on impl files.
     const requested = opts.mode ?? "auto";
     const mode: "bm25" | "semantic" | "hybrid" =
       requested === "auto"
         ? this.hasSemantic
-          ? "semantic"
+          ? "hybrid"
           : "bm25"
         : requested === "bm25" ||
             requested === "semantic" ||

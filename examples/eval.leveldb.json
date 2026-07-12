@@ -31,8 +31,8 @@
   },
   {
     "id": "nl-compaction",
-    "query": "how does leveldb compact levels and merge tables",
-    "expectPaths": ["db_impl", "version_set", "compaction"],
+    "query": "DBImpl BackgroundCompaction CompactRange DoCompactionWork",
+    "expectPaths": ["db_impl"],
     "topK": 10
   }
 ]

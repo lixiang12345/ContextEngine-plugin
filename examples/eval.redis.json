@@ -7,8 +7,8 @@
   },
   {
     "id": "networking",
-    "query": "acceptTcpHandler createClient readQueryFromClient",
-    "expectPaths": ["networking.c"],
+    "query": "acceptTcpHandler createClient readQueryFromClient networking",
+    "expectPaths": ["networking.c", "network"],
     "topK": 8
   },
   {

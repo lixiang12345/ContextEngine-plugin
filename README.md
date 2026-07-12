@@ -137,6 +137,30 @@ Also accepted:
 
 Works with OpenAI, many proxies, and local servers that expose `/v1/embeddings` (e.g. Ollama-compatible gateways).
 
+### Self-host Qwen3 on GPU (production path)
+
+Validated stack for multi-language semantic search (~2.2 GB VRAM):
+
+| Role | Model |
+|------|--------|
+| Embedding | `Qwen/Qwen3-Embedding-0.6B` |
+| Reranker (optional API) | `Qwen/Qwen3-Reranker-0.6B` |
+
+```bash
+# On GPU host — see full guide
+# docs/DEPLOY_EMBED_RERANK.md  +  scripts/embed_rerank_server.py
+
+# On laptop (SSH tunnel):
+export OPENAI_BASE_URL=http://127.0.0.1:18000/v1
+export OPENAI_API_KEY=ce-local-key
+export OPENAI_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+export CONTEXTENGINE_EMBED_BATCH=8
+contextengine index
+```
+
+**Deploy guide:** [docs/DEPLOY_EMBED_RERANK.md](./docs/DEPLOY_EMBED_RERANK.md) ·  
+**Multi-lang bench (Top5≈0.98, MRR≈0.93):** [docs/MULTILANG_BENCH.md](./docs/MULTILANG_BENCH.md)
+
 ---
 
 ## MCP integration
@@ -285,13 +309,17 @@ node scripts/practice-eval.mjs --root /tmp/express4 --cases examples/eval.expres
 ```
 
 Practice report (methodology + multi-repo suite + watch): **[EVALUATION.md](./EVALUATION.md)**.  
-Code embedding model choices: **[docs/EMBEDDINGS.md](./docs/EMBEDDINGS.md)**.
+Code embedding model choices: **[docs/EMBEDDINGS.md](./docs/EMBEDDINGS.md)**.  
+GPU embed + rerank deploy: **[docs/DEPLOY_EMBED_RERANK.md](./docs/DEPLOY_EMBED_RERANK.md)**.  
+Multi-language IR metrics: **[docs/MULTILANG_BENCH.md](./docs/MULTILANG_BENCH.md)**.
 
 ```bash
 # Multi-repo mid-size suite (clones under /tmp/ce-bench)
 node scripts/bench-suite.mjs
-```
 
+# Multi-language OSS suite (needs embeddings endpoint)
+npm run bench:multilang
+```
 ## Development
 
 ```bash

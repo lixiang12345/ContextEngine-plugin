@@ -149,6 +149,16 @@ export const DEFAULT_IGNORES = [
   "gen/",
   "third_party/",
   "third-party/",
+  // Heavy test/benchmark trees (still overridable with ! in .augmentignore)
+  "**/androidHostTest/",
+  "**/androidTest/",
+  "**/jvmTest/",
+  "**/commonTest/",
+  "**/hostTest/",
+  "**/benchmarks/",
+  "**/fuzzing/",
+  "**/testdata/",
+  "**/test-data/",
 ];
 
 /** Extensions we treat as indexable text source. */

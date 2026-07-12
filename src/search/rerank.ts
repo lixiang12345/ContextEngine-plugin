@@ -80,27 +80,35 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
   score += Math.min(1.6, overlap * (isImpl ? 0.14 : 0.1));
 
   // --- Implementation-first penalties / boosts ---
-  if (/(^|\/)(examples?|demo|samples?|fixtures?|benchmarks?|fuzzing)(\/|$)/i.test(chunk.path)) {
-    score -= 1.3;
-  }
-  // Multi-lang test layouts: jvmTest, androidHostTest, *_test.go, *_test.rs, *Test.java
   if (
-    /(^|\/)(test|tests|__tests__|spec|jvmTest|androidHostTest|androidTest|commonTest|hostTest)(\/|$)/i.test(
+    /(^|\/)(examples?|demo|samples?|fixtures?|benchmarks?|fuzzing|testdata|test-data)(\/|$)/i.test(
       chunk.path,
     )
   ) {
-    score -= 1.15;
+    score -= 1.45;
   }
-  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) score -= 1.0;
+  // Multi-lang test layouts: jvmTest, androidHostTest, *_test.go, *_test.rs, *Test.java
+  if (
+    /(^|\/)(test|tests|__tests__|spec|jvmTest|androidHostTest|androidTest|commonTest|hostTest|androidMain)(\/|$)/i.test(
+      chunk.path,
+    )
+  ) {
+    score -= 1.35;
+  }
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) score -= 1.2;
   if (/_test\.(c|cc|cpp|cxx|go|rs|java|kt|kts|py)$/i.test(chunk.path)) {
-    score -= 1.05;
+    score -= 1.25;
   }
-  if (/Test\.(java|kt|kts)$/i.test(chunk.path)) score -= 1.05;
-  if (/\b(test|spec|mock|fixture|bench)\b/i.test(chunk.path)) score -= 0.3;
+  if (/(_test|Test|Tests)\.(java|kt|kts|go|rs|py|c|cc|cpp)$/i.test(chunk.path)) {
+    score -= 1.25;
+  }
+  if (/\b(test|spec|mock|fixture|bench)\b/i.test(chunk.path)) score -= 0.4;
   // Prefer .c/.cc implementation over headers when scores are close
   if (/\.(h|hpp|hxx|hh)$/i.test(chunk.path) && q.intent !== "path") {
-    score -= 0.35;
+    score -= 0.55;
   }
+  // Prefer primary source files over cluster/commands JSON in redis-like trees
+  if (/\.json$/i.test(chunk.path) && q.intent !== "path") score -= 0.9;
 
   // Docs / marketing / eval writeups steal Top-1 on conceptual queries
   if (
@@ -126,11 +134,17 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
   }
 
   // Primary source trees
-  if (/(^|\/)(lib|src|source|app|pkg|internal|core)(\/|$)/i.test(chunk.path)) {
-    score += 0.85;
+  if (
+    /(^|\/)(lib|src|source|app|pkg|internal|core|db|table|util|commonJvmAndroid|jvmMain|main)(\/|$)/i.test(
+      chunk.path,
+    )
+  ) {
+    score += 0.95;
   }
   // Implementation file extension boost
-  if (isImpl) score += 0.65;
+  if (isImpl) score += 0.8;
+  // Prefer .c/.cc/.go/.java production sources over adjacent tests/headers
+  if (/\.(c|cc|cpp|go|java|kt|rs|py|ts|js)$/i.test(chunk.path)) score += 0.25;
 
   // Basename match
   const baseNoExt = base.replace(/\.[^.]+$/, "");
@@ -175,17 +189,18 @@ export function combineFinal(
     wSem = 0.28;
     wRrf = 0.24;
   } else if (intent === "concept") {
-    wSem = 0.55;
-    wFeat = 0.28;
-    wRrf = 0.17;
+    // Need both: semantic finds paraphrases, features crush tests/docs
+    wSem = 0.4;
+    wFeat = 0.4;
+    wRrf = 0.2;
   } else if (intent === "history") {
     wFeat = 0.5;
     wRrf = 0.32;
     wSem = 0.18;
   } else if (intent === "mixed") {
-    wSem = 0.48;
-    wFeat = 0.32;
-    wRrf = 0.2;
+    wSem = 0.38;
+    wFeat = 0.4;
+    wRrf = 0.22;
   }
   // Feature tanh keeps large positive impl boosts from dominating completely
   let score =
