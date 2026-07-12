@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.db
+*.db-journal
+.contextengine/
+.DS_Store
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+.idea/
+.vscode/
+*.tsbuildinfo

@@ -1,0 +1,66 @@
+{
+  "name": "contextengine-plugin",
+  "version": "0.1.0",
+  "description": "A portable Context Engine for AI coding agents — hybrid BM25 + semantic retrieval over your codebase, exposed via MCP and CLI.",
+  "type": "module",
+  "bin": {
+    "contextengine": "./dist/cli.js",
+    "contextengine-mcp": "./dist/mcp-server.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "cli": "node --import tsx src/cli.ts",
+    "mcp": "node --import tsx src/mcp-server.ts",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "context-engine",
+    "mcp",
+    "code-search",
+    "rag",
+    "ai-coding",
+    "semantic-search",
+    "bm25",
+    "claude-code",
+    "cursor"
+  ],
+  "author": "ContextEngine contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lixiang12345/ContextEngine-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lixiang12345/ContextEngine-plugin/issues"
+  },
+  "homepage": "https://github.com/lixiang12345/ContextEngine-plugin#readme",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "commander": "^13.1.0",
+    "ignore": "^7.0.4",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
