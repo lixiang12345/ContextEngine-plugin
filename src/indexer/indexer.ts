@@ -14,6 +14,7 @@ import {
   walkSourceFiles,
 } from "../util/fs.js";
 import { sha256 } from "../util/hash.js";
+import { commitsToChunks, harvestCommits } from "../lineage/commits.js";
 
 export interface IndexResult {
   filesScanned: number;
@@ -97,6 +98,37 @@ export async function indexWorkspace(
       filesDone,
       chunksTotal: chunksWritten,
       message: file.relPath,
+    });
+  }
+
+  // Commit lineage: index recent git history as searchable pseudo-chunks
+  const commitLimit = Number(process.env.CONTEXTENGINE_COMMIT_LIMIT ?? 80);
+  if (commitLimit > 0) {
+    onProgress?.({
+      phase: "write",
+      filesTotal: files.length,
+      filesDone: files.length,
+      chunksTotal: chunksWritten,
+      message: "Indexing commit lineage…",
+    });
+    const commits = harvestCommits(config.root, commitLimit);
+    const commitChunks = commitsToChunks(commits);
+    store.transaction(() => {
+      // Remove previous synthetic commit file entries
+      for (const p of store.listFilePaths()) {
+        if (p.startsWith(".git/commits/")) store.deleteFile(p);
+      }
+      for (const chunk of commitChunks) {
+        store.upsertFile({
+          path: chunk.path,
+          hash: chunk.hash,
+          language: "git-commit",
+          mtimeMs: Date.now(),
+          size: chunk.content.length,
+        });
+        store.replaceChunksForFile(chunk.path, [chunk]);
+        chunksWritten++;
+      }
     });
   }
 

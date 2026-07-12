@@ -11,11 +11,11 @@
 - [x] MCP tools for coding agents
 - [x] Library exports + tests
 
-## Phase 2 — Graph & history (0.2.x)
+## Phase 2 — Graph & history (0.2.x) ✅
 
-- [ ] Import / symbol graph (callers / callees expansion)
-- [ ] Watch-mode incremental indexer
-- [ ] Commit lineage: summarize recent commits into searchable docs
+- [x] Import / symbol graph expansion on search
+- [x] Watch-mode incremental indexer (`contextengine watch`)
+- [x] Commit lineage: recent commits as searchable pseudo-chunks
 - [ ] Better TypeScript/Python AST chunking (tree-sitter optional peer)
 
 ## Phase 3 — Productization (0.3.x)

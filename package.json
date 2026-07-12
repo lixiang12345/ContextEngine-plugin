@@ -1,6 +1,6 @@
 {
   "name": "contextengine-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A portable Context Engine for AI coding agents — hybrid BM25 + semantic retrieval over your codebase, exposed via MCP and CLI.",
   "type": "module",
   "bin": {

@@ -23,17 +23,20 @@ Most coding agents explore large repos with repeated `grep` / `find` tool calls.
 
 **ContextEngine** is a small, self-contained retrieval layer:
 
-| Capability | Phase 1 (this release) |
-|------------|------------------------|
+| Capability | Status |
+|------------|--------|
 | Code chunking | Language-aware heuristics (TS/JS/Python/Go/Rust/Java/MD/…) |
 | Lexical search | BM25 over path + symbol + content |
 | Semantic search | Optional OpenAI-compatible embeddings |
 | Fusion | Reciprocal Rank Fusion (hybrid) |
+| Symbol / import graph | Expand hits via related files & symbols (Phase 2) |
+| Commit lineage | Recent git history as searchable context (Phase 2) |
+| Watch mode | Debounced incremental re-index (`contextengine watch`) |
 | Storage | Local SQLite (`node:sqlite`, no native compile) |
 | Agent interface | MCP tools + CLI + library API |
 | Incremental index | Content-hash skip for unchanged files |
 
-Later phases add symbol graphs, commit lineage, and eval harnesses — see [ROADMAP](#roadmap).
+Phase 3 adds eval harness & multi-repo polish — see [ROADMAP](#roadmap).
 
 ---
 
@@ -188,7 +191,8 @@ contextengine index [root] [--data-dir dir] [--quiet]
 contextengine search <query> [-k N] [--mode auto|bm25|semantic|hybrid] [--path-prefix p] [--json]
 contextengine context <task> [--max-tokens N] [--json]
 contextengine status
-contextengine serve [--auto-index]   # MCP stdio
+contextengine watch [root] [--debounce 800]   # live re-index
+contextengine serve [--auto-index]            # MCP stdio
 ```
 
 ---
@@ -200,6 +204,7 @@ contextengine serve [--auto-index]   # MCP stdio
 | `CONTEXTENGINE_ROOT` | Workspace root for MCP |
 | `CONTEXTENGINE_DATA_DIR` | Override index directory |
 | `CONTEXTENGINE_AUTO_INDEX` | `1` = index on first MCP use if missing |
+| `CONTEXTENGINE_COMMIT_LIMIT` | How many recent commits to index (default `80`, `0` = off) |
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | Enable embeddings |
 | `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API base |
 | `OPENAI_EMBEDDING_MODEL` / `CONTEXTENGINE_EMBEDDING_MODEL` | Model name |
@@ -242,18 +247,18 @@ npm run mcp
 
 ## Roadmap
 
-### Phase 1 — ✅ shipped in `0.1.0`
+### Phase 1 — ✅ `0.1.0`
 
 - Hybrid BM25 + optional embeddings
 - Incremental SQLite index
 - MCP + CLI + library
 - Task context packing
 
-### Phase 2 — planned
+### Phase 2 — ✅ `0.2.0`
 
-- Symbol / import graph expansion
-- Finer incremental + watch mode
-- Commit lineage (summarized git history in the index)
+- Symbol / import graph expansion on search
+- Watch-mode incremental indexer
+- Commit lineage (recent git history in the index)
 
 ### Phase 3 — planned
 

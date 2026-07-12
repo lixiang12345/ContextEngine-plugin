@@ -13,7 +13,7 @@ program
   .description(
     "Portable Context Engine for AI coding agents — index, search, and pack codebase context.",
   )
-  .version("0.1.0");
+  .version("0.2.0");
 
 program
   .command("index")
@@ -194,6 +194,44 @@ program
       autoIndex: opts.autoIndex,
     });
   });
+
+program
+  .command("watch")
+  .description("Watch workspace and incrementally re-index on changes")
+  .argument("[root]", "workspace root", process.cwd())
+  .option("-d, --data-dir <dir>", "index data directory")
+  .option("--debounce <ms>", "debounce milliseconds", "800")
+  .action(
+    async (
+      root: string,
+      opts: { dataDir?: string; debounce: string },
+    ) => {
+      const config = resolveEngineConfig({
+        root: path.resolve(root),
+        dataDir: opts.dataDir,
+      });
+      const { watchAndIndex } = await import("./indexer/watch.js");
+      console.log(`Watching ${config.root}`);
+      console.log(`Data dir: ${config.dataDir}`);
+      const handle = watchAndIndex(config, {
+        debounceMs: Number(opts.debounce) || 800,
+        onIndexed: (r) => {
+          console.log(
+            `[index] scanned=${r.filesScanned} updated=${r.filesIndexed} chunks+=${r.chunksWritten} embeds+=${r.embeddingsWritten} (${r.durationMs}ms)`,
+          );
+        },
+        onError: (e) => {
+          console.error("[watch error]", e instanceof Error ? e.message : e);
+        },
+      });
+      const stop = () => {
+        handle.close();
+        process.exit(0);
+      };
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+    },
+  );
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : err);

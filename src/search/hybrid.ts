@@ -4,6 +4,11 @@ import {
   cosineSimilarity,
   type EmbeddingProvider,
 } from "../embeddings/provider.js";
+import {
+  buildSymbolGraph,
+  expandViaGraph,
+  type SymbolGraph,
+} from "../graph/symbol-graph.js";
 
 export interface HybridSearchInput {
   chunks: CodeChunk[];
@@ -37,6 +42,7 @@ export class HybridSearcher {
   private bm25 = new Bm25Index();
   private embeddings = new Map<string, number[]>();
   private embedder: EmbeddingProvider | null = null;
+  private graph: SymbolGraph | null = null;
 
   load(input: HybridSearchInput): void {
     this.chunksById.clear();
@@ -58,6 +64,7 @@ export class HybridSearcher {
       this.bm25.add(c.id, blob);
     }
     this.bm25.build();
+    this.graph = buildSymbolGraph(input.chunks);
 
     for (const e of input.embeddings ?? []) {
       this.embeddings.set(e.chunkId, e.vector);
@@ -73,6 +80,9 @@ export class HybridSearcher {
     const mode = opts.mode ?? "auto";
 
     let pool = [...this.chunksById.values()];
+    if (opts.includeCommits === false) {
+      pool = pool.filter((c) => c.language !== "git-commit");
+    }
     if (opts.pathPrefix) {
       const p = opts.pathPrefix.replace(/^\.\//, "");
       pool = pool.filter(
@@ -122,17 +132,52 @@ export class HybridSearcher {
     const fused =
       lists.length === 1 ? lists[0] : rrfFuse(lists);
 
-    return fused.slice(0, topK).flatMap(({ id, score }) => {
+    const seed = fused.slice(0, topK);
+    const hits: SearchHit[] = [];
+    const seen = new Set<string>();
+
+    for (const { id, score } of seed) {
       const chunk = this.chunksById.get(id);
-      if (!chunk) return [];
-      return [
-        {
+      if (!chunk || seen.has(id)) continue;
+      seen.add(id);
+      hits.push({
+        chunk,
+        score,
+        source,
+        preview: previewOf(chunk.content),
+      });
+    }
+
+    // Graph expansion: related imports / same symbols
+    if (opts.expandGraph !== false && this.graph && hits.length > 0) {
+      const extraIds = expandViaGraph(
+        this.graph,
+        hits.map((h) => h.chunk.id),
+        this.chunksById,
+        Math.max(4, Math.floor(topK / 2)),
+      );
+      for (const id of extraIds) {
+        if (seen.has(id) || !allowed.has(id)) continue;
+        const chunk = this.chunksById.get(id);
+        if (!chunk) continue;
+        // Prefer not to expand pure commit noise unless query looks historical
+        if (
+          chunk.language === "git-commit" &&
+          !/\b(commit|history|why|when|blame|lineage)\b/i.test(opts.query)
+        ) {
+          continue;
+        }
+        seen.add(id);
+        hits.push({
           chunk,
-          score,
-          source,
+          score: (hits[hits.length - 1]?.score ?? 0) * 0.85,
+          source: "hybrid",
           preview: previewOf(chunk.content),
-        },
-      ];
-    });
+        });
+        if (hits.length >= topK + Math.floor(topK / 2)) break;
+      }
+    }
+
+    return hits.slice(0, topK + Math.floor(topK / 2));
   }
 }

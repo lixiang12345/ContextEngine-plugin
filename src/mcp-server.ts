@@ -51,7 +51,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
 
   const server = new McpServer({
     name: "contextengine",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   server.tool(
@@ -68,8 +68,16 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
         .enum(["auto", "bm25", "semantic", "hybrid"])
         .optional()
         .describe("Retrieval mode (default auto)"),
+      expand_graph: z
+        .boolean()
+        .optional()
+        .describe("Expand via import/symbol graph (default true)"),
+      include_commits: z
+        .boolean()
+        .optional()
+        .describe("Include git commit lineage chunks (default true)"),
     },
-    async ({ query, top_k, path_prefix, mode }) => {
+    async ({ query, top_k, path_prefix, mode, expand_graph, include_commits }) => {
       try {
         const eng = await ensureReady();
         const hits = await eng.search({
@@ -77,6 +85,8 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
           topK: top_k ?? 8,
           pathPrefix: path_prefix,
           mode: mode ?? "auto",
+          expandGraph: expand_graph,
+          includeCommits: include_commits,
         });
         const payload = hits.map((h) => ({
           path: h.chunk.path,

@@ -20,8 +20,11 @@ export { chunkFile } from "./chunker/code-chunker.js";
 export { Bm25Index, tokenize } from "./search/bm25.js";
 export { HybridSearcher } from "./search/hybrid.js";
 export { indexWorkspace } from "./indexer/indexer.js";
+export { watchAndIndex } from "./indexer/watch.js";
 export { SqliteStore } from "./store/sqlite-store.js";
 export { createEmbeddingProvider } from "./embeddings/provider.js";
+export { buildSymbolGraph, expandViaGraph } from "./graph/symbol-graph.js";
+export { harvestCommits, commitsToChunks, isGitRepo } from "./lineage/commits.js";
 
 export type {
   CodeChunk,
