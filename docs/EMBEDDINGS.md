@@ -1,7 +1,9 @@
 # Code embedding models for ContextEngine
 
-This project works **without** embeddings (FTS5 + symbols + rerank).  
+This project works **without** embeddings (FTS5 + symbols + feature rerank).  
 Embeddings close the gap on **conceptual / paraphrased** queries where pure lexical ranking loses to docs/tests.
+
+**Download list (HF IDs + CLI):** [MODELS_DOWNLOAD.md](./MODELS_DOWNLOAD.md)
 
 ## What we need from a model
 
