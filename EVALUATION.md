@@ -146,3 +146,48 @@ node dist/cli.js eval --self --reindex
 # Watch demo
 node dist/cli.js watch /tmp/express4
 ```
+
+---
+
+## 6. Multi-repo suite (cloned from GitHub, local)
+
+**Command:** `node scripts/bench-suite.mjs`  
+**Clones under:** `/tmp/ce-bench/`  
+**Embeddings:** **off** (no API key in this environment)  
+**Date:** 2026-07-13 · post path-demotion rerank
+
+| Repo | Source | ~files | chunks | Recall@k | MRR | nDCG@k | Top-1 | Top-3 | Top-5 | lat |
+|------|--------|-------:|-------:|---------:|----:|-------:|------:|------:|------:|----:|
+| **express@4.21.2** | expressjs/express | 202 | 1077 | 0.93 | 0.89 | 0.93 | 0.79 | **1.00** | **1.00** | 4ms |
+| **commander** | tj/commander.js | 216 | 950 | **1.00** | 0.64 | 0.69 | 0.40 | 0.80 | 0.90 | 7ms |
+| **koa** | koajs/koa | 109 | 707 | 0.75 | 0.40 | 0.48 | 0.25 | 0.38 | 0.75 | 5ms |
+| **got** | sindresorhus/got | 124 | 4076 | **1.00** | 0.73 | 0.86 | 0.50 | **1.00** | **1.00** | 7ms |
+| **MACRO (mean)** | 4 suites | — | — | **0.92** | **0.67** | **0.74** | **0.48** | **0.79** | **0.91** | ~6ms |
+
+Incremental (all suites): no-op reindex ~30–50ms; single-file edit reindex ~40–80ms, `filesIndexed=1`.
+
+### Reading the numbers
+
+- **Top-5 ≈ 0.91 macro** without embeddings is usable for mid-size Node libs.  
+- **Top-1 ≈ 0.48** is the weak spot: docs (`koa/docs/api/*`), examples, typings, and tests still steal rank-1 on conceptual queries.  
+- **Koa is hardest** here: rich markdown API docs share vocabulary with `lib/*` — this is exactly where a **code embedding** channel should lift MRR/Top-1.  
+- **Express** remains the best-structured target for pure lexical multi-signal retrieval.
+
+### Cases / runners
+
+| File | Role |
+|------|------|
+| `examples/eval.express.json` | Express 4 labels |
+| `examples/eval.commander.json` | Commander labels |
+| `examples/eval.koa.json` | Koa labels |
+| `examples/eval.got.json` | Got labels |
+| `scripts/practice-eval.mjs` | Single-repo IR + incremental |
+| `scripts/bench-suite.mjs` | Multi-repo clone + aggregate |
+| `docs/EMBEDDINGS.md` | Which code embedding models to use |
+
+```bash
+node scripts/bench-suite.mjs
+# with embeddings (recommended for Koa-like repos):
+# export OPENAI_API_KEY=... ; export OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+# node scripts/bench-suite.mjs
+```

@@ -7,7 +7,12 @@
  * Usage:
  *   node scripts/practice-eval.mjs --root /path/to/repo --cases examples/eval.express.json
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+} from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -115,21 +120,51 @@ const inc0 = performance.now();
 const noop = await engine.index();
 const incNoChangeMs = performance.now() - inc0;
 
-// touch one file content via re-index path: write temp change through store by re-reading
-// Simulate by searching only; for true change test we modify a file outside
-import { appendFileSync, readFileSync as rf, writeFileSync as wf } from "node:fs";
-const probeRel = "lib/application.js";
-const probeAbs = path.join(root, probeRel);
-const original = rf(probeAbs, "utf8");
-const marker = `\n// contextengine-eval-marker ${Date.now()}\n`;
-wf(probeAbs, original + marker);
-const ch0 = performance.now();
-const afterChange = await engine.index();
-const incChangeMs = performance.now() - ch0;
-wf(probeAbs, original); // restore
-const ch1 = performance.now();
-await engine.index(); // reindex restore
-const incRestoreMs = performance.now() - ch1;
+function pickProbeFile() {
+  const prefer = [
+    "lib/application.js",
+    "lib/command.js",
+    "lib/context.js",
+    "lib/option.js",
+    "source/create.ts",
+    "source/index.ts",
+    "index.js",
+  ];
+  for (const rel of prefer) {
+    if (existsSync(path.join(root, rel))) return rel;
+  }
+  for (const r of caseResults) {
+    for (const p of r.hitPaths || []) {
+      if (
+        p &&
+        !p.includes("test") &&
+        !p.includes("example") &&
+        existsSync(path.join(root, p))
+      ) {
+        return p;
+      }
+    }
+  }
+  return null;
+}
+
+const probeRel = pickProbeFile();
+let afterChange = { filesIndexed: 0, chunksWritten: 0 };
+let incChangeMs = 0;
+let incRestoreMs = 0;
+if (probeRel) {
+  const probeAbs = path.join(root, probeRel);
+  const original = readFileSync(probeAbs, "utf8");
+  const marker = `\n// contextengine-eval-marker ${Date.now()}\n`;
+  writeFileSync(probeAbs, original + marker);
+  const ch0 = performance.now();
+  afterChange = await engine.index();
+  incChangeMs = performance.now() - ch0;
+  writeFileSync(probeAbs, original);
+  const ch1 = performance.now();
+  await engine.index();
+  incRestoreMs = performance.now() - ch1;
+}
 
 engine.close();
 

@@ -266,7 +266,13 @@ contextengine eval --cases examples/eval.sample.json --root /path/to/repo
 node scripts/practice-eval.mjs --root /tmp/express4 --cases examples/eval.express.json
 ```
 
-Practice report (methodology + Express results + watch behavior): **[EVALUATION.md](./EVALUATION.md)**.
+Practice report (methodology + multi-repo suite + watch): **[EVALUATION.md](./EVALUATION.md)**.  
+Code embedding model choices: **[docs/EMBEDDINGS.md](./docs/EMBEDDINGS.md)**.
+
+```bash
+# Multi-repo mid-size suite (clones under /tmp/ce-bench)
+node scripts/bench-suite.mjs
+```
 
 ## Development
 

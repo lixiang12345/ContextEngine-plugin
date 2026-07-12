@@ -77,19 +77,37 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
   score += Math.min(1.5, overlap * 0.12);
 
   // Prefer implementation over examples/tests/docs (critical on mid-size repos
-  // like Express where examples/ floods lexical matches).
+  // like Express/Commander/Koa where docs & examples flood lexical matches).
   if (/(^|\/)(examples?|demo|samples?|fixtures?)(\/|$)/i.test(chunk.path)) {
-    score -= 0.85;
+    score -= 1.1;
   }
   if (/(^|\/)(test|tests|__tests__|spec)(\/|$)/i.test(chunk.path)) {
-    score -= 0.45;
+    score -= 0.7;
   }
-  if (/\b(test|spec|mock|fixture)\b/i.test(chunk.path)) score -= 0.15;
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) score -= 0.7;
+  if (/\b(test|spec|mock|fixture)\b/i.test(chunk.path)) score -= 0.2;
+  // API markdown / guides often mirror symbol names and steal Top-1 without embeddings
+  if (/(^|\/)(docs?|documentation|guide|guides|website|bench|benchmark)(\/|$)/i.test(chunk.path)) {
+    score -= 0.9;
+  }
+  if (/\.d\.ts$/i.test(chunk.path) || /(^|\/)typings?(\/|$)/i.test(chunk.path)) {
+    score -= 0.75;
+  }
+  if (chunk.language === "markdown") {
+    score -= q.intent === "symbol" ? 0.55 : 0.35;
+  }
   // Boost primary source trees common in small/mid repos
-  if (/(^|\/)(lib|src|app|pkg|internal)(\/|$)/i.test(chunk.path)) {
-    score += 0.35;
+  if (/(^|\/)(lib|src|source|app|pkg|internal)(\/|$)/i.test(chunk.path)) {
+    score += 0.55;
   }
-  if (chunk.language === "markdown" && q.intent === "symbol") score -= 0.2;
+  // Basename exact-ish match for last path segment without extension
+  const baseNoExt = base.replace(/\.[^.]+$/, "");
+  for (const t of q.tokens) {
+    if (t.length >= 4 && baseNoExt === t) score += 0.45;
+  }
+  for (const id of q.identifiers) {
+    if (baseNoExt.toLowerCase() === id.toLowerCase()) score += 0.6;
+  }
   if (chunk.language === "git-commit") {
     score += q.prefersCommits ? 0.6 : -0.4;
   }

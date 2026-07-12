@@ -1,0 +1,50 @@
+[
+  {
+    "id": "application",
+    "query": "Koa application listen callback middleware compose",
+    "expectPaths": ["lib/application.js"],
+    "topK": 10
+  },
+  {
+    "id": "context",
+    "query": "context delegate request response cookies state",
+    "expectPaths": ["lib/context.js"],
+    "topK": 8
+  },
+  {
+    "id": "request",
+    "query": "request header accept idempotent length querystring",
+    "expectPaths": ["lib/request.js"],
+    "topK": 8
+  },
+  {
+    "id": "response",
+    "query": "response body status type attachment redirect",
+    "expectPaths": ["lib/response.js"],
+    "topK": 8
+  },
+  {
+    "id": "entry",
+    "query": "module exports Application",
+    "expectPaths": ["lib/application.js"],
+    "topK": 8
+  },
+  {
+    "id": "symbol-createContext",
+    "query": "createContext",
+    "expectPaths": ["lib/application.js"],
+    "topK": 8
+  },
+  {
+    "id": "nl-error",
+    "query": "how are errors handled and onerror emitted",
+    "expectPaths": ["lib/application.js", "lib/context.js"],
+    "topK": 10
+  },
+  {
+    "id": "is-stream",
+    "query": "isStream utility check readable stream",
+    "expectPaths": ["lib/is-stream.js"],
+    "topK": 8
+  }
+]

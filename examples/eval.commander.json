@@ -1,0 +1,62 @@
+[
+  {
+    "id": "command-parse",
+    "query": "how does Command parse argv and process options",
+    "expectPaths": ["lib/command.js"],
+    "topK": 10
+  },
+  {
+    "id": "option",
+    "query": "Option flags default value required optional argument",
+    "expectPaths": ["lib/option.js"],
+    "topK": 8
+  },
+  {
+    "id": "argument",
+    "query": "Argument positional required variadic",
+    "expectPaths": ["lib/argument.js"],
+    "topK": 8
+  },
+  {
+    "id": "help",
+    "query": "Help text formatting longest option term width",
+    "expectPaths": ["lib/help.js"],
+    "topK": 8
+  },
+  {
+    "id": "error",
+    "query": "CommanderError exit code error handling",
+    "expectPaths": ["lib/error.js"],
+    "topK": 8
+  },
+  {
+    "id": "suggest",
+    "query": "suggestSimilar unknown command levenshtein",
+    "expectPaths": ["lib/suggestSimilar.js"],
+    "topK": 8
+  },
+  {
+    "id": "entry",
+    "query": "module exports createCommand program",
+    "expectPaths": ["index.js"],
+    "topK": 8
+  },
+  {
+    "id": "symbol-Command",
+    "query": "class Command",
+    "expectPaths": ["lib/command.js"],
+    "topK": 8
+  },
+  {
+    "id": "subcommands",
+    "query": "add nested subcommand executable command",
+    "expectPaths": ["lib/command.js"],
+    "topK": 8
+  },
+  {
+    "id": "nl-cli",
+    "query": "where to register a CLI option with short and long flags",
+    "expectPaths": ["lib/command.js", "lib/option.js"],
+    "topK": 10
+  }
+]

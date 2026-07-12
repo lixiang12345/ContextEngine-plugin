@@ -1,0 +1,62 @@
+[
+  {
+    "id": "create",
+    "query": "create Got instance defaults options merge",
+    "expectPaths": ["source/create.ts"],
+    "topK": 10
+  },
+  {
+    "id": "core-index",
+    "query": "Request class core HTTP request lifecycle",
+    "expectPaths": ["source/core/index.ts"],
+    "topK": 10
+  },
+  {
+    "id": "options",
+    "query": "normalize options url headers timeout retry",
+    "expectPaths": ["source/core/options.ts"],
+    "topK": 10
+  },
+  {
+    "id": "response",
+    "query": "parse body response statusCode rawBody",
+    "expectPaths": ["source/core/response.ts"],
+    "topK": 8
+  },
+  {
+    "id": "as-promise",
+    "query": "asPromise cancelable request promise wrapper",
+    "expectPaths": ["source/as-promise"],
+    "topK": 8
+  },
+  {
+    "id": "entry",
+    "query": "default got export create",
+    "expectPaths": ["source/index.ts", "source/create.ts"],
+    "topK": 8
+  },
+  {
+    "id": "errors",
+    "query": "RequestError HTTPError TimeoutError",
+    "expectPaths": ["source/core/errors.ts"],
+    "topK": 8
+  },
+  {
+    "id": "nl-retry",
+    "query": "how does retry work after failed request",
+    "expectPaths": ["source/core"],
+    "topK": 10
+  },
+  {
+    "id": "calculate-retry",
+    "query": "calculateRetryDelay",
+    "expectPaths": ["source/core"],
+    "topK": 8
+  },
+  {
+    "id": "types",
+    "query": "Handlers Hooks Options interface types",
+    "expectPaths": ["source/types.ts", "source/core/options.ts"],
+    "topK": 8
+  }
+]
