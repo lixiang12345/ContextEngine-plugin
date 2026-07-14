@@ -19,6 +19,57 @@ export interface RankedCandidate {
   final: number;
 }
 
+/**
+ * Collapse chunk-level ranking into file-level representatives. Coding tasks often
+ * spread evidence across a class header and several methods; aggregating those
+ * signals prevents one verbose file from occupying many result slots while letting
+ * implementation files compete with documentation that repeats every query term.
+ */
+export function collapseByPath(
+  ranked: RankedCandidate[],
+  q: AnalyzedQuery,
+): RankedCandidate[] {
+  const groups = new Map<string, RankedCandidate[]>();
+  for (const candidate of ranked) {
+    const group = groups.get(candidate.chunk.path) ?? [];
+    group.push(candidate);
+    groups.set(candidate.chunk.path, group);
+  }
+
+  const queryTerms = [...new Set(q.tokens.filter((token) => token.length >= 3))];
+  const collapsed: RankedCandidate[] = [];
+  for (const group of groups.values()) {
+    group.sort(preferImplementation);
+    const best = group[0];
+    const isImplementation =
+      IMPL_EXT.test(best.chunk.path) &&
+      best.chunk.language !== "markdown" &&
+      best.chunk.language !== "git-commit";
+    const fileTokens = new Set(
+      tokenize(
+        [best.chunk.path, ...group.slice(0, 12).map((item) => item.chunk.content)]
+          .join("\n")
+          .slice(0, 36_000),
+      ),
+    );
+    const matchedTerms = queryTerms.filter((term) => fileTokens.has(term)).length;
+    const coverage = queryTerms.length ? matchedTerms / queryTerms.length : 0;
+    const supportingScore = group
+      .slice(1, 4)
+      .reduce((sum, candidate) => sum + Math.max(0, candidate.final), 0);
+    const coverageBoost = coverage * (isImplementation ? 0.18 : 0.05);
+    const supportBoost = isImplementation
+      ? Math.min(0.12, supportingScore * 0.04)
+      : 0;
+    collapsed.push({
+      ...best,
+      channels: { ...best.channels },
+      final: best.final + coverageBoost + supportBoost,
+    });
+  }
+  return collapsed.sort(preferImplementation);
+}
+
 /** Reciprocal Rank Fusion over ranked id lists. */
 export function rrfFuse(
   lists: Array<Array<{ id: string; score: number }>>,

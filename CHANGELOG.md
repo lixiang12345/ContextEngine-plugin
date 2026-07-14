@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Natural-language queries no longer classify ordinary prose words as code symbols; structured identifiers and acronyms still route through the symbol channel.
+- Chunk-level candidates are collapsed and reranked at file level so evidence spread across class headers and methods can compete with repetitive documentation.
+- Diversified search now returns at most the requested `topK` unique file representatives, improving recall without duplicate chunks consuming result slots.
+
 - Optional neural `/v1/rerank` second stage (`CONTEXTENGINE_NEURAL_RERANK=1`) blended after hybrid+feature scoring
 - Production hybrid retrieval defaults (auto → hybrid when embeddings exist)
 - Stronger multi-lang implementation-first rerank (tests/headers/docs penalties)

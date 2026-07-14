@@ -20,4 +20,20 @@ describe("query analyzer", () => {
     const fts = toFtsQuery(q);
     assert.ok(fts.includes("hybrid") || fts.includes("search"));
   });
+
+  it("does not treat ordinary prose as symbol identifiers", () => {
+    const q = analyzeQuery("pause an agent tool call for user approval and resume after the decision");
+    assert.deepEqual(q.identifiers, []);
+    assert.equal(q.intent, "concept");
+    assert.equal(q.tokens.includes("and"), false);
+    assert.equal(q.tokens.includes("the"), false);
+  });
+
+  it("keeps structured and acronym identifiers", () => {
+    const q = analyzeQuery("start ContextEngine and consume SSE JSON events with analyzeQuery");
+    assert.ok(q.identifiers.includes("ContextEngine"));
+    assert.ok(q.identifiers.includes("SSE"));
+    assert.ok(q.identifiers.includes("JSON"));
+    assert.ok(q.identifiers.includes("analyzeQuery"));
+  });
 });

@@ -22,7 +22,32 @@ export interface AnalyzedQuery {
 }
 
 const IDENT_RE =
-  /\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\b[a-z][A-Z][A-Za-z0-9]*\b|\b[A-Za-z_][\w]{2,}\b/g;
+  /\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\b[a-z]+[A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9_]{1,}\b|\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b/g;
+
+const QUERY_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "by",
+  "for",
+  "from",
+  "how",
+  "in",
+  "into",
+  "is",
+  "it",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "with",
+  "where",
+]);
 
 const PATH_HINT_RE = /(?:[\w.-]+\/)+[\w.-]+|\b[\w-]+\.(?:ts|tsx|js|jsx|py|go|rs|java|md)\b/g;
 
@@ -46,7 +71,7 @@ export function analyzeQuery(raw: string): AnalyzedQuery {
     if (id.length >= 3) identifiers.add(id);
   }
 
-  const tokens = tokenize(raw);
+  const tokens = tokenize(raw).filter((token) => !QUERY_STOP_WORDS.has(token));
   const expanded = new Set<string>(tokens);
   for (const id of identifiers) {
     for (const p of splitIdent(id)) expanded.add(p);

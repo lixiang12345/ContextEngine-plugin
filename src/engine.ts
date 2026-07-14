@@ -108,11 +108,11 @@ export class ContextEngine {
     let tokens = estimateTokens(parts.join("\n"));
     let truncated = false;
     const used: SearchHit[] = [];
-    const seenPaths = new Set<string>();
+    const pathCounts = new Map<string, number>();
 
     for (const hit of hits) {
       // Soft cap: avoid flooding same file unless high score
-      const pathCount = [...seenPaths].filter((p) => p === hit.chunk.path).length;
+      const pathCount = pathCounts.get(hit.chunk.path) ?? 0;
       if (pathCount >= 2 && hit.score < 0.55 && used.length >= 3) continue;
 
       const block = formatHit(hit);
@@ -124,7 +124,7 @@ export class ContextEngine {
       parts.push(block);
       tokens += blockTokens;
       used.push(hit);
-      seenPaths.add(hit.chunk.path);
+      pathCounts.set(hit.chunk.path, pathCount + 1);
     }
 
     return {

@@ -11,6 +11,7 @@ import {
 } from "../graph/symbol-graph.js";
 import { analyzeQuery, toFtsQuery } from "./query-analyzer.js";
 import {
+  collapseByPath,
   combineFinal,
   featureScore,
   mmrSelect,
@@ -400,11 +401,12 @@ export class HybridSearcher {
     }
 
     const diversify = opts.diversify !== false;
+    const fileCandidates = collapseByPath(candidates, analyzed);
     // When semantic is strong, diversify less aggressively (keep best ranks)
     const lambda = channelSem.size > 0 ? 0.88 : 0.8;
     const pick = diversify
-      ? mmrSelect(candidates, topK + Math.floor(topK / 3), lambda)
-      : candidates.slice(0, topK + Math.floor(topK / 3));
+      ? mmrSelect(fileCandidates, topK, lambda)
+      : fileCandidates.slice(0, topK);
 
     const source: SearchHit["source"] =
       channelSem.size && (channelFts.size || channelSymbol.size)
@@ -413,7 +415,7 @@ export class HybridSearcher {
           ? "semantic"
           : "bm25";
 
-    return pick.map((c) => ({
+    return pick.slice(0, topK).map((c) => ({
       chunk: c.chunk,
       score: c.final,
       source,
