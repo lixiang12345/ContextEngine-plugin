@@ -262,6 +262,8 @@ function unitEndLine(
   // brace mode
   let depth = 0;
   let seen = false;
+  let parenDepth = 0;
+  let bracketDepth = 0;
   let inStr: '"' | "'" | "`" | null = null;
   let escape = false;
   let inLineComment = false;
@@ -306,9 +308,21 @@ function unitEndLine(
         inStr = ch;
         continue;
       }
-      if (ch === "{") {
+      if (ch === "(") {
+        parenDepth++;
+      } else if (ch === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+      } else if (ch === "[") {
+        bracketDepth++;
+      } else if (ch === "]") {
+        bracketDepth = Math.max(0, bracketDepth - 1);
+      } else if (ch === "{") {
+        // A declaration may contain lambdas or object literals inside its
+        // parameter list before the actual function/class body opens.
+        if (depth === 0 && parenDepth === 0 && bracketDepth === 0) {
+          seen = true;
+        }
         depth++;
-        seen = true;
       } else if (ch === "}") {
         depth--;
         if (seen && depth <= 0) return i + 1;
