@@ -129,6 +129,38 @@ describe("rerank", () => {
     assert.ok(paths.includes("a/x.ts") || paths.includes("a/y.ts"));
   });
 
+  it("does not over-penalize relevant files in a deep shared package", () => {
+    const mk = (id: string, path: string, final: number) => ({
+      id,
+      chunk: {
+        id,
+        path,
+        language: "kotlin",
+        startLine: 1,
+        endLine: 2,
+        content: "x",
+        hash: id,
+      },
+      channels: {},
+      rrf: final,
+      features: final,
+      final,
+    });
+    const ranked = [
+      mk("orchestrator", "src/main/kotlin/com/example/agent/AgentOrchestrator.kt", 1),
+      mk("client", "src/main/kotlin/com/example/agent/RemoteAgentClient.kt", 0.9),
+      mk("frontend", "frontend/src/App.svelte", 0.8),
+    ];
+    const pick = mmrSelect(ranked, 2, 0.8);
+    assert.deepEqual(
+      pick.map((candidate) => candidate.chunk.path),
+      [
+        "src/main/kotlin/com/example/agent/AgentOrchestrator.kt",
+        "src/main/kotlin/com/example/agent/RemoteAgentClient.kt",
+      ],
+    );
+  });
+
   it("collapses chunks and rewards implementation evidence across a file", () => {
     const q = analyzeQuery("consume backend SSE events submit tool results continuation");
     const mk = (id: string, path: string, content: string, final: number, language = "kotlin") => ({

@@ -312,7 +312,10 @@ function pathSimilarity(a: string, b: string): number {
     else break;
   }
   if (pa[pa.length - 1] === pb[pb.length - 1]) return 0.85;
-  return common / Math.max(pa.length, pb.length);
+  // Deep language/package roots are organizational, not duplicate content.
+  // Cap their similarity so MMR does not discard several relevant files from
+  // the same subsystem merely because they share src/main/... directories.
+  return Math.min(0.25, common / Math.max(pa.length, pb.length));
 }
 
 /** Stable tie-break: prefer implementation paths when finals are close. */

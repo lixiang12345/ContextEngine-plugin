@@ -110,7 +110,11 @@ export class HybridSearcher {
           ? requested
           : "bm25";
     const analyzed = analyzeQuery(opts.query);
-    const candidateLimit = Math.max(topK * 8, 40);
+    // File-level reranking needs several chunks from the same file so it can
+    // combine evidence spread across methods. Keep the lexical pool broader
+    // than the final file count; otherwise large source files disappear before
+    // collapseByPath gets a chance to aggregate their evidence.
+    const candidateLimit = Math.max(topK * 16, 128);
 
     let poolIds: Set<string> | null = null;
     if (opts.pathPrefix || opts.language || opts.includeCommits === false) {
