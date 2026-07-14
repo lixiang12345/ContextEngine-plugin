@@ -15,6 +15,7 @@
  */
 
 export { ContextEngine, estimateTokens } from "./engine.js";
+export { startHttpServer } from "./http-server.js";
 export {
   resolveEngineConfig,
   resolveEmbeddingsConfig,
@@ -23,7 +24,7 @@ export {
 } from "./config.js";
 export { chunkFile } from "./chunker/code-chunker.js";
 export { Bm25Index, tokenize } from "./search/bm25.js";
-export { HybridSearcher } from "./search/hybrid.js";
+export { PostgresHybridSearcher } from "./search/postgres-hybrid.js";
 export { analyzeQuery, toFtsQuery } from "./search/query-analyzer.js";
 export {
   featureScore,
@@ -37,10 +38,20 @@ export {
   formatRerankDocument,
   neuralRerankScores,
 } from "./search/neural-rerank.js";
-export { indexWorkspace, parseExtraRootsFromEnv } from "./indexer/indexer.js";
+export {
+  indexWorkspace,
+  indexVirtualWorkspace,
+  parseExtraRootsFromEnv,
+} from "./indexer/indexer.js";
 export { watchAndIndex } from "./indexer/watch.js";
-export { SqliteStore } from "./store/sqlite-store.js";
-export { exportIndex, importIndex } from "./store/export-import.js";
+export { PostgresStore } from "./store/postgres-store.js";
+export {
+  WorkspaceRepository,
+  WorkspaceNotFoundError,
+  RevisionConflictError,
+  MissingBlobError,
+} from "./server/workspace-repository.js";
+export { migrateSqliteIndex } from "./store/migrate-sqlite.js";
 export {
   createEmbeddingProvider,
   CODE_RETRIEVAL_QUERY_INSTRUCT,
@@ -75,3 +86,21 @@ export type {
   IndexProgress,
   IndexRoot,
 } from "./types.js";
+export type {
+  VirtualIndexOptions,
+  VirtualSourceDocument,
+} from "./indexer/indexer.js";
+export type {
+  HttpServerHandle,
+  HttpServerOptions,
+} from "./http-server.js";
+export type {
+  IndexJobMode,
+  IndexJobStatus,
+  StoredIndexJob,
+  StoredSourceDocument,
+  StoredWorkspace,
+  SyncChange,
+  SyncOperation,
+  WorkspaceSourceMode,
+} from "./server/workspace-repository.js";

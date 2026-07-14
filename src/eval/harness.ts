@@ -171,9 +171,9 @@ export function defaultSelfEvalCases(): EvalCase[] {
       expectPaths: ["src/search/rerank.ts"],
     },
     {
-      id: "fts-store",
-      query: "FTS5 chunks_fts symbol table sqlite store",
-      expectPaths: ["src/store/sqlite-store.ts"],
+      id: "postgres-store",
+      query: "PostgreSQL pgvector tsvector HNSW vector search store",
+      expectPaths: ["src/store/postgres-store.ts"],
     },
   ];
 }

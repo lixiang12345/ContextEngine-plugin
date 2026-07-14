@@ -33,7 +33,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
   let engine = new ContextEngine(config);
 
   const ensureReady = async (): Promise<ContextEngine> => {
-    if (!engine.hasIndex()) {
+    if (!(await engine.hasIndex())) {
       if (opts.autoIndex || process.env.CONTEXTENGINE_AUTO_INDEX === "1") {
         await engine.index();
       } else {
@@ -230,7 +230,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     {},
     async () => {
       try {
-        if (!engine.hasIndex()) {
+        if (!(await engine.hasIndex())) {
           return {
             content: [
               {
@@ -249,7 +249,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
             ],
           };
         }
-        const stats = engine.stats();
+        const stats = await engine.stats();
         return {
           content: [
             {
@@ -278,7 +278,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     {},
     async () => {
       try {
-        engine.close();
+        await engine.close();
         engine = new ContextEngine(config);
         const result = await engine.index();
         return {

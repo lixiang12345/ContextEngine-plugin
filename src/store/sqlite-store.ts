@@ -5,6 +5,7 @@ import { ensureDir } from "../util/fs.js";
 import path from "node:path";
 import {
   bufferToVector,
+  type EmbeddingVector,
   vectorToBuffer,
 } from "../embeddings/provider.js";
 
@@ -362,14 +363,28 @@ export class SqliteStore {
     if (!hints.length) return [];
     const scores = new Map<string, number>();
     for (const hint of hints) {
-      const h = `%${hint.replace(/%/g, "")}%`;
+      const normalized = hint.trim().toLowerCase();
+      if (normalized.length < 2) continue;
+      const escaped = normalized.replace(/[\\%_]/g, "\\$&");
+      const h = `%${escaped}%`;
       const rows = this.db
         .prepare(
-          `SELECT id FROM chunks WHERE path LIKE ? LIMIT ?`,
+          `SELECT id, path FROM chunks
+           WHERE lower(path) LIKE ? ESCAPE '\\'
+           ORDER BY length(path), path
+           LIMIT ?`,
         )
-        .all(h, limit) as Array<{ id: string }>;
+        .all(h, limit * 2) as Array<{ id: string; path: string }>;
       for (const r of rows) {
-        scores.set(r.id, Math.max(scores.get(r.id) ?? 0, 2));
+        const base = path.basename(r.path).toLowerCase();
+        const stem = base.replace(/\.[^.]+$/, "");
+        const score =
+          stem === normalized
+            ? 3.2
+            : base.startsWith(`${normalized}.`)
+              ? 3
+              : 2;
+        scores.set(r.id, Math.max(scores.get(r.id) ?? 0, score));
       }
     }
     return [...scores.entries()]
@@ -437,7 +452,11 @@ export class SqliteStore {
     );
   }
 
-  upsertEmbedding(chunkId: string, model: string, vector: number[]): void {
+  upsertEmbedding(
+    chunkId: string,
+    model: string,
+    vector: ArrayLike<number>,
+  ): void {
     this.db
       .prepare(
         `INSERT INTO embeddings(chunk_id, model, dim, vector)
@@ -450,7 +469,10 @@ export class SqliteStore {
       .run(chunkId, model, vector.length, vectorToBuffer(vector));
   }
 
-  getEmbeddings(model?: string): Array<{ chunkId: string; vector: number[] }> {
+  getEmbeddings(model?: string): Array<{
+    chunkId: string;
+    vector: EmbeddingVector;
+  }> {
     const rows = model
       ? (this.db
           .prepare(`SELECT chunk_id, vector FROM embeddings WHERE model = ?`)
@@ -467,8 +489,8 @@ export class SqliteStore {
   getEmbeddingsForIds(
     ids: string[],
     model?: string,
-  ): Array<{ chunkId: string; vector: number[] }> {
-    const out: Array<{ chunkId: string; vector: number[] }> = [];
+  ): Array<{ chunkId: string; vector: EmbeddingVector }> {
+    const out: Array<{ chunkId: string; vector: EmbeddingVector }> = [];
     for (const id of ids) {
       const row = model
         ? (this.db
@@ -489,6 +511,21 @@ export class SqliteStore {
       }
     }
     return out;
+  }
+
+  embeddingCount(model?: string): number {
+    const row = model
+      ? (this.db
+          .prepare("SELECT COUNT(*) AS n FROM embeddings WHERE model = ?")
+          .get(model) as { n: number })
+      : (this.db.prepare("SELECT COUNT(*) AS n FROM embeddings").get() as {
+          n: number;
+        });
+    return row.n ?? 0;
+  }
+
+  clearEmbeddings(): void {
+    this.db.exec("DELETE FROM embeddings");
   }
 
   chunksMissingEmbeddings(model: string): CodeChunk[] {

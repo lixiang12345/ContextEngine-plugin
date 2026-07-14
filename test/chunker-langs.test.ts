@@ -60,4 +60,16 @@ int node_count(Node* n) {
     assert.ok(chunks.length >= 1);
     assert.equal(chunks[0].language, "c");
   });
+
+  it("extracts C function names instead of words from attached comments", () => {
+    const src = [
+      "/* Process every pending event before returning. */",
+      "int main(int argc, char **argv) {",
+      "  return argc > 0 ? 0 : 1;",
+      "}",
+    ].join("\n");
+    const chunks = chunkFile("src/server.c", src, 2400);
+    assert.ok(chunks.some((chunk) => chunk.symbol === "main"));
+    assert.equal(chunks.some((chunk) => chunk.symbol === "returning"), false);
+  });
 });

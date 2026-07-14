@@ -22,7 +22,23 @@ export interface AnalyzedQuery {
 }
 
 const IDENT_RE =
-  /\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\b[a-z]+[A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9_]{1,}\b|\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b/g;
+  /\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\b[a-z]+[A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9_]{1,}\b|\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b|\b[A-Z][a-z][A-Za-z0-9]{2,}\b/g;
+
+const CAPITALIZED_PROSE = new Set([
+  "explain",
+  "find",
+  "given",
+  "how",
+  "locate",
+  "show",
+  "the",
+  "this",
+  "what",
+  "when",
+  "where",
+  "which",
+  "why",
+]);
 
 const QUERY_STOP_WORDS = new Set([
   "a",
@@ -68,7 +84,9 @@ export function analyzeQuery(raw: string): AnalyzedQuery {
   for (const m of raw.matchAll(IDENT_RE)) {
     const id = m[0];
     // skip pure stop-ish short words later
-    if (id.length >= 3) identifiers.add(id);
+    if (id.length >= 3 && !CAPITALIZED_PROSE.has(id.toLowerCase())) {
+      identifiers.add(id);
+    }
   }
 
   const tokens = tokenize(raw).filter((token) => !QUERY_STOP_WORDS.has(token));

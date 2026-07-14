@@ -1,6 +1,6 @@
 # Code embedding models for ContextEngine
 
-This project works **without** embeddings (FTS5 + symbols + feature rerank).  
+This project works **without** embeddings (PostgreSQL FTS + symbols + feature rerank).
 Embeddings close the gap on **conceptual / paraphrased** queries where pure lexical ranking loses to docs/tests.
 
 **Download list (HF IDs + CLI):** [MODELS_DOWNLOAD.md](./MODELS_DOWNLOAD.md)
@@ -11,7 +11,7 @@ Embeddings close the gap on **conceptual / paraphrased** queries where pure lexi
 |-------------|-----|
 | **Code-aware** (or code+NL dual) | Docstrings, identifiers, call sites |
 | **OpenAI-compatible HTTP** `/v1/embeddings` | Current provider is drop-in |
-| Dim ≤ ~1024 (optional) | SQLite BLOB size & speed |
+| Stable dimensions per model | Enables a pgvector HNSW index per embedding dimension |
 | Stable batch API | Index thousands of chunks |
 | Ideally trained with **retrieval** objective | Not only next-token LM |
 
@@ -83,12 +83,56 @@ To approach that with open stack:
 ## How ContextEngine uses embeddings today
 
 ```text
-index:  chunk text → embed → store float32 BLOB in SQLite
-query:  embed(query) once → cosine vs candidate vectors (two-stage)
+index:  chunk text → embed → store a pgvector `vector` in PostgreSQL
+query:  embed(query) once → PostgreSQL cosine KNN + lexical/symbol fusion
         fused with FTS + symbol + feature rerank (RRF)
 ```
 
 Without an API key, semantic channel is **off**; FTS/symbol/rerank still run.
+
+## Where vectors are stored
+
+ContextEngine owns the retrieval index in PostgreSQL. One database can hold many
+workspaces, isolated by the workspace absolute root:
+
+```bash
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine
+```
+
+The GPU/public embedding endpoint only generates vectors for a request; it does not
+retain this workspace index. `--data-dir` is only for finding a legacy SQLite source when
+running `contextengine migrate-sqlite`.
+
+The runtime vector table is:
+
+```sql
+CREATE TABLE ce_embeddings (
+  workspace_id TEXT NOT NULL,
+  chunk_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  embedding vector NOT NULL,
+  PRIMARY KEY (workspace_id, chunk_id)
+);
+```
+
+Each vector stays inside pgvector; the query uses database-side cosine KNN and an HNSW
+index for its dimension. Node receives only the ranked candidate IDs and then fetches
+their chunks, so a large repository does not require a process-wide vector map.
+
+Legacy SQLite `float32` BLOB indexes can be imported once:
+
+```bash
+contextengine migrate-sqlite /path/to/.contextengine/index.db --root /path/to/repo
+```
+
+### Invalidation rules
+
+The index records an `embedding_signature` containing the vector format version, model,
+requested dimensions, Qwen query/document input mode, and maximum input length. When any
+of those settings changes, ContextEngine clears stored embeddings and regenerates them on
+the next `index` run. A legacy index without this signature is also rebuilt once. This
+prevents mixing vectors produced by incompatible model settings.
 
 ## Sizing guide
 

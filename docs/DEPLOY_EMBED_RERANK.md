@@ -205,14 +205,14 @@ export OPENAI_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
 # Safer defaults on 12GB GPUs
 export CONTEXTENGINE_EMBED_BATCH=8
 export CONTEXTENGINE_EMBED_MAX_CHARS=3000
-# optional second-stage neural rerank (needs RERANK_MODEL on the server):
+# Optional second-stage neural rerank. Enable after the acceptance check below:
 # export CONTEXTENGINE_NEURAL_RERANK=1
 # export CONTEXTENGINE_RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
 
 cd /path/to/ContextEngine-plugin
 npm run build
 
-# Index a repo (writes vectors into .contextengine/index.db)
+# Index a repo (writes vectors into PostgreSQL + pgvector)
 node dist/cli.js index /path/to/repo
 
 # Search (auto → hybrid when embeddings exist)
@@ -221,9 +221,44 @@ node dist/cli.js search "how does authentication work" --mode auto -k 8
 # Self-eval
 node dist/cli.js eval --self
 
+# Remote endpoint compatibility: 10 query languages × 10 code languages.
+npm run bench:api
+
 # Multi-language suite
 npm run bench:multilang
 ```
+
+### Temporary public tunnels (Colab / TryCloudflare)
+
+Use the current public origin directly; ContextEngine appends `/v1` when necessary:
+
+```bash
+export CONTEXTENGINE_EMBEDDING_BASE_URL=https://YOUR_CURRENT_TUNNEL.trycloudflare.com
+export CONTEXTENGINE_EMBEDDING_API_KEY=YOUR_CURRENT_API_KEY
+export CONTEXTENGINE_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+export CONTEXTENGINE_EMBEDDING_INPUT_TYPE=1
+# Run the API benchmark before enabling neural rerank in production.
+# export CONTEXTENGINE_NEURAL_RERANK=1
+# export CONTEXTENGINE_RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
+export CONTEXTENGINE_RERANK_INSTRUCTION='Given a programming task or natural language question about a codebase, retrieve the most relevant source code implementation.'
+
+npm run bench:api
+BENCH_SUITES=got-ts,requests-py npm run bench:multilang
+```
+
+TryCloudflare origins and Colab runtime credentials change after restart. Keep the
+runtime active for a full benchmark, put credentials only in an untracked local `.env`
+or shell session, and re-run the API benchmark after every redeploy. Revoke and replace
+any Hugging Face token that was ever pasted into chat or a committed file; this
+ModelScope deployment does not need that token.
+
+### Rerank acceptance check
+
+`/health` and a `200` from `/v1/rerank` only establish API availability. Before setting
+`CONTEXTENGINE_NEURAL_RERANK=1`, run `npm run bench:api` and verify that
+`hasMeaningfulScoreSpread` is `true`. If the report shows all rerank scores tied, the
+ContextEngine client preserves the existing hybrid order instead of blending in a
+non-informative signal; leave neural rerank disabled until the server scoring is fixed.
 
 MCP example:
 
@@ -280,9 +315,10 @@ WantedBy=multi-user.target
 | Neural `/v1/rerank` in search path | **Optional** — set `CONTEXTENGINE_NEURAL_RERANK=1` (blends top-N after hybrid+features; default off so mis-tuned rerankers cannot promote docs over code) |
 | Multi-language structural chunking | **Yes** (see `docs/CHUNKING.md`) |
 
-### Enable neural rerank (optional second stage)
+### Enable neural rerank after acceptance (optional second stage)
 
-Requires the same GPU server with `RERANK_MODEL` loaded (or any compatible `/v1/rerank`).
+Requires the same GPU server with `RERANK_MODEL` loaded (or any compatible `/v1/rerank`)
+and a passing rerank score-spread check.
 
 ```bash
 export CONTEXTENGINE_NEURAL_RERANK=1
@@ -296,7 +332,7 @@ contextengine search "how does authentication work" --mode auto
 ```
 
 Pipeline position: hybrid fuse + feature score → **neural blend on top-N** → graph expand → MMR pack.  
-Failures are best-effort (falls back to hybrid ranking).
+Failures and all-tied score sets are best-effort (falls back to hybrid ranking).
 
 ---
 

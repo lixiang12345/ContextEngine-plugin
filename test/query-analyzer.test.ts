@@ -36,4 +36,11 @@ describe("query analyzer", () => {
     assert.ok(q.identifiers.includes("JSON"));
     assert.ok(q.identifiers.includes("analyzeQuery"));
   });
+
+  it("recognizes a single PascalCase class without treating question words as symbols", () => {
+    const q = analyzeQuery("Where is Optional implemented and transformed?");
+    assert.ok(q.identifiers.includes("Optional"));
+    assert.equal(q.identifiers.includes("Where"), false);
+    assert.equal(q.intent, "symbol");
+  });
 });

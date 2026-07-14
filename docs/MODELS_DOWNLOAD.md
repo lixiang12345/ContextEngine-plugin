@@ -154,7 +154,10 @@ Rerank: Qwen3-Reranker-4B   or  jina-reranker-v3
 
 ## Wire into ContextEngine (after download)
 
-ContextEngine expects OpenAI-compatible **`/v1/embeddings`**. Reranker is **not integrated yet** (feature rerank only).
+ContextEngine expects OpenAI-compatible **`/v1/embeddings`**. An OpenAI-compatible
+**`/v1/rerank`** is also supported as an optional second stage
+(`CONTEXTENGINE_NEURAL_RERANK=1`); keep it off until a score-spread benchmark confirms
+that the endpoint produces meaningful ranking signals.
 
 ```bash
 # Example: TEI for Qwen3-Embedding-0.6B

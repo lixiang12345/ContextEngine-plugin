@@ -95,7 +95,7 @@ const PROFILES: Record<string, LangProfile> = {
   },
   c: {
     start:
-      /^(?:#\s*(?:include|define|ifdef|ifndef|endif|pragma)\b)|^(?:typedef\s+)?(?:struct|enum|union)\s+\w+|^(?:(?:static|inline|extern|const|unsigned|signed|volatile|struct|enum|union)\s+)+[\w\s\*]+\**[A-Za-z_][\w]*\s*\(/,
+      /^(?:#\s*(?:include|define|ifdef|ifndef|endif|pragma)\b)|^(?:typedef\s+)?(?:struct|enum|union)\s+\w+|^(?!(?:if|for|while|switch)\b)(?:(?:static|inline|extern|const|unsigned|signed|volatile|_Noreturn)\s+)*(?:struct\s+\w+|enum\s+\w+|union\s+\w+|[A-Za-z_][\w]*)(?:\s+|\s*\*+\s*)[A-Za-z_][\w]*\s*\(/,
     end: "brace",
     maxStartIndent: 0,
     commentPrefixes: ["//", "/*", "*", "*/"],
@@ -176,10 +176,34 @@ function profileFor(language: string): LangProfile {
   );
 }
 
-function extractSymbol(content: string): string | undefined {
+const NON_SYMBOL_NAMES = new Set([
+  "catch",
+  "for",
+  "if",
+  "return",
+  "switch",
+  "while",
+]);
+
+function symbolSource(content: string, language: string): string {
+  if (language === "markdown") return content;
+  let source = content
+    .replace(/\/\*[\s\S]*?\*\//g, "\n")
+    .replace(/\/\/.*$/gm, "");
+  if (language === "python" || language === "ruby") {
+    source = source.replace(/^\s*#.*$/gm, "");
+  }
+  return source;
+}
+
+function extractSymbol(content: string, language: string): string | undefined {
+  const source = symbolSource(content, language);
   for (const { re, group } of SYMBOL_EXTRACTORS) {
-    const m = content.match(re);
-    if (m?.[group]) return m[group].trim().slice(0, 120);
+    const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
+    for (const match of source.matchAll(new RegExp(re.source, flags))) {
+      const value = match[group]?.trim().slice(0, 120);
+      if (value && !NON_SYMBOL_NAMES.has(value.toLowerCase())) return value;
+    }
   }
   return undefined;
 }
@@ -482,7 +506,7 @@ export function chunkFile(
       startLine: start1,
       endLine: end1,
       content: text,
-      symbol: extractSymbol(text),
+      symbol: extractSymbol(text, language),
       hash: sha256(text),
     });
   }
@@ -497,7 +521,7 @@ export function chunkFile(
       startLine: 1,
       endLine: end1,
       content: text,
-      symbol: extractSymbol(text),
+      symbol: extractSymbol(text, language),
       hash: sha256(text),
     });
   }

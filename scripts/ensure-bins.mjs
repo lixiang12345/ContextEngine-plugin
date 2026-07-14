@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, chmodSync } from "node:fs";
 import path from "node:path";
 
-const bins = ["dist/cli.js", "dist/mcp-server.js"];
+const bins = ["dist/cli.js", "dist/mcp-server.js", "dist/http-server.js"];
 const shebang = "#!/usr/bin/env node\n";
 
 for (const rel of bins) {

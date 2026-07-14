@@ -6,8 +6,7 @@ import {
   createEmbeddingProvider,
   type EmbeddingProvider,
 } from "../embeddings/provider.js";
-import { dbPathFor } from "../config.js";
-import { SqliteStore } from "../store/sqlite-store.js";
+import { PostgresStore } from "../store/postgres-store.js";
 import {
   languageForPath,
   readTextFile,
@@ -15,6 +14,8 @@ import {
 } from "../util/fs.js";
 import { sha256 } from "../util/hash.js";
 import { commitsToChunks, harvestCommits } from "../lineage/commits.js";
+
+const EMBEDDING_FORMAT_VERSION = 2;
 
 export interface IndexResult {
   filesScanned: number;
@@ -24,6 +25,29 @@ export interface IndexResult {
   embeddingsWritten: number;
   durationMs: number;
   roots: string[];
+}
+
+/**
+ * A source file supplied by a remote HTTP workspace. Content is read from the
+ * durable Blob mapping one file at a time, rather than materializing a repo in
+ * the server process.
+ */
+export interface VirtualSourceDocument {
+  path: string;
+  content: string;
+  hash: string;
+  language: string;
+  mtimeMs: number;
+  size: number;
+  rootAlias?: string;
+}
+
+export interface VirtualIndexOptions {
+  filesTotal: number;
+  deletedPaths?: string[];
+  rebuild?: boolean;
+  rootLabel?: string;
+  onProgress?: (progress: IndexProgress) => void;
 }
 
 interface ResolvedRoot {
@@ -68,14 +92,17 @@ export async function indexWorkspace(
   onProgress?: (p: IndexProgress) => void,
 ): Promise<IndexResult> {
   const started = Date.now();
-  const store = new SqliteStore(dbPathFor(config.dataDir));
-  store.setMeta("root", config.root);
+  const store = await PostgresStore.open({
+    databaseUrl: requireDatabaseUrl(config),
+    workspaceId: config.workspaceId ?? config.root,
+  });
+  await store.setMeta("root", config.root);
   if (config.extraRoots?.length) {
-    store.setMeta("extra_roots", JSON.stringify(config.extraRoots));
+    await store.setMeta("extra_roots", JSON.stringify(config.extraRoots));
   }
 
   const roots = resolveRoots(config);
-  store.setMeta(
+  await store.setMeta(
     "roots",
     JSON.stringify(
       roots.map((r) => ({ name: r.name, path: r.absPath, kind: r.kind })),
@@ -120,14 +147,14 @@ export async function indexWorkspace(
 
   const livePaths = new Set(jobs.map((j) => j.indexRel));
   // Keep synthetic commit paths
-  for (const p of store.listFilePaths()) {
+  for (const p of await store.listFilePaths()) {
     if (p.startsWith(".git/commits/")) livePaths.add(p);
   }
 
   let filesRemoved = 0;
-  for (const existing of store.listFilePaths()) {
+  for (const existing of await store.listFilePaths()) {
     if (!livePaths.has(existing) && !existing.startsWith(".git/commits/")) {
-      store.deleteFile(existing);
+      await store.deleteFile(existing);
       filesRemoved++;
     }
   }
@@ -142,7 +169,7 @@ export async function indexWorkspace(
     if (content === null) continue;
 
     const fileHash = sha256(content);
-    if (store.getFileHash(job.indexRel) === fileHash) {
+    if ((await store.getFileHash(job.indexRel)) === fileHash) {
       onProgress?.({
         phase: "chunk",
         filesTotal: jobs.length,
@@ -160,8 +187,8 @@ export async function indexWorkspace(
       // ignore
     }
 
-    store.transaction(() => {
-      store.upsertFile({
+    await store.transaction(async (tx) => {
+      await tx.upsertFile({
         path: job.indexRel,
         hash: fileHash,
         language: languageForPath(job.relPath),
@@ -169,7 +196,7 @@ export async function indexWorkspace(
         size: job.size,
         rootAlias: job.root.name,
       });
-      store.replaceChunksForFile(job.indexRel, chunks, job.root.name);
+      await tx.replaceChunksForFile(job.indexRel, chunks, job.root.name);
     });
 
     filesIndexed++;
@@ -195,15 +222,15 @@ export async function indexWorkspace(
     });
     const commits = harvestCommits(config.root, commitLimit);
     const lineageKey = commits.map((c) => c.hash).join(",");
-    const prevKey = store.getMeta("commit_lineage_key");
+    const prevKey = await store.getMeta("commit_lineage_key");
     if (lineageKey !== prevKey) {
       const commitChunks = commitsToChunks(commits);
-      store.transaction(() => {
-        for (const p of store.listFilePaths()) {
-          if (p.startsWith(".git/commits/")) store.deleteFile(p);
+      await store.transaction(async (tx) => {
+        for (const p of await tx.listFilePaths()) {
+          if (p.startsWith(".git/commits/")) await tx.deleteFile(p);
         }
         for (const chunk of commitChunks) {
-          store.upsertFile({
+          await tx.upsertFile({
             path: chunk.path,
             hash: chunk.hash,
             language: "git-commit",
@@ -211,28 +238,49 @@ export async function indexWorkspace(
             size: chunk.content.length,
             rootAlias: "main",
           });
-          store.replaceChunksForFile(chunk.path, [chunk], "main");
+          await tx.replaceChunksForFile(chunk.path, [chunk], "main");
           chunksWritten++;
         }
       });
-      store.setMeta("commit_lineage_key", lineageKey);
+      await store.setMeta("commit_lineage_key", lineageKey);
     }
   }
 
   let embeddingsWritten = 0;
   const embedder = createEmbeddingProvider(config.embeddings);
   if (embedder) {
-    embeddingsWritten = await embedMissing(
+    const embeddingSignature = JSON.stringify({
+      version: EMBEDDING_FORMAT_VERSION,
+      model: embedder.model,
+      dimensions: config.embeddings?.dimensions ?? null,
+      inputType: /^(1|true|yes|on)$/i.test(
+        process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE?.trim() || "",
+      ),
+      maxChars: Number(process.env.CONTEXTENGINE_EMBED_MAX_CHARS || 4000),
+    });
+    const previousSignature = await store.getMeta("embedding_signature");
+    // A legacy index without a signature may contain vectors produced with
+    // different model/query settings, so rebuild it once rather than mixing.
+    if (
+      previousSignature !== embeddingSignature &&
+      (previousSignature || (await store.embeddingCount()) > 0)
+    ) {
+      await store.clearEmbeddings();
+    }
+    const embedded = await embedMissing(
       store,
       embedder,
       onProgress,
       jobs.length,
     );
+    embeddingsWritten = embedded.written;
+    if (embedded.dimension) await store.ensureVectorIndex(embedded.dimension);
+    await store.setMeta("embedding_signature", embeddingSignature);
   }
 
-  store.setMeta("last_indexed_at", new Date().toISOString());
-  if (embedder) store.setMeta("embedding_model", embedder.model);
-  store.close();
+  await store.setMeta("last_indexed_at", new Date().toISOString());
+  if (embedder) await store.setMeta("embedding_model", embedder.model);
+  await store.close();
 
   onProgress?.({
     phase: "done",
@@ -253,19 +301,169 @@ export async function indexWorkspace(
   };
 }
 
+/**
+ * Incrementally index documents kept in PostgreSQL Blob storage. This is the
+ * HTTP-server counterpart to `indexWorkspace`: it shares chunking, graph and
+ * embedding behavior while never reading a caller-controlled local path.
+ */
+export async function indexVirtualWorkspace(
+  config: EngineConfig,
+  documents: AsyncIterable<VirtualSourceDocument>,
+  options: VirtualIndexOptions,
+): Promise<IndexResult> {
+  const started = Date.now();
+  const workspaceId = config.workspaceId ?? config.root;
+  const store = await PostgresStore.open({
+    databaseUrl: requireDatabaseUrl(config),
+    workspaceId,
+  });
+  const onProgress = options.onProgress;
+  const filesTotal = Math.max(0, options.filesTotal);
+  let filesScanned = 0;
+  let filesIndexed = 0;
+  let filesRemoved = 0;
+  let chunksWritten = 0;
+
+  try {
+    if (options.rebuild) {
+      await store.clearWorkspace();
+    }
+    await store.setMeta("root", options.rootLabel ?? `remote://${workspaceId}`);
+    await store.setMeta(
+      "roots",
+      JSON.stringify([
+        {
+          name: "main",
+          path: options.rootLabel ?? `remote://${workspaceId}`,
+          kind: "code",
+        },
+      ]),
+    );
+
+    onProgress?.({
+      phase: "scan",
+      filesTotal,
+      filesDone: 0,
+      chunksTotal: 0,
+      message: "Reading synchronized source blobs",
+    });
+
+    for (const relPath of options.deletedPaths ?? []) {
+      await store.deleteFile(relPath);
+      filesRemoved++;
+    }
+
+    for await (const document of documents) {
+      filesScanned++;
+      if (document.size > config.maxFileBytes) continue;
+      if ((await store.getFileHash(document.path)) === document.hash) {
+        onProgress?.({
+          phase: "chunk",
+          filesTotal,
+          filesDone: filesScanned,
+          chunksTotal: chunksWritten,
+        });
+        continue;
+      }
+
+      const chunks = chunkFile(
+        document.path,
+        document.content,
+        config.maxChunkChars,
+      );
+      await store.transaction(async (tx) => {
+        await tx.upsertFile({
+          path: document.path,
+          hash: document.hash,
+          language: document.language,
+          mtimeMs: document.mtimeMs,
+          size: document.size,
+          rootAlias: document.rootAlias ?? "main",
+        });
+        await tx.replaceChunksForFile(
+          document.path,
+          chunks,
+          document.rootAlias ?? "main",
+        );
+      });
+      filesIndexed++;
+      chunksWritten += chunks.length;
+      onProgress?.({
+        phase: "chunk",
+        filesTotal,
+        filesDone: filesScanned,
+        chunksTotal: chunksWritten,
+        message: document.path,
+      });
+    }
+
+    let embeddingsWritten = 0;
+    const embedder = createEmbeddingProvider(config.embeddings);
+    if (embedder) {
+      const embeddingSignature = JSON.stringify({
+        version: EMBEDDING_FORMAT_VERSION,
+        model: embedder.model,
+        dimensions: config.embeddings?.dimensions ?? null,
+        inputType: /^(1|true|yes|on)$/i.test(
+          process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE?.trim() || "",
+        ),
+        maxChars: Number(process.env.CONTEXTENGINE_EMBED_MAX_CHARS || 4000),
+      });
+      const previousSignature = await store.getMeta("embedding_signature");
+      if (
+        previousSignature !== embeddingSignature &&
+        (previousSignature || (await store.embeddingCount()) > 0)
+      ) {
+        await store.clearEmbeddings();
+      }
+      const embedded = await embedMissing(store, embedder, onProgress, filesTotal);
+      embeddingsWritten = embedded.written;
+      if (embedded.dimension) await store.ensureVectorIndex(embedded.dimension);
+      await store.setMeta("embedding_signature", embeddingSignature);
+      await store.setMeta("embedding_model", embedder.model);
+    }
+
+    await store.setMeta("last_indexed_at", new Date().toISOString());
+    onProgress?.({
+      phase: "done",
+      filesTotal,
+      filesDone: filesScanned,
+      chunksTotal: chunksWritten,
+      message: "Index complete",
+    });
+
+    return {
+      filesScanned,
+      filesIndexed,
+      filesRemoved,
+      chunksWritten,
+      embeddingsWritten,
+      durationMs: Date.now() - started,
+      roots: [options.rootLabel ?? `remote://${workspaceId}`],
+    };
+  } finally {
+    await store.close();
+  }
+}
+
 async function embedMissing(
-  store: SqliteStore,
+  store: PostgresStore,
   embedder: EmbeddingProvider,
   onProgress: ((p: IndexProgress) => void) | undefined,
   filesTotal: number,
-): Promise<number> {
-  const missing = store.chunksMissingEmbeddings(embedder.model);
-  if (missing.length === 0) return 0;
+): Promise<{ written: number; dimension: number | null }> {
+  const total = await store.countChunksMissingEmbeddings(embedder.model);
+  if (total === 0) return { written: 0, dimension: null };
 
   let written = 0;
+  let dimension: number | null = null;
   const batchSize = 32;
-  for (let i = 0; i < missing.length; i += batchSize) {
-    const batch = missing.slice(i, i + batchSize);
+  for (;;) {
+    const batch = await store.chunksMissingEmbeddings(
+      embedder.model,
+      batchSize,
+    );
+    if (batch.length === 0) break;
     const texts = batch.map(
       (c) =>
         `File: ${c.path}\nSymbol: ${c.symbol ?? ""}\n\n${c.content.slice(0, 6000)}`,
@@ -274,22 +472,26 @@ async function embedMissing(
       phase: "embed",
       filesTotal,
       filesDone: filesTotal,
-      chunksTotal: missing.length,
-      message: `Embedding ${i + 1}-${Math.min(i + batchSize, missing.length)} / ${missing.length}`,
+      chunksTotal: total,
+      message: `Embedding ${written + 1}-${written + batch.length} / ${total}`,
     });
     const vectors = await embedder.embed(texts);
-    store.transaction(() => {
+    if (vectors[0]) dimension = vectors[0].length;
+    await store.transaction(async (tx) => {
       for (let j = 0; j < batch.length; j++) {
-        store.upsertEmbedding(batch[j].id, embedder.model, vectors[j]);
+        await tx.upsertEmbedding(batch[j].id, embedder.model, vectors[j]);
         written++;
       }
     });
   }
-  return written;
+  return { written, dimension };
 }
 
-export function resolveDataDir(root: string, dataDir?: string): string {
-  return path.resolve(dataDir ?? path.join(root, ".contextengine"));
+function requireDatabaseUrl(config: EngineConfig): string {
+  if (config.databaseUrl) return config.databaseUrl;
+  throw new Error(
+    "CONTEXTENGINE_DATABASE_URL is required (PostgreSQL with pgvector).",
+  );
 }
 
 export function parseExtraRootsFromEnv(): IndexRoot[] {

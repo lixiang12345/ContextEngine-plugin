@@ -6,7 +6,13 @@ import path from "node:path";
 import { ContextEngine } from "../src/engine.js";
 import { runEval, type EvalCase } from "../src/eval/harness.js";
 
-describe("eval harness", () => {
+const describePostgres =
+  process.env.CONTEXTENGINE_TEST_DATABASE_URL ||
+  process.env.CONTEXTENGINE_DATABASE_URL
+    ? describe
+    : describe.skip;
+
+describePostgres("eval harness", () => {
   let root: string;
   let dataDir: string;
 
@@ -24,7 +30,7 @@ describe("eval harness", () => {
     );
     const engine = ContextEngine.open({ root, dataDir });
     await engine.index();
-    engine.close();
+    await engine.close();
   });
 
   after(() => {
@@ -41,7 +47,7 @@ describe("eval harness", () => {
       },
     ];
     const report = await runEval(engine, cases);
-    engine.close();
+    await engine.close();
     assert.equal(report.total, 1);
     assert.ok(report.meanRecallAtK >= 0);
     assert.ok(report.cases[0].hitPaths.length >= 0);

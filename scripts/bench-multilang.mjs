@@ -13,21 +13,52 @@
  *   node scripts/bench-multilang.mjs
  *
  *   BENCH_ROOT=/tmp/ce-bench-ml node scripts/bench-multilang.mjs
+ *   BENCH_SUITES=got-ts,requests-py node scripts/bench-multilang.mjs
  */
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const benchRoot = process.env.BENCH_ROOT || "/tmp/ce-bench-ml";
-const outDir = path.join(repoRoot, "eval-results");
+const outDir = process.env.BENCH_OUT_DIR || path.join(repoRoot, "eval-results");
 const cli = path.join(repoRoot, "dist/cli.js");
+const embeddingApiKey =
+  process.env.CONTEXTENGINE_EMBEDDING_API_KEY ||
+  process.env.OPENAI_API_KEY ||
+  process.env.EMBEDDING_API_KEY;
+const embeddingApiBase =
+  process.env.CONTEXTENGINE_EMBEDDING_BASE_URL ||
+  process.env.OPENAI_BASE_URL;
+const embeddingModel =
+  process.env.CONTEXTENGINE_EMBEDDING_MODEL ||
+  process.env.OPENAI_EMBEDDING_MODEL ||
+  "Qwen/Qwen3-Embedding-0.6B";
+
+function truthy(value) {
+  return /^(1|true|yes|on)$/i.test((value || "").trim());
+}
 
 /** @type {Array<{id:string,lang:string,clone:{url:string,dir:string,ref?:string},cases:string,pathPrefix?:string,rootSubdir?:string}>} */
 const suites = [
+  {
+    id: "got-ts",
+    lang: "typescript",
+    clone: {
+      url: "https://github.com/sindresorhus/got.git",
+      dir: "got",
+      ref: "v14.4.5",
+    },
+    cases: "examples/eval.got.json",
+  },
   {
     id: "express-js",
     lang: "javascript",
@@ -41,13 +72,21 @@ const suites = [
   {
     id: "gin-go",
     lang: "go",
-    clone: { url: "https://github.com/gin-gonic/gin.git", dir: "gin" },
+    clone: {
+      url: "https://github.com/gin-gonic/gin.git",
+      dir: "gin",
+      ref: "34dac209ffb6ef85cc78c5d217bbb7ad001d68fd",
+    },
     cases: "examples/eval.gin.json",
   },
   {
     id: "cobra-go",
     lang: "go",
-    clone: { url: "https://github.com/spf13/cobra.git", dir: "cobra" },
+    clone: {
+      url: "https://github.com/spf13/cobra.git",
+      dir: "cobra",
+      ref: "adbc8813901bba65827259daa8e22ff94ec1f30e",
+    },
     cases: "examples/eval.cobra.json",
   },
   {
@@ -56,6 +95,7 @@ const suites = [
     clone: {
       url: "https://github.com/psf/requests.git",
       dir: "requests",
+      ref: "f361ead047be5cb873174218582f7d8b9fcd9f49",
     },
     cases: "examples/eval.requests.json",
     rootSubdir: "src/requests",
@@ -77,6 +117,7 @@ const suites = [
     clone: {
       url: "https://github.com/google/leveldb.git",
       dir: "leveldb",
+      ref: "7ee830d02b623e8ffe0b95d59a74db1e58da04c5",
     },
     cases: "examples/eval.leveldb.json",
   },
@@ -97,6 +138,7 @@ const suites = [
     clone: {
       url: "https://github.com/square/okhttp.git",
       dir: "okhttp",
+      ref: "63e3caa7c7248fa38af7ba3375470446e2fb5574",
     },
     cases: "examples/eval.okhttp.json",
     // Main library sources only (avoid jvmTest noise)
@@ -108,43 +150,79 @@ const suites = [
     clone: {
       url: "https://github.com/tokio-rs/axum.git",
       dir: "axum-repo",
+      ref: "b859fc0aec43aaad143b2a8e0bdf3b84efc2e056",
     },
     cases: "examples/eval.axum.json",
     rootSubdir: "axum/src",
   },
 ];
 
+const requestedSuites = new Set(
+  (process.env.BENCH_SUITES || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+const requestedLanguages = new Set(
+  (process.env.BENCH_LANGUAGES || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
+);
+const selectedSuites = suites.filter(
+  (suite) =>
+    (requestedSuites.size === 0 || requestedSuites.has(suite.id)) &&
+    (requestedLanguages.size === 0 || requestedLanguages.has(suite.lang)),
+);
+if (!selectedSuites.length) {
+  throw new Error("No benchmark suites match BENCH_SUITES/BENCH_LANGUAGES");
+}
+
+function runGit(args, cwd, options = {}) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: options.encoding ?? "utf8",
+    stdio: options.stdio,
+  });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    throw new Error(`git ${args.join(" ")} failed${detail ? `: ${detail}` : ""}`);
+  }
+  return result;
+}
+
+function gitOutput(args, cwd) {
+  return runGit(args, cwd).stdout.trim();
+}
+
 function ensureClone(spec) {
+  if (!spec.ref) {
+    throw new Error(`suite clone must use an immutable ref: ${spec.url}`);
+  }
   const dest = path.join(benchRoot, spec.dir);
   mkdirSync(benchRoot, { recursive: true });
   if (!existsSync(dest)) {
-    console.log(`Cloning ${spec.url} → ${dest}`);
-    let r;
-    if (spec.ref) {
-      r = spawnSync(
-        "git",
-        ["clone", "--depth", "1", "--branch", spec.ref, spec.url, dest],
-        { stdio: "inherit" },
-      );
-      if (r.status !== 0) {
-        // fallback: clone then checkout tag
-        spawnSync("git", ["clone", "--depth", "1", spec.url, dest], {
-          stdio: "inherit",
-        });
-        spawnSync("git", ["fetch", "--depth", "1", "origin", "tag", spec.ref], {
-          cwd: dest,
-          stdio: "inherit",
-        });
-        spawnSync("git", ["checkout", spec.ref], { cwd: dest, stdio: "inherit" });
-      }
-    } else {
-      r = spawnSync("git", ["clone", "--depth", "1", spec.url, dest], {
-        stdio: "inherit",
-      });
-      if (r.status !== 0) throw new Error(`clone failed: ${spec.url}`);
-    }
+    console.log(`Initializing ${spec.url} → ${dest}`);
+    runGit(["init", dest], benchRoot, { stdio: "inherit" });
+    runGit(["remote", "add", "origin", spec.url], dest, { stdio: "inherit" });
   }
-  return dest;
+
+  const remote = gitOutput(["remote", "get-url", "origin"], dest);
+  if (remote !== spec.url) {
+    throw new Error(
+      `existing benchmark clone has unexpected origin: ${remote} (expected ${spec.url})`,
+    );
+  }
+
+  console.log(`  pin ${spec.ref}`);
+  runGit(["fetch", "--depth", "1", "origin", spec.ref], dest, {
+    stdio: "inherit",
+  });
+  const target = gitOutput(["rev-parse", "FETCH_HEAD^{commit}"], dest);
+  if (revisionFor(dest) !== target) {
+    runGit(["checkout", "--detach", target], dest, { stdio: "inherit" });
+  }
+  return { root: dest, revision: target };
 }
 
 function runCli(args, cwd) {
@@ -158,6 +236,76 @@ function runCli(args, cwd) {
     status: r.status ?? 1,
     stdout: r.stdout || "",
     stderr: r.stderr || "",
+  };
+}
+
+function revisionFor(root) {
+  const r = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+function trackedPaths(cloneRoot, rootSubdir) {
+  const all = gitOutput(["ls-files", "--full-name"], cloneRoot)
+    .split("\n")
+    .filter(Boolean);
+  if (!rootSubdir) return all;
+  const prefix = `${rootSubdir.replaceAll("\\", "/").replace(/\/+$/, "")}/`;
+  return all
+    .filter((file) => file.startsWith(prefix))
+    .map((file) => file.slice(prefix.length));
+}
+
+function validateGoldCases(cases, sourcePaths) {
+  if (!Array.isArray(cases)) {
+    return {
+      valid: false,
+      cases: 0,
+      trackedPaths: sourcePaths.length,
+      errors: ["gold case file must contain a JSON array"],
+    };
+  }
+  const errors = [];
+  const ids = new Set();
+  for (const [index, entry] of cases.entries()) {
+    const label = `case[${index}]`;
+    if (!entry || typeof entry !== "object") {
+      errors.push(`${label}: expected an object`);
+      continue;
+    }
+    if (typeof entry.id !== "string" || !entry.id.trim()) {
+      errors.push(`${label}: missing non-empty id`);
+    } else if (ids.has(entry.id)) {
+      errors.push(`${label}: duplicate id "${entry.id}"`);
+    } else {
+      ids.add(entry.id);
+    }
+    if (typeof entry.query !== "string" || !entry.query.trim()) {
+      errors.push(`${label}: missing non-empty query`);
+    }
+    if (
+      !Array.isArray(entry.expectPaths) ||
+      entry.expectPaths.length === 0 ||
+      entry.expectPaths.some(
+        (expected) => typeof expected !== "string" || !expected.trim(),
+      )
+    ) {
+      errors.push(`${label}: expectPaths must be a non-empty string array`);
+      continue;
+    }
+    for (const expected of entry.expectPaths) {
+      if (!sourcePaths.some((file) => file.includes(expected))) {
+        errors.push(`${label}: gold path "${expected}" is absent at this revision`);
+      }
+    }
+  }
+  return {
+    valid: errors.length === 0,
+    cases: cases.length,
+    trackedPaths: sourcePaths.length,
+    errors,
   };
 }
 
@@ -204,22 +352,101 @@ const build = spawnSync("npm", ["run", "build"], {
 });
 if (build.status !== 0) process.exit(build.status ?? 1);
 
-const hasEmbed = Boolean(
-  process.env.OPENAI_API_KEY || process.env.CONTEXTENGINE_EMBEDDING_API_KEY,
-);
+let preflight = {
+  attempted: false,
+  embeddingReady: false,
+  rerankReady: false,
+};
+let hasEmbed = Boolean(embeddingApiKey && embeddingApiBase);
+const neuralRerankEnabled = truthy(process.env.CONTEXTENGINE_NEURAL_RERANK);
+if (hasEmbed && process.env.BENCH_API_PREFLIGHT === "0") {
+  preflight.embeddingReady = true;
+}
+if (hasEmbed && process.env.BENCH_API_PREFLIGHT !== "0") {
+  preflight.attempted = true;
+  try {
+    const { apiOriginFromBaseUrl, normalizeOpenAIBaseUrl, openAIEndpoint } =
+      await import(
+        pathToFileURL(path.join(repoRoot, "dist/util/api-url.js")).href
+      );
+    const { requestJson } = await import(
+      pathToFileURL(path.join(repoRoot, "dist/util/http-json.js")).href
+    );
+    const { isEmbeddingReady } = await import(
+      pathToFileURL(path.join(repoRoot, "dist/util/model-health.js")).href
+    );
+    const base = normalizeOpenAIBaseUrl(embeddingApiBase);
+    const health = await requestJson(`${apiOriginFromBaseUrl(base)}/health`, {
+      label: "Benchmark model health check",
+      timeoutMs: 15_000,
+      retries: 0,
+    });
+    if (!isEmbeddingReady(health)) {
+      throw new Error("health response did not report a loaded embedder");
+    }
+    await requestJson(openAIEndpoint(base, "embeddings"), {
+      label: "Benchmark embedding preflight",
+      apiKey: embeddingApiKey,
+      body: { model: embeddingModel, input: "semantic code retrieval preflight" },
+    });
+    preflight.embeddingReady = true;
+
+    if (neuralRerankEnabled) {
+      const rerankBase =
+        process.env.CONTEXTENGINE_RERANK_BASE_URL || embeddingApiBase;
+      const rerankKey =
+        process.env.CONTEXTENGINE_RERANK_API_KEY || embeddingApiKey;
+      const rerankModel =
+        process.env.CONTEXTENGINE_RERANK_MODEL ||
+        process.env.OPENAI_RERANK_MODEL ||
+        "Qwen/Qwen3-Reranker-0.6B";
+      const rerankInstruction =
+        process.env.CONTEXTENGINE_RERANK_INSTRUCTION?.trim();
+      const rerank = await requestJson(
+        openAIEndpoint(normalizeOpenAIBaseUrl(rerankBase), "rerank"),
+        {
+          label: "Benchmark rerank preflight",
+          apiKey: rerankKey,
+          body: {
+            model: rerankModel,
+            query: "find authentication",
+            documents: ["authentication middleware", "image utility"],
+            top_n: 2,
+            ...(rerankInstruction ? { instruction: rerankInstruction } : {}),
+          },
+        },
+      );
+      if (!Array.isArray(rerank.results) || rerank.results.length === 0) {
+        throw new Error("rerank response contained no results");
+      }
+      preflight.rerankReady = true;
+    }
+  } catch (error) {
+    console.error(
+      `Remote benchmark preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(2);
+  }
+}
 console.log(
   hasEmbed
-    ? `Embeddings: ON model=${process.env.OPENAI_EMBEDDING_MODEL || process.env.CONTEXTENGINE_EMBEDDING_MODEL || "default"} base=${process.env.OPENAI_BASE_URL || "default"}`
+    ? `Embeddings: ON model=${embeddingModel} base=${embeddingApiBase}`
     : "Embeddings: OFF (BM25/features only)",
 );
+if (neuralRerankEnabled) {
+  console.log(
+    `Neural rerank: ${preflight.rerankReady ? "ON" : "requested but not preflighted"}`,
+  );
+}
 
 const suiteResults = [];
 
-for (const suite of suites) {
+for (const suite of selectedSuites) {
   console.log(`\n######## ${suite.id} (${suite.lang}) ########`);
   let cloneRoot;
+  let revision;
   try {
-    cloneRoot = ensureClone(suite.clone);
+    ({ root: cloneRoot, revision } = ensureClone(suite.clone));
   } catch (e) {
     console.error("clone failed", e);
     suiteResults.push({
@@ -243,21 +470,77 @@ for (const suite of suites) {
     continue;
   }
 
-  const dataDir = path.join(cloneRoot, ".contextengine-ml");
-  // clean prior index for fair re-embed
-  spawnSync("rm", ["-rf", dataDir]);
+  let cases;
+  try {
+    cases = JSON.parse(readFileSync(path.join(repoRoot, suite.cases), "utf8"));
+  } catch (error) {
+    const message = `could not read gold cases: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(message);
+    suiteResults.push({
+      id: suite.id,
+      lang: suite.lang,
+      revision,
+      error: message,
+    });
+    continue;
+  }
+  const goldValidation = validateGoldCases(
+    cases,
+    trackedPaths(cloneRoot, suite.rootSubdir),
+  );
+  if (!goldValidation.valid) {
+    const error = `gold validation failed: ${goldValidation.errors.join("; ")}`;
+    console.error(error);
+    suiteResults.push({
+      id: suite.id,
+      lang: suite.lang,
+      revision,
+      goldValidation,
+      error,
+    });
+    continue;
+  }
+  console.log(
+    `  gold validated: ${goldValidation.cases} cases against ${goldValidation.trackedPaths} tracked paths`,
+  );
+
+  // Clean this workspace namespace in PostgreSQL for a fair re-embed.
+  const clear = runCli(["clear-index", "--root", root], repoRoot);
+  if (clear.status !== 0) {
+    const error = (clear.stderr || clear.stdout || `clear-index exited ${clear.status}`)
+      .trim()
+      .slice(0, 1000);
+    console.error(`clear-index failed: ${error}`);
+    suiteResults.push({ id: suite.id, lang: suite.lang, error });
+    continue;
+  }
 
   const t0 = performance.now();
-  const idx = runCli(["index", root, "--data-dir", dataDir, "--quiet"], repoRoot);
+  const idx = runCli(["index", root, "--quiet"], repoRoot);
   const indexMs = performance.now() - t0;
   const idxJson = parseJsonBlob(idx.stdout) || {};
+  if (idx.status !== 0) {
+    const error = (idx.stderr || idx.stdout || `index exited ${idx.status}`)
+      .trim()
+      .slice(0, 1000);
+    console.error(`index failed: ${error}`);
+    suiteResults.push({ id: suite.id, lang: suite.lang, error });
+    continue;
+  }
+  if (
+    hasEmbed &&
+    Number(idxJson.chunksWritten || 0) > 0 &&
+    Number(idxJson.embeddingsWritten || 0) !== Number(idxJson.chunksWritten)
+  ) {
+    const error = `embedding count mismatch: chunks=${idxJson.chunksWritten} embeddings=${idxJson.embeddingsWritten}`;
+    console.error(error);
+    suiteResults.push({ id: suite.id, lang: suite.lang, error });
+    continue;
+  }
   console.log(
     `  indexed files=${idxJson.filesScanned ?? "?"} chunks+=${idxJson.chunksWritten ?? "?"} embeds+=${idxJson.embeddingsWritten ?? "?"} (${Math.round(indexMs)}ms)`,
   );
 
-  const cases = JSON.parse(
-    readFileSync(path.join(repoRoot, suite.cases), "utf8"),
-  );
   const caseRows = [];
   let searchMs = 0;
 
@@ -269,8 +552,6 @@ for (const suite of suites) {
       c.query,
       "--root",
       root,
-      "--data-dir",
-      dataDir,
       "-k",
       String(k),
       "--mode",
@@ -282,6 +563,19 @@ for (const suite of suites) {
     }
     const sr = runCli(args, repoRoot);
     searchMs += performance.now() - s0;
+    if (sr.status !== 0) {
+      const error = (sr.stderr || sr.stdout || `search exited ${sr.status}`)
+        .trim()
+        .slice(0, 1000);
+      console.error(`  search failed for ${c.id}: ${error}`);
+      caseRows.push({
+        id: c.id,
+        query: c.query,
+        expectPaths: c.expectPaths || [],
+        error,
+      });
+      continue;
+    }
     const hits = parseJsonBlob(sr.stdout) || [];
     const paths = hits.map((h) => h.chunk?.path || "").filter(Boolean);
     const expect = c.expectPaths || [];
@@ -310,12 +604,23 @@ for (const suite of suites) {
     );
   }
 
-  const n = caseRows.length || 1;
+  const successfulRows = caseRows.filter((row) => !row.error);
+  if (!successfulRows.length) {
+    suiteResults.push({
+      id: suite.id,
+      lang: suite.lang,
+      error: "all searches failed",
+    });
+    continue;
+  }
   const summary = {
     id: suite.id,
     lang: suite.lang,
     root,
-    hasEmbeddings: hasEmbed,
+    revision,
+    goldValidation,
+    hasEmbeddings: hasEmbed && Number(idxJson.embeddingsWritten || 0) > 0,
+    neuralRerankEnabled,
     index: {
       filesScanned: idxJson.filesScanned,
       chunksWritten: idxJson.chunksWritten,
@@ -323,14 +628,26 @@ for (const suite of suites) {
       indexMs: Math.round(indexMs),
     },
     retrieval: {
-      cases: caseRows.length,
-      meanRecallAtK: caseRows.reduce((s, r) => s + r.recallAtK, 0) / n,
-      meanMrr: caseRows.reduce((s, r) => s + r.mrr, 0) / n,
-      meanNdcgAtK: caseRows.reduce((s, r) => s + r.ndcgAtK, 0) / n,
-      top1Accuracy: caseRows.filter((r) => r.successTop1).length / n,
-      top3Accuracy: caseRows.filter((r) => r.successTop3).length / n,
-      top5Accuracy: caseRows.filter((r) => r.successTop5).length / n,
-      meanSearchLatencyMs: searchMs / n,
+      cases: successfulRows.length,
+      failedCases: caseRows.length - successfulRows.length,
+      meanRecallAtK:
+        successfulRows.reduce((s, r) => s + r.recallAtK, 0) /
+        successfulRows.length,
+      meanMrr:
+        successfulRows.reduce((s, r) => s + r.mrr, 0) / successfulRows.length,
+      meanNdcgAtK:
+        successfulRows.reduce((s, r) => s + r.ndcgAtK, 0) /
+        successfulRows.length,
+      top1Accuracy:
+        successfulRows.filter((r) => r.successTop1).length /
+        successfulRows.length,
+      top3Accuracy:
+        successfulRows.filter((r) => r.successTop3).length /
+        successfulRows.length,
+      top5Accuracy:
+        successfulRows.filter((r) => r.successTop5).length /
+        successfulRows.length,
+      meanSearchLatencyMs: searchMs / successfulRows.length,
     },
     cases: caseRows,
   };
@@ -345,7 +662,9 @@ for (const suite of suites) {
 const okSuites = suiteResults.filter((s) => s.retrieval);
 const macro = {
   suites: okSuites.length,
-  hasEmbeddings: hasEmbed,
+  hasEmbeddings: okSuites.some((suite) => suite.hasEmbeddings),
+  neuralRerankEnabled:
+    neuralRerankEnabled && okSuites.some((suite) => suite.neuralRerankEnabled),
   meanRecallAtK:
     okSuites.reduce((s, x) => s + x.retrieval.meanRecallAtK, 0) /
     (okSuites.length || 1),
@@ -381,14 +700,34 @@ for (const s of okSuites) {
 const out = {
   meta: {
     note: "Multi-language semantic retrieval bench (path gold labels).",
-    embedding: {
-      enabled: hasEmbed,
-      base: process.env.OPENAI_BASE_URL || null,
-      model:
-        process.env.OPENAI_EMBEDDING_MODEL ||
-        process.env.CONTEXTENGINE_EMBEDDING_MODEL ||
-        null,
+    benchmarkStandard: {
+      corpus: "real open-source repositories checked out at immutable refs",
+      labels: "human-authored path-substring relevance labels",
+      metrics: ["Recall@k", "MRR", "nDCG@k", "Top1", "Top3", "Top5"],
+      revisionsPinned: selectedSuites.every((suite) => Boolean(suite.clone.ref)),
+      goldPathValidation: {
+        passedSuites: suiteResults.filter(
+          (suite) => suite.goldValidation?.valid,
+        ).length,
+        selectedSuites: selectedSuites.length,
+        allPassed:
+          suiteResults.length === selectedSuites.length &&
+          suiteResults.every((suite) => suite.goldValidation?.valid),
+      },
+      limitations:
+        "This is a project regression benchmark, not an external leaderboard or human-judged retrieval corpus.",
     },
+    embedding: {
+      requested: Boolean(embeddingApiKey && embeddingApiBase),
+      enabled: hasEmbed && preflight.embeddingReady,
+      base: embeddingApiBase || null,
+      model: embeddingApiKey ? embeddingModel : null,
+    },
+    neuralRerank: {
+      requested: neuralRerankEnabled,
+      enabled: neuralRerankEnabled && preflight.rerankReady,
+    },
+    preflight,
   },
   macro,
   suites: suiteResults,

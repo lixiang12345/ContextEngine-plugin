@@ -50,7 +50,7 @@ const indexResult = await engine.index((p) => {
 });
 process.stdout.write("\n");
 const indexMs = performance.now() - t0;
-const stats = engine.stats();
+const stats = await engine.stats();
 
 // --- retrieval metrics ---
 function mrr(hitPaths, expect) {
@@ -166,7 +166,7 @@ if (probeRel) {
   incRestoreMs = performance.now() - ch1;
 }
 
-engine.close();
+await engine.close();
 
 const n = caseResults.length || 1;
 const report = {

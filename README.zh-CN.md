@@ -2,7 +2,7 @@
 
 **面向 AI 编程 Agent 的可移植、Augment 级代码库上下文引擎。**
 
-多信号检索（FTS5 + 符号 + 路径 + 可选向量 + 图扩展 + MMR），让 Agent 少花 token 乱 grep，多花回合改对代码。
+多信号检索（PostgreSQL FTS + 符号 + 路径 + pgvector + 图扩展 + MMR），让 Agent 少花 token 乱 grep，多花回合改对代码。
 
 设计说明：[ARCHITECTURE.md](./ARCHITECTURE.md) · 与 Augment 的诚实对比：[COMPARISON.md](./COMPARISON.md)
 
@@ -15,6 +15,7 @@
 | 仅 BM25 / 云端 Embed / 自建 GPU | **[docs/GETTING_STARTED.md](./docs/GETTING_STARTED.md)** |
 | GPU 运维（Qwen3 embed + rerank） | [docs/DEPLOY_EMBED_RERANK.md](./docs/DEPLOY_EMBED_RERANK.md) |
 | 多语言 IR 指标 | [docs/MULTILANG_BENCH.md](./docs/MULTILANG_BENCH.md) |
+| 远端 IDE / HTTP 同步 API | [docs/HTTP_API.md](./docs/HTTP_API.md) |
 
 ```bash
 # 建索引
@@ -38,7 +39,7 @@ npx contextengine-plugin context "Add logging to payment requests"
 | 能力 | 状态 |
 |------|------|
 | 查询理解 | 意图 + 标识符 / 路径抽取 |
-| 词法检索 | SQLite **FTS5 BM25**（可扩展） |
+| 词法检索 | PostgreSQL `tsvector` + GIN（可扩展） |
 | 符号检索 | 精确 / 前缀符号表 |
 | 语义检索 | 可选 Embeddings，候选上的 **两阶段** 打分 |
 | 融合 + 重排 | RRF + 代码感知特征打分 |
@@ -48,6 +49,7 @@ npx contextengine-plugin context "Add logging to payment requests"
 | 提交血缘 | 近期 git 历史块 |
 | Watch 模式 | 防抖增量重建索引 |
 | MCP | 主工具 `codebase_retrieval` + 搜索 / 文件 / 索引 |
+| HTTP | 带鉴权的工作区同步、索引任务、检索与 SSE 进度 |
 | 评测 | Recall@k、**MRR**、**nDCG@k** |
 
 **与 Augment 的对比：** [COMPARISON.md](./COMPARISON.md) · **架构：** [ARCHITECTURE.md](./ARCHITECTURE.md)
@@ -58,7 +60,8 @@ npx contextengine-plugin context "Add logging to payment requests"
 
 ### 环境要求
 
-- **Node.js ≥ 22.5**（使用内置 `node:sqlite`）
+- **Node.js ≥ 22.5**
+- **带 pgvector 的 PostgreSQL**（仓库提供本地 Compose）
 
 ### 从源码安装（本仓库）
 
@@ -91,16 +94,18 @@ const hits = await engine.search({ query: "auth middleware" });
 ### 1. 为工作区建索引
 
 ```bash
+# 在本仓库先启动一次本地 pgvector：
+npm run db:up
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine
+
 contextengine index
 # 或
 contextengine index /path/to/repo
 ```
 
-索引数据位置：
+索引保存在 PostgreSQL。工作区绝对根路径是命名空间，因此同一个数据库可以容纳多个仓库，运行时也不会把全量向量加载进 Node 内存。
 
-```text
-<repo>/.contextengine/index.db
-```
+`data-dir` 只保留给一次性的旧 SQLite 索引迁移使用。
 
 ### 2. 搜索
 
@@ -146,6 +151,8 @@ contextengine search "checkout timeout" --mode hybrid
 - `CONTEXTENGINE_EMBEDDING_MODEL`
 
 兼容 OpenAI、各类代理，以及提供 `/v1/embeddings` 的本地服务（如 Ollama 兼容网关）。
+Base URL 可以填写根地址（如 `https://gateway.example.com`）或带版本的地址
+（`https://gateway.example.com/v1`）；ContextEngine 会统一为 `/v1`。
 
 ### 自建 GPU 上的 Qwen3（生产路径）
 
@@ -165,6 +172,9 @@ export OPENAI_BASE_URL=http://127.0.0.1:18000/v1
 export OPENAI_API_KEY=ce-local-key
 export OPENAI_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
 export CONTEXTENGINE_EMBED_BATCH=8
+# 可选：在搜索中启用已部署的 /v1/rerank 二阶段。
+# export CONTEXTENGINE_NEURAL_RERANK=1
+# export CONTEXTENGINE_RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
 contextengine index
 ```
 
@@ -227,19 +237,43 @@ args: ["/absolute/path/to/ContextEngine-plugin/dist/mcp-server.js"]
 
 ---
 
+## HTTP 服务
+
+同一套检索内核也能以带鉴权的 HTTP 服务提供给远端 IDE。源文件通过
+PostgreSQL 中的内容寻址 Blob 存储；客户端仅同步变更文件的哈希，提交工作区
+版本后等待后台索引任务，再执行检索。
+
+```bash
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine
+export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
+
+contextengine-http
+# GET /health, GET /openapi.json
+# 所有 /v1 路由使用 Authorization: Bearer <key>
+```
+
+核心接口包括工作区创建/查询、`/sync/plan`、`PUT /blobs/{sha256}`、
+`/sync/commit`、`/index-jobs`、`/search`、`/context` 与 `/file`。
+
+完整的客户端协议、入参出参、SSE 索引进度以及已检查 IntelliJ 插件的适配映射
+见 [docs/HTTP_API.md](./docs/HTTP_API.md)。
+
+---
+
 ## CLI 参考
 
 ```text
-contextengine index [root] [--data-dir dir] [--quiet]
+contextengine index [root] [--quiet]
 contextengine search <query> [-k N] [--mode auto|bm25|semantic|hybrid] [--path-prefix p] [--json]
 contextengine context <task> [--max-tokens N] [--json]
 contextengine status
+contextengine clear-index
+contextengine migrate-sqlite <legacy-index.db>
 contextengine watch [root] [--debounce 800]   # 实时重建索引
 contextengine serve [--auto-index]            # MCP stdio
+contextengine http [--host 127.0.0.1] [--port 8787]  # 带鉴权 HTTP 服务
 contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
-contextengine export-index ./share.db
-contextengine import-index ./share.db
 ```
 
 ---
@@ -248,9 +282,14 @@ contextengine import-index ./share.db
 
 | 环境变量 | 含义 |
 |----------|------|
+| `CONTEXTENGINE_DATABASE_URL` / `DATABASE_URL` | **必填** PostgreSQL 连接串；自动启用 pgvector |
 | `CONTEXTENGINE_ROOT` | MCP 使用的工作区根目录 |
-| `CONTEXTENGINE_DATA_DIR` | 覆盖索引目录 |
+| `CONTEXTENGINE_DATA_DIR` | 仅由 `migrate-sqlite` 用于旧 SQLite 目录 |
 | `CONTEXTENGINE_AUTO_INDEX` | `1` = MCP 首次使用时若无索引则自动建 |
+| `CONTEXTENGINE_HTTP_API_KEY` | HTTP 服务必填 Bearer 密钥 |
+| `CONTEXTENGINE_HTTP_HOST` / `_PORT` | HTTP 监听地址和端口 |
+| `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES` | 单个同步源 Blob 最大字节数（默认 2 MiB） |
+| `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | 允许服务器本地路径工作区（默认关闭） |
 | `CONTEXTENGINE_COMMIT_LIMIT` | 索引的近期 commit 数量（默认 `80`，`0` = 关闭） |
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | 启用 embeddings |
 | `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API 基址 |
@@ -294,13 +333,13 @@ import { ContextEngine } from "contextengine-plugin";
 const engine = ContextEngine.open({ root: "/repo" });
 
 await engine.index((p) => console.log(p.phase, p.filesDone));
-const stats = engine.stats();
+const stats = await engine.stats();
 const hits = await engine.search({ query: "…", topK: 8, mode: "auto" });
 const packed = await engine.getTaskContext({
   task: "…",
   maxTokens: 6000,
 });
-engine.close();
+await engine.close();
 ```
 
 ---
@@ -341,7 +380,14 @@ node scripts/bench-suite.mjs
 
 # 多语言开源套件（需要 embeddings 端点）
 npm run bench:multilang
+
+# 公网 API 冒烟基准：10 种查询语言 × 10 种代码语言，
+# 校验 /health、/v1/embeddings 和 /v1/rerank。
+npm run bench:api
 ```
+
+Colab / TryCloudflare 是临时部署：只在本地 `.env` 或 shell 中设置当前的 Base URL
+和 API Key。runner 会在克隆仓库前预检远端服务，隧道失效时不会产出误导性的分数。
 
 ## 开发
 
@@ -361,7 +407,7 @@ npm run mcp
 ### Phase 1 — ✅ `0.1.0`
 
 - 混合 BM25 + 可选 embeddings
-- 增量 SQLite 索引
+- 增量 PostgreSQL + pgvector 索引
 - MCP + CLI + 库
 - 任务上下文打包
 
@@ -380,7 +426,7 @@ npm run mcp
 
 ### Phase 4 — ✅ `0.4.0`（Augment 级栈）
 
-- FTS5 + 符号 + 路径多信号检索
+- PostgreSQL FTS + 符号 + 路径多信号检索
 - 查询分析、特征重排、MMR 打包
 - 多根 / 文档根
 - MCP 主工具 `codebase_retrieval`
@@ -411,7 +457,7 @@ npm run mcp
 
 1. **面向 Agent，而非聊天** — 结果始终带路径 + 行号，便于落地修改。
 2. **可离线** — 仅 BM25 是合法模式；embeddings 是增强。
-3. **零 native 插件** — 仅 Node 22 `node:sqlite`，安装简单。
+3. **数据库原生检索** — pgvector 负责向量持久化与 ANN，Node 只读取少量候选 chunk。
 4. **可组合** — 可作 MCP 插件、CLI，或嵌入你自己的 agent 循环。
 5. **范围诚实** — 优化所有权与可改性，不宣称与 Augment 完全对等。
 
