@@ -276,24 +276,11 @@ contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
 ```
 
-### 检索预算
+### 检索输出
 
-未传 `maxTokens` / `max_tokens` 时，ContextEngine 会根据目标模型的上下文
-窗口自动计算检索打包预算。算法以 64K 模型窗口对应 8,192 tokens 为基线，
-使用平方根曲线缓慢增长，并把自动预算上限设为 24,576 tokens。这样大窗口
-模型可以获得更多仓库证据，同时避免延迟、成本和低相关片段线性增长。
-
-| 模型上下文窗口 | 自动检索预算 |
-|---:|---:|
-| 32,768 | 5,632 |
-| 64,000 | 8,192 |
-| 128,000 | 11,776 |
-| 200,000 | 15,360 |
-| 400,000 | 21,504 |
-| 500,000 | 24,064 |
-| 1,000,000+ | 24,576 |
-
-仍可显式传入 `maxTokens`，为单次请求设置更低或更高的覆盖值。
+ContextEngine 与模型无关。它只负责召回、重排、去重和证据格式化，不识别
+模型名称或上下文窗口。默认返回 `topK` 选中的全部命中；调用方只有在明确
+需要缩小传输内容时，才传入 `maxTokens` / `max_tokens`。
 
 ---
 
@@ -356,7 +343,7 @@ const stats = await engine.stats();
 const hits = await engine.search({ query: "…", topK: 8, mode: "auto" });
 const packed = await engine.getTaskContext({
   task: "…",
-  contextWindowTokens: 400_000,
+  // 可选的调用方传输限制：maxTokens: 16_000,
 });
 await engine.close();
 ```

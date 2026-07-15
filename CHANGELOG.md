@@ -2,9 +2,8 @@
 
 ## Unreleased
 
-- Retrieval packing now derives its default token budget from the target model context window, using sublinear square-root scaling from an 8K/64K baseline with a 24K automatic cap.
-- Library, CLI, MCP, and HTTP retrieval entrypoints now share the same budget policy; explicit `max_tokens` still overrides automatic sizing.
-- Packed context and HTTP responses expose the resolved budget, context window, reserved output, available input, and budget source.
+- Retrieval output is model-neutral: ContextEngine no longer tracks model names, context windows, or reserved output tokens.
+- Library, CLI, MCP, and HTTP retrieval entrypoints return all reranked `topK` hits by default; explicit `max_tokens` remains an optional caller-controlled transport cap.
 - Natural-language queries no longer classify ordinary prose words as code symbols; structured identifiers and acronyms still route through the symbol channel.
 - Chunk-level candidates are collapsed and reranked at file level so evidence spread across class headers and methods can compete with repetitive documentation.
 - Lexical retrieval keeps a deeper candidate pool before file aggregation so large files with evidence spread across methods are not truncated prematurely.

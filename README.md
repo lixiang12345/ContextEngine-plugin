@@ -263,7 +263,7 @@ plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).
 ```text
 contextengine index [root] [--quiet]
 contextengine search <query> [-k N] [--mode auto|bm25|semantic|hybrid] [--path-prefix p] [--json]
-contextengine context <task> [--context-window-tokens N] [--max-tokens N] [--json]
+contextengine context <task> [--max-tokens N] [--json]
 contextengine status
 contextengine clear-index
 contextengine migrate-sqlite <legacy-index.db>
@@ -274,25 +274,12 @@ contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
 ```
 
-### Retrieval budget
+### Retrieval output
 
-When `maxTokens` / `max_tokens` is omitted, ContextEngine derives the packed
-retrieval budget from the model context window. The curve grows sublinearly from
-an 8,192-token retrieval budget at a 64K model window and caps automatic growth
-at 24,576 tokens. This gives larger models more repository evidence without
-linearly increasing latency and low-signal context.
-
-| Model context | Automatic retrieval budget |
-|---:|---:|
-| 32,768 | 5,632 |
-| 64,000 | 8,192 |
-| 128,000 | 11,776 |
-| 200,000 | 15,360 |
-| 400,000 | 21,504 |
-| 500,000 | 24,064 |
-| 1,000,000+ | 24,576 |
-
-Explicit `maxTokens` remains available for a one-off lower or higher cap.
+ContextEngine is model-neutral. It retrieves, reranks, deduplicates, and formats
+the complete evidence selected by `topK` without inspecting model names or
+context-window sizes. Callers may provide `maxTokens` / `max_tokens` when they
+explicitly need a smaller packed payload; omitting it returns all selected hits.
 
 ---
 
@@ -355,7 +342,7 @@ const stats = await engine.stats();
 const hits = await engine.search({ query: "…", topK: 8, mode: "auto" });
 const packed = await engine.getTaskContext({
   task: "…",
-  contextWindowTokens: 400_000,
+  // Optional caller-controlled transport cap: maxTokens: 16_000,
 });
 await engine.close();
 ```

@@ -19,7 +19,6 @@ import { PostgresHybridSearcher } from "./search/postgres-hybrid.js";
 import { createEmbeddingProvider } from "./embeddings/provider.js";
 import { readTextFile } from "./util/fs.js";
 import { analyzeQuery } from "./search/query-analyzer.js";
-import { resolveRetrievalBudget } from "./retrieval-budget.js";
 
 /**
  * High-level Context Engine API (v0.4 multi-signal retrieval).
@@ -90,17 +89,12 @@ export class ContextEngine {
   }
 
   /**
-   * Pack high-signal context for an engineering task (MMR + budget).
+   * Pack high-signal context for an engineering task (MMR + optional cap).
    * Primary agent entrypoint — mirrors Augment-style "retrieve then edit".
    */
   async getTaskContext(opts: TaskContextOptions): Promise<PackedContext> {
     const topK = opts.topK ?? 12;
-    const budget = resolveRetrievalBudget({
-      maxTokens: opts.maxTokens,
-      contextWindowTokens: opts.contextWindowTokens,
-      reservedOutputTokens: opts.reservedOutputTokens,
-    });
-    const maxTokens = budget.maxTokens;
+    const maxTokens = opts.maxTokens;
     const analyzed = analyzeQuery(opts.task);
 
     const hits = await this.search({
@@ -137,7 +131,11 @@ export class ContextEngine {
 
       const block = formatHit(hit);
       const blockTokens = estimateTokens(block);
-      if (tokens + blockTokens > maxTokens && used.length > 0) {
+      if (
+        maxTokens !== undefined &&
+        tokens + blockTokens > maxTokens &&
+        used.length > 0
+      ) {
         truncated = true;
         break;
       }
@@ -153,7 +151,6 @@ export class ContextEngine {
       packedText: parts.join("\n"),
       estimatedTokens: tokens,
       truncated,
-      budget,
     };
   }
 
@@ -165,16 +162,12 @@ export class ContextEngine {
     opts?: {
       topK?: number;
       maxTokens?: number;
-      contextWindowTokens?: number;
-      reservedOutputTokens?: number;
     },
   ): Promise<PackedContext> {
     return this.getTaskContext({
       task: informationRequest,
       topK: opts?.topK ?? 14,
       maxTokens: opts?.maxTokens,
-      contextWindowTokens: opts?.contextWindowTokens,
-      reservedOutputTokens: opts?.reservedOutputTokens,
       diversify: true,
     });
   }

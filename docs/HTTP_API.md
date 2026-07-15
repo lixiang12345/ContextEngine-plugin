@@ -213,15 +213,15 @@ not overloaded by concurrent full-repository indexing.
 | Endpoint | Input | Output |
 |---|---|---|
 | `POST /v1/workspaces/{id}/search` | `query`, optional `top_k`, `path_prefix`, `language`, `mode`, `expand_graph`, `neural_rerank` | Ranked chunks with path, line range, content, score, retrieval channels |
-| `POST /v1/workspaces/{id}/context` | `task` or `information_request`, optional `top_k`, `max_tokens`, `context_window_tokens`, `reserved_output_tokens`, `path_prefix` | `packed_text`, token estimate, resolved budget, truncation flag, used hits |
+| `POST /v1/workspaces/{id}/context` | `task` or `information_request`, optional `top_k`, `max_tokens`, `path_prefix` | `packed_text`, token estimate, truncation flag, used hits |
 | `GET /v1/workspaces/{id}/file?path=...&start_line=...&end_line=...` | Relative path and optional 1-based range | `{path, content, start_line, end_line}` |
 | `GET /v1/workspaces/{id}/status` | None | Workspace revision and index stats |
 
 `context` accepts both `information_request` and `informationRequest` so clients
 that follow different naming conventions can use the agent-oriented endpoint.
-If `max_tokens` is omitted, the server sizes retrieval from
-`context_window_tokens` using the same sublinear policy as the library and MCP
-tools. The response `budget.source` is `explicit` or `context-window`.
+If `max_tokens` is omitted, the server returns every reranked hit selected by
+`top_k`. `max_tokens` is an optional caller-controlled transport cap; the server
+does not maintain model names or infer limits from model context windows.
 
 ## Mapping from the packaged IntelliJ plugin
 
