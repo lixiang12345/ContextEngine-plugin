@@ -5,6 +5,8 @@
  * - scripts/embed_rerank_server.py  POST /v1/rerank
  * - Jina / Cohere-style proxies that return { results: [{ index, relevance_score }] }
  */
+import { normalizeOpenAIBaseUrl, openAIEndpoint } from "../util/api-url.js";
+import { requestJson } from "../util/http-json.js";
 
 export interface NeuralRerankConfig {
   apiKey: string;
@@ -20,6 +22,8 @@ export interface NeuralRerankConfig {
   weight: number;
   /** Max chars of document text sent to the reranker. */
   maxDocChars: number;
+  /** Optional task instruction for providers that expose it. */
+  instruction?: string;
 }
 
 export interface NeuralDoc {
@@ -52,7 +56,7 @@ export function resolveNeuralRerankConfig(): NeuralRerankConfig | undefined {
     process.env.CONTEXTENGINE_EMBEDDING_BASE_URL ||
     process.env.OPENAI_BASE_URL ||
     "https://api.openai.com/v1"
-  ).replace(/\/$/, "");
+  );
 
   const model =
     process.env.CONTEXTENGINE_RERANK_MODEL ||
@@ -69,8 +73,17 @@ export function resolveNeuralRerankConfig(): NeuralRerankConfig | undefined {
 
   let maxDocChars = Number(process.env.CONTEXTENGINE_RERANK_MAX_CHARS || 1800);
   if (!Number.isFinite(maxDocChars) || maxDocChars < 200) maxDocChars = 1800;
+  const instruction = process.env.CONTEXTENGINE_RERANK_INSTRUCTION?.trim();
 
-  return { apiKey, baseUrl, model, topN, weight, maxDocChars };
+  return {
+    apiKey,
+    baseUrl: normalizeOpenAIBaseUrl(baseUrl),
+    model,
+    topN,
+    weight,
+    maxDocChars,
+    instruction: instruction || undefined,
+  };
 }
 
 /** Build a compact document string for cross-encoder input. */
@@ -112,29 +125,21 @@ export async function neuralRerankScores(
     query,
     documents: docs.map((d) => d.text),
     top_n: docs.length,
+    ...(config.instruction ? { instruction: config.instruction } : {}),
   };
 
-  const res = await fetch(`${config.baseUrl}/rerank`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`Rerank API ${res.status}: ${errText.slice(0, 400)}`);
-  }
-
-  const json = (await res.json()) as {
+  const json = await requestJson<{
     results?: Array<{
       index?: number;
       relevance_score?: number;
       score?: number;
     }>;
     data?: Array<{ index?: number; score?: number; relevance_score?: number }>;
-  };
+  }>(openAIEndpoint(config.baseUrl, "rerank"), {
+    label: "Rerank API",
+    apiKey: config.apiKey,
+    body,
+  });
 
   const rows = json.results ?? json.data ?? [];
   for (const row of rows) {
@@ -171,12 +176,19 @@ export function blendNeuralScores(
     max = Math.max(max, s);
   }
   if (!Number.isFinite(min) || !Number.isFinite(max)) return;
-  const span = max - min || 1e-9;
+  const span = max - min;
+  for (const c of candidates) {
+    const raw = scores.get(c.id);
+    if (raw === undefined) continue;
+    c.channels.neural = raw;
+  }
+  // A tied score set carries no ordering signal. Preserve the hybrid ranking
+  // instead of shrinking every final score by the rerank blend weight.
+  if (span <= 1e-9) return;
   for (const c of candidates) {
     const raw = scores.get(c.id);
     if (raw === undefined) continue;
     const n = (raw - min) / span;
-    c.channels.neural = raw;
     c.final = (1 - weight) * c.final + weight * n;
   }
 }

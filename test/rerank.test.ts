@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  collapseByPath,
   featureScore,
   mmrSelect,
   preferImplementation,
@@ -126,5 +127,66 @@ describe("rerank", () => {
     // should include b/ when lambda not extreme
     const paths = pick.map((p) => p.chunk.path);
     assert.ok(paths.includes("a/x.ts") || paths.includes("a/y.ts"));
+  });
+
+  it("does not over-penalize relevant files in a deep shared package", () => {
+    const mk = (id: string, path: string, final: number) => ({
+      id,
+      chunk: {
+        id,
+        path,
+        language: "kotlin",
+        startLine: 1,
+        endLine: 2,
+        content: "x",
+        hash: id,
+      },
+      channels: {},
+      rrf: final,
+      features: final,
+      final,
+    });
+    const ranked = [
+      mk("orchestrator", "src/main/kotlin/com/example/agent/AgentOrchestrator.kt", 1),
+      mk("client", "src/main/kotlin/com/example/agent/RemoteAgentClient.kt", 0.9),
+      mk("frontend", "frontend/src/App.svelte", 0.8),
+    ];
+    const pick = mmrSelect(ranked, 2, 0.8);
+    assert.deepEqual(
+      pick.map((candidate) => candidate.chunk.path),
+      [
+        "src/main/kotlin/com/example/agent/AgentOrchestrator.kt",
+        "src/main/kotlin/com/example/agent/RemoteAgentClient.kt",
+      ],
+    );
+  });
+
+  it("collapses chunks and rewards implementation evidence across a file", () => {
+    const q = analyzeQuery("consume backend SSE events submit tool results continuation");
+    const mk = (id: string, path: string, content: string, final: number, language = "kotlin") => ({
+      id,
+      chunk: {
+        id,
+        path,
+        language,
+        startLine: 1,
+        endLine: 20,
+        content,
+        hash: id,
+      },
+      channels: {},
+      rrf: final,
+      features: final,
+      final,
+    });
+    const ranked = [
+      mk("doc", "docs/CONTRACT.md", "SSE events and tool results", 0.82, "markdown"),
+      mk("client-1", "src/RemoteAgentClient.kt", "consume backend SSE events", 0.74),
+      mk("client-2", "src/RemoteAgentClient.kt", "submit tool results for continuation", 0.72),
+      mk("other", "src/Other.kt", "backend events", 0.76),
+    ];
+    const collapsed = collapseByPath(ranked, q);
+    assert.equal(collapsed.length, 3);
+    assert.equal(collapsed[0].chunk.path, "src/RemoteAgentClient.kt");
   });
 });

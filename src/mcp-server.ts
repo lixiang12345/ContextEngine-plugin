@@ -33,7 +33,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
   let engine = new ContextEngine(config);
 
   const ensureReady = async (): Promise<ContextEngine> => {
-    if (!engine.hasIndex()) {
+    if (!(await engine.hasIndex())) {
       if (opts.autoIndex || process.env.CONTEXTENGINE_AUTO_INDEX === "1") {
         await engine.index();
       } else {
@@ -53,7 +53,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
   // Primary Augment-style tool
   server.tool(
     "codebase_retrieval",
-    "PRIMARY tool: retrieve the most relevant code/docs for an information request. Call this BEFORE grepping. Returns packed path+line+content under a token budget using multi-signal ranking (FTS, symbols, path, optional embeddings, graph, MMR).",
+    "PRIMARY tool: retrieve the most relevant code/docs for an information request. Call this BEFORE grepping. Returns the reranked path+line+content evidence pack; max_tokens is an optional caller-controlled output cap.",
     {
       information_request: z
         .string()
@@ -61,14 +61,14 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
           "What you need to know — be specific (APIs, symbols, behaviors, files).",
         ),
       top_k: z.number().int().min(1).max(40).optional(),
-      max_tokens: z.number().int().min(500).max(50000).optional(),
+      max_tokens: z.number().int().min(1).optional(),
     },
     async ({ information_request, top_k, max_tokens }) => {
       try {
         const eng = await ensureReady();
         const packed = await eng.codebaseRetrieval(information_request, {
           topK: top_k ?? 14,
-          maxTokens: max_tokens ?? 8000,
+          maxTokens: max_tokens,
         });
         return {
           content: [{ type: "text" as const, text: packed.packedText }],
@@ -150,7 +150,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     {
       task: z.string(),
       top_k: z.number().int().min(1).max(40).optional(),
-      max_tokens: z.number().int().min(500).max(50000).optional(),
+      max_tokens: z.number().int().min(1).optional(),
       path_prefix: z.string().optional(),
     },
     async ({ task, top_k, max_tokens, path_prefix }) => {
@@ -159,7 +159,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
         const packed = await eng.getTaskContext({
           task,
           topK: top_k ?? 12,
-          maxTokens: max_tokens ?? 6000,
+          maxTokens: max_tokens,
           pathPrefix: path_prefix,
         });
         return {
@@ -230,7 +230,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     {},
     async () => {
       try {
-        if (!engine.hasIndex()) {
+        if (!(await engine.hasIndex())) {
           return {
             content: [
               {
@@ -249,7 +249,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
             ],
           };
         }
-        const stats = engine.stats();
+        const stats = await engine.stats();
         return {
           content: [
             {
@@ -278,7 +278,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     {},
     async () => {
       try {
-        engine.close();
+        await engine.close();
         engine = new ContextEngine(config);
         const result = await engine.index();
         return {

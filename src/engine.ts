@@ -8,14 +8,14 @@ import type {
   SearchOptions,
   TaskContextOptions,
 } from "./types.js";
-import { dbPathFor, resolveEngineConfig } from "./config.js";
+import { resolveEngineConfig } from "./config.js";
 import {
   indexWorkspace,
   parseExtraRootsFromEnv,
   type IndexResult,
 } from "./indexer/indexer.js";
-import { SqliteStore, storeExists } from "./store/sqlite-store.js";
-import { HybridSearcher } from "./search/hybrid.js";
+import { PostgresStore } from "./store/postgres-store.js";
+import { PostgresHybridSearcher } from "./search/postgres-hybrid.js";
 import { createEmbeddingProvider } from "./embeddings/provider.js";
 import { readTextFile } from "./util/fs.js";
 import { analyzeQuery } from "./search/query-analyzer.js";
@@ -25,8 +25,9 @@ import { analyzeQuery } from "./search/query-analyzer.js";
  */
 export class ContextEngine {
   readonly config: EngineConfig;
-  private store: SqliteStore | null = null;
-  private searcher: HybridSearcher | null = null;
+  private store: PostgresStore | null = null;
+  private storeOpening: Promise<PostgresStore> | null = null;
+  private searcher: PostgresHybridSearcher | null = null;
 
   constructor(config: EngineConfig) {
     this.config = config;
@@ -34,7 +35,9 @@ export class ContextEngine {
 
   static open(opts: {
     root?: string;
+    workspaceId?: string;
     dataDir?: string;
+    databaseUrl?: string;
     extraRoots?: IndexRoot[];
   } = {}): ContextEngine {
     const cfg = resolveEngineConfig(opts);
@@ -47,40 +50,51 @@ export class ContextEngine {
   }
 
   get dbPath(): string {
-    return dbPathFor(this.config.dataDir);
+    return "PostgreSQL (pgvector)";
   }
 
   async index(
     onProgress?: Parameters<typeof indexWorkspace>[1],
   ): Promise<IndexResult> {
-    this.close();
+    await this.close();
     const result = await indexWorkspace(this.config, onProgress);
-    this.ensureStore();
-    this.reloadSearcher();
+    await this.reloadSearcher();
     return result;
   }
 
-  stats(): IndexStats {
-    const store = this.ensureStore();
+  async stats(): Promise<IndexStats> {
+    const store = await this.ensureStore();
     return store.stats(this.config.root);
   }
 
-  hasIndex(): boolean {
-    return storeExists(this.dbPath);
+  async hasIndex(): Promise<boolean> {
+    const store = await this.ensureStore();
+    return (await store.chunkCount()) > 0;
+  }
+
+  async clearIndex(): Promise<void> {
+    const store = await this.ensureStore();
+    await store.clearWorkspace();
+    this.searcher = null;
+  }
+
+  /** Reload database-backed search state after an external index job. */
+  async refresh(): Promise<void> {
+    await this.reloadSearcher();
   }
 
   async search(opts: SearchOptions): Promise<SearchHit[]> {
-    const searcher = this.ensureSearcher();
+    const searcher = await this.ensureSearcher();
     return searcher.search(opts);
   }
 
   /**
-   * Pack high-signal context for an engineering task (MMR + budget).
+   * Pack high-signal context for an engineering task (MMR + optional cap).
    * Primary agent entrypoint — mirrors Augment-style "retrieve then edit".
    */
   async getTaskContext(opts: TaskContextOptions): Promise<PackedContext> {
     const topK = opts.topK ?? 12;
-    const maxTokens = opts.maxTokens ?? 6000;
+    const maxTokens = opts.maxTokens;
     const analyzed = analyzeQuery(opts.task);
 
     const hits = await this.search({
@@ -108,23 +122,27 @@ export class ContextEngine {
     let tokens = estimateTokens(parts.join("\n"));
     let truncated = false;
     const used: SearchHit[] = [];
-    const seenPaths = new Set<string>();
+    const pathCounts = new Map<string, number>();
 
     for (const hit of hits) {
       // Soft cap: avoid flooding same file unless high score
-      const pathCount = [...seenPaths].filter((p) => p === hit.chunk.path).length;
+      const pathCount = pathCounts.get(hit.chunk.path) ?? 0;
       if (pathCount >= 2 && hit.score < 0.55 && used.length >= 3) continue;
 
       const block = formatHit(hit);
       const blockTokens = estimateTokens(block);
-      if (tokens + blockTokens > maxTokens && used.length > 0) {
+      if (
+        maxTokens !== undefined &&
+        tokens + blockTokens > maxTokens &&
+        used.length > 0
+      ) {
         truncated = true;
         break;
       }
       parts.push(block);
       tokens += blockTokens;
       used.push(hit);
-      seenPaths.add(hit.chunk.path);
+      pathCounts.set(hit.chunk.path, pathCount + 1);
     }
 
     return {
@@ -141,12 +159,15 @@ export class ContextEngine {
    */
   async codebaseRetrieval(
     informationRequest: string,
-    opts?: { topK?: number; maxTokens?: number },
+    opts?: {
+      topK?: number;
+      maxTokens?: number;
+    },
   ): Promise<PackedContext> {
     return this.getTaskContext({
       task: informationRequest,
       topK: opts?.topK ?? 14,
-      maxTokens: opts?.maxTokens ?? 8000,
+      maxTokens: opts?.maxTokens,
       diversify: true,
     });
   }
@@ -178,44 +199,53 @@ export class ContextEngine {
     );
   }
 
-  close(): void {
-    this.store?.close();
+  async close(): Promise<void> {
+    const opening = this.storeOpening;
+    const store = this.store ?? (opening ? await opening : null);
     this.store = null;
     this.searcher = null;
+    if (store) await store.close();
   }
 
-  private ensureStore(): SqliteStore {
-    if (!this.store) {
-      if (!storeExists(this.dbPath)) {
+  private async ensureStore(): Promise<PostgresStore> {
+    if (this.store) return this.store;
+    if (!this.storeOpening) {
+      if (!this.config.databaseUrl) {
         throw new Error(
-          `No index found at ${this.dbPath}. Run: contextengine index`,
+          "CONTEXTENGINE_DATABASE_URL is required (PostgreSQL with pgvector).",
         );
       }
-      this.store = new SqliteStore(this.dbPath);
+      this.storeOpening = PostgresStore.open({
+        databaseUrl: this.config.databaseUrl,
+        workspaceId: this.config.workspaceId ?? this.config.root,
+      })
+        .then((store) => {
+          this.store = store;
+          return store;
+        })
+        .finally(() => {
+          this.storeOpening = null;
+        });
     }
-    return this.store;
+    return this.storeOpening;
   }
 
-  private ensureSearcher(): HybridSearcher {
+  private async ensureSearcher(): Promise<PostgresHybridSearcher> {
     if (!this.searcher) {
-      this.reloadSearcher();
+      await this.reloadSearcher();
     }
     return this.searcher!;
   }
 
-  private reloadSearcher(): void {
-    const store = this.ensureStore();
+  private async reloadSearcher(): Promise<void> {
+    const store = await this.ensureStore();
     const embedder = createEmbeddingProvider(this.config.embeddings);
-    const model =
-      embedder?.model ?? store.getMeta("embedding_model") ?? undefined;
-    const searcher = new HybridSearcher();
-    // For large indexes keep chunks in memory for graph/feature scoring;
-    // FTS/symbol queries hit SQLite.
+    const stats = await store.stats(this.config.root);
+    const searcher = new PostgresHybridSearcher();
     searcher.load({
-      chunks: store.getAllChunks(),
-      embeddings: store.getEmbeddings(model),
       embedder,
       store,
+      hasEmbeddings: stats.hasEmbeddings,
       neuralRerank: this.config.neuralRerank ?? null,
     });
     this.searcher = searcher;

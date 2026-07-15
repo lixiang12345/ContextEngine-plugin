@@ -35,4 +35,37 @@ export class Gamma {
   it("returns empty for empty content", () => {
     assert.deepEqual(chunkFile("x.ts", "   ", 1000), []);
   });
+
+  it("does not close a Kotlin class on a constructor default lambda", () => {
+    const src = `
+class ContextEngineClient(
+    private val runtimeSettings: () -> RuntimeSettings = {
+        RuntimeSettings("node")
+    },
+  ) {
+    fun restart() {
+      stopProcess()
+    }
+
+    private fun ensureStarted() {
+      println("started")
+    }
+  }
+
+  data class RuntimeSettings(val nodePath: String)
+  `.trim();
+
+    const chunks = chunkFile("src/ContextEngineClient.kt", src, 2400);
+    const indexed = chunks.map((chunk) => chunk.content).join("\n");
+
+    assert.match(indexed, /fun restart/);
+    assert.match(indexed, /private fun ensureStarted/);
+    assert.ok(
+      chunks.some(
+        (chunk) =>
+          chunk.symbol === "ContextEngineClient" &&
+          chunk.content.includes("ensureStarted"),
+      ),
+    );
+  });
 });

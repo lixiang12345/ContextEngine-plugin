@@ -1,0 +1,63 @@
+services:
+  contextengine:
+    build:
+      context: .
+      target: runtime
+    image: contextengine-plugin:local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      CONTEXTENGINE_DATABASE_URL: postgresql://contextengine:contextengine@postgres:5432/contextengine
+      CONTEXTENGINE_HTTP_HOST: 0.0.0.0
+      CONTEXTENGINE_HTTP_PORT: 8787
+      CONTEXTENGINE_HTTP_API_KEY: ${CONTEXTENGINE_HTTP_API_KEY:?Set CONTEXTENGINE_HTTP_API_KEY before starting Docker Compose}
+      CONTEXTENGINE_HTTP_MAX_BLOB_BYTES: ${CONTEXTENGINE_HTTP_MAX_BLOB_BYTES:-2097152}
+      CONTEXTENGINE_EMBEDDING_API_KEY: ${CONTEXTENGINE_EMBEDDING_API_KEY:-}
+      CONTEXTENGINE_EMBEDDING_BASE_URL: ${CONTEXTENGINE_EMBEDDING_BASE_URL:-}
+      CONTEXTENGINE_EMBEDDING_MODEL: ${CONTEXTENGINE_EMBEDDING_MODEL:-}
+      CONTEXTENGINE_EMBEDDING_DIMENSIONS: ${CONTEXTENGINE_EMBEDDING_DIMENSIONS:-}
+      CONTEXTENGINE_EMBEDDING_INPUT_TYPE: ${CONTEXTENGINE_EMBEDDING_INPUT_TYPE:-}
+      CONTEXTENGINE_NEURAL_RERANK: ${CONTEXTENGINE_NEURAL_RERANK:-}
+      CONTEXTENGINE_RERANK_API_KEY: ${CONTEXTENGINE_RERANK_API_KEY:-}
+      CONTEXTENGINE_RERANK_BASE_URL: ${CONTEXTENGINE_RERANK_BASE_URL:-}
+      CONTEXTENGINE_RERANK_MODEL: ${CONTEXTENGINE_RERANK_MODEL:-}
+      CONTEXTENGINE_RERANK_INSTRUCTION: ${CONTEXTENGINE_RERANK_INSTRUCTION:-}
+    ports:
+      - "${CONTEXTENGINE_DOCKER_HTTP_PORT:-8790}:8787"
+    volumes:
+      - contextengine-runtime:/app/.contextengine-http
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: contextengine
+      POSTGRES_PASSWORD: contextengine
+      POSTGRES_DB: contextengine
+    ports:
+      - "${CONTEXTENGINE_PG_PORT:-54329}:5432"
+    volumes:
+      - contextengine-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contextengine -d contextengine"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  contextengine-runtime:
+  contextengine-postgres:

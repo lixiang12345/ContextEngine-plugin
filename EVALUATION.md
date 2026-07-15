@@ -36,7 +36,7 @@ This only proves the engine works on its own sources — **not** mid-size produc
 | Repo | `expressjs/express` tag **4.21.2** |
 | JS files | ~152 tracked sources (+ tests/examples ≈ 201 indexed paths) |
 | Approx. JS LOC | ~**23k** |
-| Index | ~**1077** chunks, FTS5 on, **no embeddings** (BM25+symbol+rerank only) |
+| Index | ~**1077** chunks, PostgreSQL FTS on, **no embeddings** (BM25+symbol+rerank only) |
 | Cold index time | ~**165 ms** on this machine |
 | Cases | 14 hand-labeled NL/symbol/path queries → expected `lib/*` paths |
 
@@ -109,7 +109,7 @@ debounce (default 800ms)
 indexWorkspace()   ← hash skip unchanged files
     │
     ▼
-SQLite (+ FTS + symbols) updated
+PostgreSQL (+ FTS + symbols) updated
 ```
 
 | Entry | Auto rebuild? |

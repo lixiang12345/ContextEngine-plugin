@@ -5,6 +5,7 @@ import {
   resolveNeuralRerankConfig,
   type NeuralRerankConfig,
 } from "./search/neural-rerank.js";
+import { normalizeOpenAIBaseUrl } from "./util/api-url.js";
 
 export type { NeuralRerankConfig };
 export { resolveNeuralRerankConfig };
@@ -43,11 +44,11 @@ export function resolveEmbeddingsConfig(): EmbeddingsConfig | undefined {
     process.env.EMBEDDING_API_KEY;
   if (!apiKey) return undefined;
 
-  const baseUrl = (
+  const baseUrl = normalizeOpenAIBaseUrl(
     process.env.CONTEXTENGINE_EMBEDDING_BASE_URL ||
     process.env.OPENAI_BASE_URL ||
-    "https://api.openai.com/v1"
-  ).replace(/\/$/, "");
+    "https://api.openai.com/v1",
+  );
 
   const model =
     process.env.CONTEXTENGINE_EMBEDDING_MODEL ||
@@ -55,14 +56,30 @@ export function resolveEmbeddingsConfig(): EmbeddingsConfig | undefined {
     "text-embedding-3-small";
 
   const dimRaw = process.env.CONTEXTENGINE_EMBEDDING_DIMENSIONS;
-  const dimensions = dimRaw ? Number(dimRaw) : undefined;
+  const parsedDimensions = dimRaw ? Number(dimRaw) : undefined;
+  const dimensions =
+    parsedDimensions &&
+    Number.isFinite(parsedDimensions) &&
+    parsedDimensions > 0
+      ? Math.floor(parsedDimensions)
+      : undefined;
 
   return { apiKey, baseUrl, model, dimensions };
 }
 
+export function resolveDatabaseUrl(): string | undefined {
+  return (
+    process.env.CONTEXTENGINE_DATABASE_URL?.trim() ||
+    process.env.DATABASE_URL?.trim() ||
+    undefined
+  );
+}
+
 export function resolveEngineConfig(opts: {
   root?: string;
+  workspaceId?: string;
   dataDir?: string;
+  databaseUrl?: string;
   maxFileBytes?: number;
   maxChunkChars?: number;
   extraRoots?: import("./types.js").IndexRoot[];
@@ -74,7 +91,9 @@ export function resolveEngineConfig(opts: {
   );
   return {
     root,
+    workspaceId: opts.workspaceId,
     dataDir,
+    databaseUrl: opts.databaseUrl ?? resolveDatabaseUrl(),
     extraRoots: opts.extraRoots,
     extraIgnores: opts.extraIgnores,
     embeddings: resolveEmbeddingsConfig(),
@@ -82,8 +101,4 @@ export function resolveEngineConfig(opts: {
     maxFileBytes: opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
     maxChunkChars: opts.maxChunkChars ?? DEFAULT_MAX_CHUNK_CHARS,
   };
-}
-
-export function dbPathFor(dataDir: string): string {
-  return path.join(dataDir, "index.db");
 }

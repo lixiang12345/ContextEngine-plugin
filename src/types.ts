@@ -63,9 +63,16 @@ export interface IndexRoot {
 export interface EngineConfig {
   /** Absolute path to the primary workspace / repo root. */
   root: string;
+  /**
+   * Stable database namespace for this workspace. Local CLI/MCP runs default
+   * to `root`; HTTP workspaces use an opaque server-generated id.
+   */
+  workspaceId?: string;
+  /** PostgreSQL connection URL; pgvector is required for runtime storage. */
+  databaseUrl?: string;
   /** Extra roots (other repos, docs trees). */
   extraRoots?: IndexRoot[];
-  /** Directory that stores the SQLite index (default: <root>/.contextengine). */
+  /** Legacy SQLite data directory, used only by the migration command. */
   dataDir: string;
   embeddings?: EmbeddingsConfig;
   /**
@@ -79,6 +86,7 @@ export interface EngineConfig {
     topN: number;
     weight: number;
     maxDocChars: number;
+    instruction?: string;
   };
   /** Max file size in bytes to index. */
   maxFileBytes: number;
@@ -114,6 +122,7 @@ export interface SearchOptions {
 export interface TaskContextOptions {
   task: string;
   topK?: number;
+  /** Optional caller-controlled cap for the returned packed context. */
   maxTokens?: number;
   pathPrefix?: string;
   /** Use MMR diversification (default true). */

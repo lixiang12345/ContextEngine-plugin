@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "contextengine": "./dist/cli.js",
-    "contextengine-mcp": "./dist/mcp-server.js"
+    "contextengine-mcp": "./dist/mcp-server.js",
+    "contextengine-http": "./dist/http-server.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -31,10 +32,15 @@
     "dev": "tsc --watch",
     "cli": "node --import tsx src/cli.ts",
     "mcp": "node --import tsx src/mcp-server.ts",
+    "http": "node --import tsx src/http-server.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
     "eval:self": "npm run build && node dist/cli.js eval --self --reindex",
     "eval:express": "npm run build && node scripts/practice-eval.mjs --root ${EXPRESS_ROOT:-/tmp/ce-bench/express} --cases examples/eval.express.json",
     "bench:suite": "node scripts/bench-suite.mjs",
+    "bench:api": "npm run build && node scripts/bench-api.mjs",
     "bench:multilang": "node scripts/bench-multilang.mjs",
     "prepublishOnly": "npm run build"
   },
@@ -66,10 +72,13 @@
     "@modelcontextprotocol/sdk": "^1.12.1",
     "commander": "^13.1.0",
     "ignore": "^7.0.4",
+    "pg": "^8.22.0",
+    "pgvector": "^0.3.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }

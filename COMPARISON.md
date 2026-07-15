@@ -23,15 +23,15 @@ Last updated: 2026-07-13 · ContextEngine **v0.4.0** (based on public Augment pr
 | Capability | ContextEngine-plugin | Augment Context Engine | Gap severity |
 |------------|----------------------|------------------------|--------------|
 | MCP for Claude Code / Cursor / Zed | ✅ stdio MCP tools | ✅ polished multi-client MCP | Low |
-| Hybrid lexical + semantic search | ✅ FTS5 + symbol + path + RRF + feature rerank + optional embeddings | ✅ specialized semantic retrieval | **Medium** (model still theirs) |
+| Hybrid lexical + semantic search | ✅ PostgreSQL FTS + pgvector + symbol + path + RRF + feature rerank | ✅ specialized semantic retrieval | **Medium** (model still theirs) |
 | Code-native embeddings | ⚠️ BYO OpenAI-compatible; two-stage rerank | ✅ **paired / trained retrieval models** for code | **High** |
 | Real-time local indexing | ✅ hash incremental + `watch` | ✅ local indexer, “next query reflects edits” | Medium |
-| Large monorepo scale | ⚠️ SQLite FTS5 in-process; better than v0.3 | ✅ production indexing at monorepo scale | **High** |
+| Large monorepo scale | ⚠️ PostgreSQL + pgvector; avoids full vector maps, still needs scale testing | ✅ production indexing at monorepo scale | **High** |
 | Multi-repo / org index | ✅ multi-root in one index + profiles | ✅ multi-repo connectors, org-wide index | Medium |
 | Non-code sources (docs, wikis, tickets) | ⚠️ docs/extra roots (local trees) | ✅ Context Connectors (docs, GitHub/GitLab, …) | Medium–High |
 | Commit / history context | ✅ recent git log as searchable chunks | ✅ deeper Context Lineage / history products | Medium |
 | Symbol / dependency awareness | ✅ symbol table + import graph expand | ✅ deeper codebase understanding (proprietary) | Medium |
-| Team index sharing | ⚠️ file export/import of SQLite | ✅ share indexes across team | Medium |
+| Team index sharing | ✅ shared PostgreSQL workspace namespaces | ✅ share indexes across team | Medium |
 | Enterprise security / auth | ❌ none | ✅ private repos, proof-of-possession, trust center | **High** |
 | Benchmarked agent quality lift | ✅ Recall/MRR/nDCG harness (not full PR eval) | ✅ published PR benchmarks (e.g. Elasticsearch 300 PRs) | **High** |
 | Agent quality / token efficiency claims | Not claimed | Claims fewer tool calls, faster completion | Product |
@@ -58,7 +58,9 @@ On large, ambiguous monorepos this gap shows up as:
 ### 2. Scale & production indexing
 
 Augment’s indexer is built for **huge repos**, multi-branch/org sync, CI auto-sync.  
-Our stack is **single-process SQLite** — fine for personal/team repos, not a drop-in for multi-million-LOC multi-tenant index.
+Our stack is **PostgreSQL + pgvector** — suitable for shared local/team deployment and
+avoids full in-process vector maps, but is not yet a drop-in for multi-million-LOC,
+multi-tenant indexing.
 
 ### 3. Multi-source context
 
@@ -99,8 +101,8 @@ Augment (product)
   + enterprise control plane + eval flywheel on real PRs
 
 ContextEngine-plugin (this repo)
-  walk files → chunk → SQLite (BM25 memory + optional vectors)
-  → hybrid search + graph expand + commit chunks → MCP/CLI
+  walk files → chunk → PostgreSQL FTS + pgvector
+  → hybrid search + candidate-local graph expand + commit chunks → MCP/CLI
 ```
 
 We intentionally **do not** try to clone the full control plane.  

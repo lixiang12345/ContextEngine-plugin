@@ -29,7 +29,8 @@ Measured multi-lang bar (Path C): **Top5≈0.98, MRR≈0.93** — see [MULTILANG
 
 ## Shared prerequisites
 
-- **Node.js ≥ 22.5** (uses built-in `node:sqlite`)
+- **Node.js ≥ 22.5**
+- **PostgreSQL with pgvector** (or the included local Compose service)
 - Git (for clone)
 
 ```bash
@@ -41,7 +42,16 @@ npm run build
 npm link
 ```
 
-Index lives at: `<repo>/.contextengine/index.db`
+Start the local service once, or point `CONTEXTENGINE_DATABASE_URL` at an existing
+PostgreSQL server:
+
+```bash
+npm run db:up
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine
+```
+
+Indexes live in PostgreSQL and are isolated by workspace root. SQLite is only a legacy
+migration source.
 
 ---
 
@@ -95,7 +105,7 @@ export OPENAI_EMBEDDING_MODEL=text-embedding-3-small      # or voyage-code-3, et
 # CONTEXTENGINE_EMBEDDING_API_KEY / _BASE_URL / _MODEL
 
 cd /path/to/your/project
-contextengine index          # writes dense vectors into SQLite
+contextengine index          # writes dense vectors into pgvector
 contextengine search "how does auth middleware work" --mode auto
 ```
 
@@ -166,7 +176,9 @@ contextengine search "how does authentication work" --mode auto
 }
 ```
 
-> Neural `/v1/rerank` is available on the GPU server but **not** wired into the default search path. Ranking today is hybrid FTS + symbol + semantic + code-aware feature scorer.
+> Neural `/v1/rerank` is an optional second stage, disabled by default. Set
+> `CONTEXTENGINE_NEURAL_RERANK=1` only after the API benchmark confirms meaningful score
+> spread; the default remains hybrid FTS + symbol + semantic + code-aware feature scoring.
 
 ---
 
@@ -195,19 +207,23 @@ Templates:
 | Variable | Purpose |
 |----------|---------|
 | `CONTEXTENGINE_ROOT` | Workspace root for MCP |
-| `CONTEXTENGINE_DATA_DIR` | Override index directory |
+| `CONTEXTENGINE_DATABASE_URL` / `DATABASE_URL` | Required PostgreSQL connection URL |
+| `CONTEXTENGINE_DATA_DIR` | Legacy SQLite directory used only by `migrate-sqlite` |
 | `CONTEXTENGINE_AUTO_INDEX` | `1` = index on first MCP use if missing |
 | `CONTEXTENGINE_COMMIT_LIMIT` | Recent commits to index (default `80`, `0` = off) |
 | `CONTEXTENGINE_EXCLUDE` | Extra ignore globs |
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | Enable embeddings |
-| `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API base (must include `/v1` host path as used by the server) |
+| `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API origin or `/v1` base; both forms are accepted |
 | `OPENAI_EMBEDDING_MODEL` / `CONTEXTENGINE_EMBEDDING_MODEL` | Model id |
 | `CONTEXTENGINE_EMBED_BATCH` | Chunks per embed request (default `8`; lower on OOM) |
 | `CONTEXTENGINE_EMBED_MAX_CHARS` | Truncate chunk text before embed |
 | `CONTEXTENGINE_EMBED_QUERY_INSTRUCT` | Override query instruct prefix (Qwen3-style) |
+| `CONTEXTENGINE_EMBEDDING_INPUT_TYPE` | `1` sends Qwen3 v2 `input_type=document/query`; leave unset for generic OpenAI gateways |
+| `CONTEXTENGINE_API_TIMEOUT_MS` / `_RETRIES` | Remote API timeout (default `120000`) and bounded retries (default `2`) |
 | `CONTEXTENGINE_NEURAL_RERANK` | `1` = optional neural `/v1/rerank` second stage |
 | `CONTEXTENGINE_RERANK_MODEL` | Rerank model (default Qwen3-Reranker-0.6B) |
 | `CONTEXTENGINE_RERANK_TOP_N` / `_WEIGHT` | Candidates + blend weight |
+| `CONTEXTENGINE_RERANK_INSTRUCTION` | Optional task instruction for rerank APIs that support it |
 
 Full CLI: see root [README.md](../README.md).
 
@@ -224,6 +240,9 @@ npm run eval:self
 
 # multi-language suite (needs Path B or C embeddings)
 npm run bench:multilang
+
+# public endpoint smoke benchmark (embedding + rerank)
+npm run bench:api
 ```
 
 Bench methodology and saved numbers: [MULTILANG_BENCH.md](./MULTILANG_BENCH.md) · [EVALUATION.md](../EVALUATION.md).
@@ -234,12 +253,12 @@ Bench methodology and saved numbers: [MULTILANG_BENCH.md](./MULTILANG_BENCH.md) 
 
 | Symptom | Fix |
 |---------|-----|
-| `node:sqlite` / engine errors | Upgrade to **Node ≥ 22.5** |
+| PostgreSQL / pgvector error | Start `npm run db:up` or set `CONTEXTENGINE_DATABASE_URL` to a pgvector-enabled server |
 | Search only finds exact tokens | Enable Path B or C embeddings, then **re-index** |
 | `Embedding API 5xx` / CUDA OOM | `CONTEXTENGINE_EMBED_BATCH=4` or `1`; restart uvicorn |
 | MCP finds wrong repo | Set `CONTEXTENGINE_ROOT` or `cwd` to the workspace |
 | Index empty / stale | `contextengine index` or MCP `reindex_workspace` |
-| Tunnel works but client fails | `OPENAI_BASE_URL` should be `http://127.0.0.1:18000/v1` (with `/v1`) |
+| Tunnel works but client fails | Set the current tunnel origin or its `/v1` base; ContextEngine accepts either |
 | Too much noise from tests/vendor | Add `.contextengineignore` / `.augmentignore` (see examples) |
 
 ---

@@ -66,7 +66,7 @@ program
           `Extra roots: ${config.extraRoots.map((r) => r.name + ":" + r.path).join(", ")}`,
         );
       }
-      console.log(`Data dir: ${config.dataDir}`);
+      console.log("Storage: PostgreSQL + pgvector");
       console.log(
         config.embeddings
           ? `Embeddings: ${config.embeddings.model} @ ${config.embeddings.baseUrl}`
@@ -84,14 +84,14 @@ program
         lastMsg = msg;
       }
     });
-    engine.close();
+    await engine.close();
     if (!opts.quiet) process.stdout.write("\n");
     console.log(
       JSON.stringify(
         {
           ok: true,
           ...result,
-          db: config.dataDir + "/index.db",
+          storage: "postgresql+pgvector",
         },
         null,
         2,
@@ -132,7 +132,7 @@ program
         pathPrefix: opts.pathPrefix,
         mode: opts.mode,
       });
-      engine.close();
+      await engine.close();
       if (opts.json) {
         console.log(JSON.stringify(hits, null, 2));
         return;
@@ -158,7 +158,7 @@ program
   .option("-r, --root <dir>", "workspace root", process.cwd())
   .option("-d, --data-dir <dir>", "index data directory")
   .option("-k, --top-k <n>", "chunks to consider", "12")
-  .option("--max-tokens <n>", "token budget", "6000")
+  .option("--max-tokens <n>", "optional cap for packed context tokens")
   .option("--json", "JSON output")
   .action(
     async (
@@ -167,7 +167,7 @@ program
         root: string;
         dataDir?: string;
         topK: string;
-        maxTokens: string;
+        maxTokens?: string;
         json?: boolean;
       },
     ) => {
@@ -178,16 +178,16 @@ program
       const packed = await engine.getTaskContext({
         task,
         topK: Number(opts.topK) || 12,
-        maxTokens: Number(opts.maxTokens) || 6000,
+        maxTokens: optionalPositiveInteger(opts.maxTokens),
       });
-      engine.close();
+      await engine.close();
       if (opts.json) {
         console.log(JSON.stringify(packed, null, 2));
         return;
       }
       console.log(packed.packedText);
       console.error(
-        `\n--- ~${packed.estimatedTokens} tokens · ${packed.hits.length} chunks${packed.truncated ? " · truncated" : ""} ---`,
+        `\n--- ~${packed.estimatedTokens} tokens · ${packed.hits.length} chunks${packed.truncated ? " · capped" : ""} ---`,
       );
     },
   );
@@ -197,12 +197,12 @@ program
   .description("Show index status")
   .option("-r, --root <dir>", "workspace root", process.cwd())
   .option("-d, --data-dir <dir>", "index data directory")
-  .action((opts: { root: string; dataDir?: string }) => {
+  .action(async (opts: { root: string; dataDir?: string }) => {
     const engine = ContextEngine.open({
       root: path.resolve(opts.root),
       dataDir: opts.dataDir,
     });
-    if (!engine.hasIndex()) {
+    if (!(await engine.hasIndex())) {
       console.log(
         JSON.stringify(
           { ok: false, error: "no index", hint: "run contextengine index" },
@@ -211,10 +211,11 @@ program
         ),
       );
       process.exitCode = 1;
+      await engine.close();
       return;
     }
-    const stats = engine.stats();
-    engine.close();
+    const stats = await engine.stats();
+    await engine.close();
     console.log(JSON.stringify({ ok: true, ...stats }, null, 2));
   });
 
@@ -234,6 +235,43 @@ program
   });
 
 program
+  .command("http")
+  .description("Start the authenticated HTTP Context Engine service")
+  .option("--host <host>", "listen host", "127.0.0.1")
+  .option("--port <port>", "listen port", "8787")
+  .option("--api-key <key>", "Bearer API key (defaults to CONTEXTENGINE_HTTP_API_KEY)")
+  .option(
+    "--allow-local-workspaces",
+    "allow server-side local-root workspaces (disabled by default)",
+  )
+  .action(
+    async (opts: {
+      host: string;
+      port: string;
+      apiKey?: string;
+      allowLocalWorkspaces?: boolean;
+    }) => {
+      const { startHttpServer } = await import("./http-server.js");
+      const parsedPort = Number(opts.port);
+      if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+        throw new Error("--port must be an integer between 1 and 65535");
+      }
+      const handle = await startHttpServer({
+        host: opts.host,
+        port: parsedPort,
+        apiKey: opts.apiKey,
+        allowLocalWorkspaces: opts.allowLocalWorkspaces,
+      });
+      console.log(`ContextEngine HTTP server listening at ${handle.url}`);
+      const stop = () => {
+        void handle.close().finally(() => process.exit(0));
+      };
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+    },
+  );
+
+program
   .command("watch")
   .description("Watch workspace and incrementally re-index on changes")
   .argument("[root]", "workspace root", process.cwd())
@@ -250,7 +288,7 @@ program
       });
       const { watchAndIndex } = await import("./indexer/watch.js");
       console.log(`Watching ${config.root}`);
-      console.log(`Data dir: ${config.dataDir}`);
+      console.log("Storage: PostgreSQL + pgvector");
       const handle = watchAndIndex(config, {
         debounceMs: Number(opts.debounce) || 800,
         onIndexed: (r) => {
@@ -272,36 +310,33 @@ program
   );
 
 program
-  .command("export-index")
-  .description("Export the SQLite index to a portable file (for backup/team share)")
-  .argument("<dest>", "destination path (e.g. ./index-share.db)")
+  .command("migrate-sqlite")
+  .description("One-time migration from a legacy SQLite index into PostgreSQL")
+  .argument("<source>", "legacy SQLite index.db path")
   .option("-r, --root <dir>", "workspace root", process.cwd())
-  .option("-d, --data-dir <dir>", "index data directory")
-  .action(async (dest: string, opts: { root: string; dataDir?: string }) => {
-    const config = resolveEngineConfig({
-      root: path.resolve(opts.root),
-      dataDir: opts.dataDir,
-    });
-    const { exportIndex } = await import("./store/export-import.js");
-    const dbPath = path.join(config.dataDir, "index.db");
-    const result = exportIndex(dbPath, path.resolve(dest));
-    console.log(JSON.stringify(result, null, 2));
-  });
-
-program
-  .command("import-index")
-  .description("Import a shared SQLite index into the workspace data dir")
-  .argument("<source>", "source index.db path")
-  .option("-r, --root <dir>", "workspace root", process.cwd())
-  .option("-d, --data-dir <dir>", "index data directory")
   .action(async (source: string, opts: { root: string; dataDir?: string }) => {
     const config = resolveEngineConfig({
       root: path.resolve(opts.root),
       dataDir: opts.dataDir,
     });
-    const { importIndex } = await import("./store/export-import.js");
-    const result = importIndex(path.resolve(source), config.dataDir);
+    const { migrateSqliteIndex } = await import("./store/migrate-sqlite.js");
+    const result = await migrateSqliteIndex(path.resolve(source), config);
     console.log(JSON.stringify(result, null, 2));
+  });
+
+program
+  .command("clear-index")
+  .description("Delete this workspace's PostgreSQL index")
+  .option("-r, --root <dir>", "workspace root", process.cwd())
+  .option("-d, --data-dir <dir>", "legacy SQLite data directory")
+  .action(async (opts: { root: string; dataDir?: string }) => {
+    const engine = ContextEngine.open({
+      root: path.resolve(opts.root),
+      dataDir: opts.dataDir,
+    });
+    await engine.clearIndex();
+    await engine.close();
+    console.log(JSON.stringify({ ok: true, storage: "postgresql+pgvector" }, null, 2));
   });
 
 program
@@ -329,7 +364,7 @@ program
         root: path.resolve(opts.root),
         dataDir: opts.dataDir,
       });
-      if (opts.reindex || !engine.hasIndex()) {
+      if (opts.reindex || !(await engine.hasIndex())) {
         await engine.index();
       }
       let cases;
@@ -341,7 +376,7 @@ program
         cases = [];
       }
       const report = await runEval(engine, cases);
-      engine.close();
+      await engine.close();
       console.log(JSON.stringify(report, null, 2));
       if (report.failed > 0) process.exitCode = 1;
     },
@@ -418,3 +453,11 @@ program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });
+
+function optionalPositiveInteger(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : undefined;
+}

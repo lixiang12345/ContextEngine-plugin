@@ -51,7 +51,11 @@ function extractDefs(content: string): string[] {
   return [...names];
 }
 
-function extractImports(filePath: string, content: string, language: string): string[] {
+export function extractImports(
+  filePath: string,
+  content: string,
+  language: string,
+): string[] {
   const out = new Set<string>();
   const dir = path.posix.dirname(filePath.split(path.sep).join("/"));
 

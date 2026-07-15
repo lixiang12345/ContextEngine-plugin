@@ -35,11 +35,28 @@ describe("neural rerank helpers", () => {
     assert.equal(cands[1].channels.neural, 0.9);
   });
 
+  it("blendNeuralScores preserves ordering for tied neural scores", () => {
+    const cands = [
+      { id: "a", final: 0.7, channels: {} as { neural?: number } },
+      { id: "b", final: 0.4, channels: {} as { neural?: number } },
+    ];
+    const scores = new Map([
+      ["a", 0.8],
+      ["b", 0.8],
+    ]);
+    blendNeuralScores(cands, scores, 0.5);
+    assert.equal(cands[0].final, 0.7);
+    assert.equal(cands[1].final, 0.4);
+    assert.equal(cands[0].channels.neural, 0.8);
+    assert.equal(cands[1].channels.neural, 0.8);
+  });
+
   it("resolveNeuralRerankConfig respects enable flag", () => {
     const prev = {
       enable: process.env.CONTEXTENGINE_NEURAL_RERANK,
       key: process.env.OPENAI_API_KEY,
       base: process.env.OPENAI_BASE_URL,
+      instruction: process.env.CONTEXTENGINE_RERANK_INSTRUCTION,
     };
     try {
       delete process.env.CONTEXTENGINE_NEURAL_RERANK;
@@ -48,11 +65,13 @@ describe("neural rerank helpers", () => {
 
       process.env.CONTEXTENGINE_NEURAL_RERANK = "1";
       process.env.OPENAI_API_KEY = "test-key";
-      process.env.OPENAI_BASE_URL = "http://127.0.0.1:18000/v1";
+      process.env.OPENAI_BASE_URL = "http://127.0.0.1:18000";
+      process.env.CONTEXTENGINE_RERANK_INSTRUCTION = "find code";
       const cfg = resolveNeuralRerankConfig();
       assert.ok(cfg);
       assert.equal(cfg!.apiKey, "test-key");
       assert.equal(cfg!.baseUrl, "http://127.0.0.1:18000/v1");
+      assert.equal(cfg!.instruction, "find code");
       assert.ok(cfg!.topN >= 2);
       assert.ok(cfg!.weight > 0 && cfg!.weight < 1);
     } finally {
@@ -62,6 +81,11 @@ describe("neural rerank helpers", () => {
       else process.env.OPENAI_API_KEY = prev.key;
       if (prev.base === undefined) delete process.env.OPENAI_BASE_URL;
       else process.env.OPENAI_BASE_URL = prev.base;
+      if (prev.instruction === undefined) {
+        delete process.env.CONTEXTENGINE_RERANK_INSTRUCTION;
+      } else {
+        process.env.CONTEXTENGINE_RERANK_INSTRUCTION = prev.instruction;
+      }
     }
   });
 });

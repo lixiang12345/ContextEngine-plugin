@@ -1,7 +1,8 @@
 import type { CodeChunk, SearchHit, SearchOptions } from "../types.js";
-import { Bm25Index } from "./bm25.js";
+import { Bm25Index, tokenize } from "./bm25.js";
 import {
   cosineSimilarity,
+  type EmbeddingVector,
   type EmbeddingProvider,
 } from "../embeddings/provider.js";
 import {
@@ -11,6 +12,7 @@ import {
 } from "../graph/symbol-graph.js";
 import { analyzeQuery, toFtsQuery } from "./query-analyzer.js";
 import {
+  collapseByPath,
   combineFinal,
   featureScore,
   mmrSelect,
@@ -28,7 +30,7 @@ import type { SqliteStore } from "../store/sqlite-store.js";
 
 export interface HybridSearchInput {
   chunks: CodeChunk[];
-  embeddings?: Array<{ chunkId: string; vector: number[] }>;
+  embeddings?: Array<{ chunkId: string; vector: EmbeddingVector }>;
   embedder?: EmbeddingProvider | null;
   /** When set, use FTS5 + symbol tables for scalable retrieval */
   store?: SqliteStore | null;
@@ -48,7 +50,7 @@ function previewOf(content: string, max = 220): string {
 export class HybridSearcher {
   private chunksById = new Map<string, CodeChunk>();
   private bm25 = new Bm25Index();
-  private embeddings = new Map<string, number[]>();
+  private embeddings = new Map<string, EmbeddingVector>();
   private embedder: EmbeddingProvider | null = null;
   private graph: SymbolGraph | null = null;
   private store: SqliteStore | null = null;
@@ -109,7 +111,11 @@ export class HybridSearcher {
           ? requested
           : "bm25";
     const analyzed = analyzeQuery(opts.query);
-    const candidateLimit = Math.max(topK * 8, 40);
+    // File-level reranking needs several chunks from the same file so it can
+    // combine evidence spread across methods. Keep the lexical pool broader
+    // than the final file count; otherwise large source files disappear before
+    // collapseByPath gets a chance to aggregate their evidence.
+    const candidateLimit = Math.max(topK * 16, 128);
 
     let poolIds: Set<string> | null = null;
     if (opts.pathPrefix || opts.language || opts.includeCommits === false) {
@@ -200,17 +206,24 @@ export class HybridSearcher {
     }
 
     // --- Channel 3: path hints ---
-    if (wantLexical && analyzed.pathHints.length) {
+    const inferredPathHints = new Set(analyzed.pathHints);
+    for (const identifier of analyzed.identifiers) {
+      inferredPathHints.add(identifier);
+      for (const part of tokenize(identifier)) {
+        if (part.length >= 4) inferredPathHints.add(part);
+      }
+    }
+    if (wantLexical && inferredPathHints.size) {
       let pathHits: Array<{ id: string; score: number }> = [];
       if (this.store) {
         pathHits = this.store
-          .searchByPathHints(analyzed.pathHints, candidateLimit)
+          .searchByPathHints([...inferredPathHints], candidateLimit)
           .filter((r) => allow(r.id));
       } else {
         const scores = new Map<string, number>();
         for (const c of this.chunksById.values()) {
           if (!allow(c.id)) continue;
-          for (const hint of analyzed.pathHints) {
+          for (const hint of inferredPathHints) {
             if (c.path.toLowerCase().includes(hint.toLowerCase())) {
               scores.set(c.id, 2);
             }
@@ -400,11 +413,12 @@ export class HybridSearcher {
     }
 
     const diversify = opts.diversify !== false;
+    const fileCandidates = collapseByPath(candidates, analyzed);
     // When semantic is strong, diversify less aggressively (keep best ranks)
     const lambda = channelSem.size > 0 ? 0.88 : 0.8;
     const pick = diversify
-      ? mmrSelect(candidates, topK + Math.floor(topK / 3), lambda)
-      : candidates.slice(0, topK + Math.floor(topK / 3));
+      ? mmrSelect(fileCandidates, topK, lambda)
+      : fileCandidates.slice(0, topK);
 
     const source: SearchHit["source"] =
       channelSem.size && (channelFts.size || channelSymbol.size)
@@ -413,7 +427,7 @@ export class HybridSearcher {
           ? "semantic"
           : "bm25";
 
-    return pick.map((c) => ({
+    return pick.slice(0, topK).map((c) => ({
       chunk: c.chunk,
       score: c.final,
       source,
