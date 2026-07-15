@@ -263,7 +263,7 @@ plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).
 ```text
 contextengine index [root] [--quiet]
 contextengine search <query> [-k N] [--mode auto|bm25|semantic|hybrid] [--path-prefix p] [--json]
-contextengine context <task> [--max-tokens N] [--json]
+contextengine context <task> [--context-window-tokens N] [--max-tokens N] [--json]
 contextengine status
 contextengine clear-index
 contextengine migrate-sqlite <legacy-index.db>
@@ -273,6 +273,26 @@ contextengine http [--host 127.0.0.1] [--port 8787]  # authenticated HTTP servic
 contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
 ```
+
+### Retrieval budget
+
+When `maxTokens` / `max_tokens` is omitted, ContextEngine derives the packed
+retrieval budget from the model context window. The curve grows sublinearly from
+an 8,192-token retrieval budget at a 64K model window and caps automatic growth
+at 24,576 tokens. This gives larger models more repository evidence without
+linearly increasing latency and low-signal context.
+
+| Model context | Automatic retrieval budget |
+|---:|---:|
+| 32,768 | 5,632 |
+| 64,000 | 8,192 |
+| 128,000 | 11,776 |
+| 200,000 | 15,360 |
+| 400,000 | 21,504 |
+| 500,000 | 24,064 |
+| 1,000,000+ | 24,576 |
+
+Explicit `maxTokens` remains available for a one-off lower or higher cap.
 
 ---
 
@@ -335,7 +355,7 @@ const stats = await engine.stats();
 const hits = await engine.search({ query: "…", topK: 8, mode: "auto" });
 const packed = await engine.getTaskContext({
   task: "…",
-  maxTokens: 6000,
+  contextWindowTokens: 400_000,
 });
 await engine.close();
 ```

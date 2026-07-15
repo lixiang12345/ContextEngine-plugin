@@ -748,6 +748,14 @@ class HttpContextService {
             informationRequest: z.string().trim().min(1).max(20_000).optional(),
             top_k: positiveInteger.max(40).optional(),
             max_tokens: positiveInteger.max(50_000).optional(),
+            context_window_tokens: positiveInteger
+              .min(16_384)
+              .max(2_000_000)
+              .optional(),
+            reserved_output_tokens: positiveInteger
+              .min(1_024)
+              .max(65_536)
+              .optional(),
             path_prefix: z.string().min(1).max(4096).optional(),
           })
           .parse(await readJsonBody(request, 128 * 1024));
@@ -757,7 +765,9 @@ class HttpContextService {
         const packed = await engine.getTaskContext({
           task,
           topK: input.top_k ?? 14,
-          maxTokens: input.max_tokens ?? 8000,
+          maxTokens: input.max_tokens,
+          contextWindowTokens: input.context_window_tokens,
+          reservedOutputTokens: input.reserved_output_tokens,
           pathPrefix: input.path_prefix,
           diversify: true,
         });
@@ -766,6 +776,13 @@ class HttpContextService {
           packed_text: packed.packedText,
           estimated_tokens: packed.estimatedTokens,
           truncated: packed.truncated,
+          budget: {
+            max_tokens: packed.budget.maxTokens,
+            context_window_tokens: packed.budget.contextWindowTokens,
+            reserved_output_tokens: packed.budget.reservedOutputTokens,
+            available_input_tokens: packed.budget.availableInputTokens,
+            source: packed.budget.source,
+          },
           hits: packed.hits.map(hitPayload),
         });
         return;

@@ -122,7 +122,12 @@ export interface SearchOptions {
 export interface TaskContextOptions {
   task: string;
   topK?: number;
+  /** Explicit retrieval cap. Overrides context-window based sizing. */
   maxTokens?: number;
+  /** Model context window used to derive a retrieval cap when maxTokens is absent. */
+  contextWindowTokens?: number;
+  /** Output tokens reserved outside the model input budget. */
+  reservedOutputTokens?: number;
   pathPrefix?: string;
   /** Use MMR diversification (default true). */
   diversify?: boolean;
@@ -134,6 +139,13 @@ export interface PackedContext {
   packedText: string;
   estimatedTokens: number;
   truncated: boolean;
+  budget: {
+    maxTokens: number;
+    contextWindowTokens: number;
+    reservedOutputTokens: number;
+    availableInputTokens: number;
+    source: "explicit" | "context-window";
+  };
 }
 
 export interface IndexProgress {

@@ -19,6 +19,7 @@ import { PostgresHybridSearcher } from "./search/postgres-hybrid.js";
 import { createEmbeddingProvider } from "./embeddings/provider.js";
 import { readTextFile } from "./util/fs.js";
 import { analyzeQuery } from "./search/query-analyzer.js";
+import { resolveRetrievalBudget } from "./retrieval-budget.js";
 
 /**
  * High-level Context Engine API (v0.4 multi-signal retrieval).
@@ -94,7 +95,12 @@ export class ContextEngine {
    */
   async getTaskContext(opts: TaskContextOptions): Promise<PackedContext> {
     const topK = opts.topK ?? 12;
-    const maxTokens = opts.maxTokens ?? 6000;
+    const budget = resolveRetrievalBudget({
+      maxTokens: opts.maxTokens,
+      contextWindowTokens: opts.contextWindowTokens,
+      reservedOutputTokens: opts.reservedOutputTokens,
+    });
+    const maxTokens = budget.maxTokens;
     const analyzed = analyzeQuery(opts.task);
 
     const hits = await this.search({
@@ -147,6 +153,7 @@ export class ContextEngine {
       packedText: parts.join("\n"),
       estimatedTokens: tokens,
       truncated,
+      budget,
     };
   }
 
@@ -155,12 +162,19 @@ export class ContextEngine {
    */
   async codebaseRetrieval(
     informationRequest: string,
-    opts?: { topK?: number; maxTokens?: number },
+    opts?: {
+      topK?: number;
+      maxTokens?: number;
+      contextWindowTokens?: number;
+      reservedOutputTokens?: number;
+    },
   ): Promise<PackedContext> {
     return this.getTaskContext({
       task: informationRequest,
       topK: opts?.topK ?? 14,
-      maxTokens: opts?.maxTokens ?? 8000,
+      maxTokens: opts?.maxTokens,
+      contextWindowTokens: opts?.contextWindowTokens,
+      reservedOutputTokens: opts?.reservedOutputTokens,
       diversify: true,
     });
   }
