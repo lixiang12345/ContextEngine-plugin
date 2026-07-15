@@ -158,15 +158,7 @@ program
   .option("-r, --root <dir>", "workspace root", process.cwd())
   .option("-d, --data-dir <dir>", "index data directory")
   .option("-k, --top-k <n>", "chunks to consider", "12")
-  .option("--max-tokens <n>", "explicit retrieval token budget")
-  .option(
-    "--context-window-tokens <n>",
-    "model context window used for automatic retrieval sizing",
-  )
-  .option(
-    "--reserved-output-tokens <n>",
-    "model output tokens reserved outside the input budget",
-  )
+  .option("--max-tokens <n>", "optional cap for packed context tokens")
   .option("--json", "JSON output")
   .action(
     async (
@@ -176,8 +168,6 @@ program
         dataDir?: string;
         topK: string;
         maxTokens?: string;
-        contextWindowTokens?: string;
-        reservedOutputTokens?: string;
         json?: boolean;
       },
     ) => {
@@ -189,12 +179,6 @@ program
         task,
         topK: Number(opts.topK) || 12,
         maxTokens: optionalPositiveInteger(opts.maxTokens),
-        contextWindowTokens: optionalPositiveInteger(
-          opts.contextWindowTokens,
-        ),
-        reservedOutputTokens: optionalPositiveInteger(
-          opts.reservedOutputTokens,
-        ),
       });
       engine.close();
       if (opts.json) {
@@ -203,7 +187,7 @@ program
       }
       console.log(packed.packedText);
       console.error(
-        `\n--- ~${packed.estimatedTokens}/${packed.budget.maxTokens} tokens · ${packed.hits.length} chunks · ${packed.budget.contextWindowTokens} context${packed.truncated ? " · truncated" : ""} ---`,
+        `\n--- ~${packed.estimatedTokens} tokens · ${packed.hits.length} chunks${packed.truncated ? " · capped" : ""} ---`,
       );
     },
   );

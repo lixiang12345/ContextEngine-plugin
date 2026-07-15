@@ -16,15 +16,6 @@
 
 export { ContextEngine, estimateTokens } from "./engine.js";
 export {
-  DEFAULT_CONTEXT_WINDOW_TOKENS,
-  DEFAULT_RESERVED_OUTPUT_TOKENS,
-  MIN_CONTEXT_WINDOW_TOKENS,
-  MAX_CONTEXT_WINDOW_TOKENS,
-  MIN_RETRIEVAL_TOKENS,
-  MAX_AUTO_RETRIEVAL_TOKENS,
-  resolveRetrievalBudget,
-} from "./retrieval-budget.js";
-export {
   resolveEngineConfig,
   resolveEmbeddingsConfig,
   resolveNeuralRerankConfig,
@@ -71,10 +62,6 @@ export type {
 } from "./eval/harness.js";
 export type { RepoProfile, MultiRepoConfig } from "./config/profiles.js";
 export type { AnalyzedQuery, QueryIntent } from "./search/query-analyzer.js";
-export type {
-  RetrievalBudgetOptions,
-  ResolvedRetrievalBudget,
-} from "./retrieval-budget.js";
 
 export type {
   CodeChunk,

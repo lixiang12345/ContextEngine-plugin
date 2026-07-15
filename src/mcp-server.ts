@@ -53,7 +53,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
   // Primary Augment-style tool
   server.tool(
     "codebase_retrieval",
-    "PRIMARY tool: retrieve the most relevant code/docs for an information request. Call this BEFORE grepping. Returns packed path+line+content under a token budget using multi-signal ranking (FTS, symbols, path, optional embeddings, graph, MMR).",
+    "PRIMARY tool: retrieve the most relevant code/docs for an information request. Call this BEFORE grepping. Returns the reranked path+line+content evidence pack; max_tokens is an optional caller-controlled output cap.",
     {
       information_request: z
         .string()
@@ -61,34 +61,14 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
           "What you need to know — be specific (APIs, symbols, behaviors, files).",
         ),
       top_k: z.number().int().min(1).max(40).optional(),
-      max_tokens: z.number().int().min(500).max(50000).optional(),
-      context_window_tokens: z
-        .number()
-        .int()
-        .min(16_384)
-        .max(2_000_000)
-        .optional(),
-      reserved_output_tokens: z
-        .number()
-        .int()
-        .min(1_024)
-        .max(65_536)
-        .optional(),
+      max_tokens: z.number().int().min(1).optional(),
     },
-    async ({
-      information_request,
-      top_k,
-      max_tokens,
-      context_window_tokens,
-      reserved_output_tokens,
-    }) => {
+    async ({ information_request, top_k, max_tokens }) => {
       try {
         const eng = await ensureReady();
         const packed = await eng.codebaseRetrieval(information_request, {
           topK: top_k ?? 14,
           maxTokens: max_tokens,
-          contextWindowTokens: context_window_tokens,
-          reservedOutputTokens: reserved_output_tokens,
         });
         return {
           content: [{ type: "text" as const, text: packed.packedText }],
@@ -170,37 +150,16 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     {
       task: z.string(),
       top_k: z.number().int().min(1).max(40).optional(),
-      max_tokens: z.number().int().min(500).max(50000).optional(),
-      context_window_tokens: z
-        .number()
-        .int()
-        .min(16_384)
-        .max(2_000_000)
-        .optional(),
-      reserved_output_tokens: z
-        .number()
-        .int()
-        .min(1_024)
-        .max(65_536)
-        .optional(),
+      max_tokens: z.number().int().min(1).optional(),
       path_prefix: z.string().optional(),
     },
-    async ({
-      task,
-      top_k,
-      max_tokens,
-      context_window_tokens,
-      reserved_output_tokens,
-      path_prefix,
-    }) => {
+    async ({ task, top_k, max_tokens, path_prefix }) => {
       try {
         const eng = await ensureReady();
         const packed = await eng.getTaskContext({
           task,
           topK: top_k ?? 12,
           maxTokens: max_tokens,
-          contextWindowTokens: context_window_tokens,
-          reservedOutputTokens: reserved_output_tokens,
           pathPrefix: path_prefix,
         });
         return {
