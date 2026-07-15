@@ -158,7 +158,15 @@ program
   .option("-r, --root <dir>", "workspace root", process.cwd())
   .option("-d, --data-dir <dir>", "index data directory")
   .option("-k, --top-k <n>", "chunks to consider", "12")
-  .option("--max-tokens <n>", "token budget", "6000")
+  .option("--max-tokens <n>", "explicit retrieval token budget")
+  .option(
+    "--context-window-tokens <n>",
+    "model context window used for automatic retrieval sizing",
+  )
+  .option(
+    "--reserved-output-tokens <n>",
+    "model output tokens reserved outside the input budget",
+  )
   .option("--json", "JSON output")
   .action(
     async (
@@ -167,7 +175,9 @@ program
         root: string;
         dataDir?: string;
         topK: string;
-        maxTokens: string;
+        maxTokens?: string;
+        contextWindowTokens?: string;
+        reservedOutputTokens?: string;
         json?: boolean;
       },
     ) => {
@@ -178,7 +188,13 @@ program
       const packed = await engine.getTaskContext({
         task,
         topK: Number(opts.topK) || 12,
-        maxTokens: Number(opts.maxTokens) || 6000,
+        maxTokens: optionalPositiveInteger(opts.maxTokens),
+        contextWindowTokens: optionalPositiveInteger(
+          opts.contextWindowTokens,
+        ),
+        reservedOutputTokens: optionalPositiveInteger(
+          opts.reservedOutputTokens,
+        ),
       });
       engine.close();
       if (opts.json) {
@@ -187,7 +203,7 @@ program
       }
       console.log(packed.packedText);
       console.error(
-        `\n--- ~${packed.estimatedTokens} tokens · ${packed.hits.length} chunks${packed.truncated ? " · truncated" : ""} ---`,
+        `\n--- ~${packed.estimatedTokens}/${packed.budget.maxTokens} tokens · ${packed.hits.length} chunks · ${packed.budget.contextWindowTokens} context${packed.truncated ? " · truncated" : ""} ---`,
       );
     },
   );
@@ -418,3 +434,11 @@ program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });
+
+function optionalPositiveInteger(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : undefined;
+}
