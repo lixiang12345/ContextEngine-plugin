@@ -11,8 +11,10 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { z, ZodError } from "zod";
 import { loadDotEnv, resolveDatabaseUrl, resolveEngineConfig } from "./config.js";
+import { observabilityDashboardHtml } from "./dashboard.js";
 import { ContextEngine } from "./engine.js";
 import { IndexJobRunner } from "./server/index-job-runner.js";
+import { RequestTelemetry } from "./server/request-telemetry.js";
 import {
   MissingBlobError,
   RevisionConflictError,
@@ -237,6 +239,39 @@ function json(response: ServerResponse, status: number, payload: unknown): void 
   response.end(JSON.stringify(payload));
 }
 
+function html(response: ServerResponse, payload: string): void {
+  response.statusCode = 200;
+  response.setHeader("content-type", "text/html; charset=utf-8");
+  response.setHeader("cache-control", "no-store");
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("x-frame-options", "SAMEORIGIN");
+  response.setHeader(
+    "content-security-policy",
+    "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'",
+  );
+  response.end(payload);
+}
+
+function redirect(response: ServerResponse, location: string): void {
+  response.statusCode = 302;
+  response.setHeader("location", location);
+  response.setHeader("cache-control", "no-store");
+  response.end();
+}
+
+function queryLimit(
+  value: string | null,
+  fallback: number,
+  maximum: number,
+): number {
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new HttpError(400, `Expected an integer from 1 to ${maximum}`);
+  }
+  return parsed;
+}
+
 function errorPayload(error: unknown): {
   status: number;
   payload: Record<string, unknown>;
@@ -355,7 +390,11 @@ function openApiDocument(): Record<string, unknown> {
     security: [{ bearerAuth: [] }],
     paths: {
       "/health": { get: { summary: "Service health" } },
+      "/dashboard": { get: { summary: "Embedded observability dashboard" } },
       "/v1/capabilities": { get: { summary: "Service capabilities" } },
+      "/v1/observability/overview": {
+        get: { summary: "Service, workspace, request, and index-job observations" },
+      },
       "/v1/workspaces": {
         get: { summary: "List workspaces" },
         post: { summary: "Create a blob or local workspace" },
@@ -399,6 +438,7 @@ function openApiDocument(): Record<string, unknown> {
 class HttpContextService {
   private readonly repository: WorkspaceRepository;
   private readonly runner: IndexJobRunner;
+  private readonly telemetry = new RequestTelemetry();
   private readonly engines = new Map<string, ContextEngine>();
   private readonly apiKey: string | undefined;
   private readonly allowUnauthenticated: boolean;
@@ -486,7 +526,26 @@ class HttpContextService {
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const requestUrl = new URL(request.url ?? "/", "http://contextengine.local");
     const pathname = requestUrl.pathname;
+    const observeRequest =
+      pathname !== "/" &&
+      pathname !== "/dashboard" &&
+      pathname !== "/favicon.ico" &&
+      pathname !== "/v1/observability/overview";
+    const timing = observeRequest ? this.telemetry.begin() : null;
     try {
+      if (request.method === "GET" && pathname === "/") {
+        redirect(response, "/dashboard");
+        return;
+      }
+      if (request.method === "GET" && pathname === "/dashboard") {
+        html(response, observabilityDashboardHtml());
+        return;
+      }
+      if (request.method === "GET" && pathname === "/favicon.ico") {
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
       if (request.method === "GET" && pathname === "/health") {
         await this.repository.health();
         json(response, 200, {
@@ -520,6 +579,85 @@ class HttpContextService {
             incremental: true,
           },
           retrieval: ["search", "context", "file"],
+          observability: {
+            dashboard: "/dashboard",
+            overview: "/v1/observability/overview",
+            request_payload_capture: false,
+          },
+        });
+        return;
+      }
+
+      if (request.method === "GET" && pathname === "/v1/observability/overview") {
+        const requestLimit = queryLimit(
+          requestUrl.searchParams.get("request_limit"),
+          60,
+          120,
+        );
+        const jobLimit = queryLimit(
+          requestUrl.searchParams.get("job_limit"),
+          25,
+          100,
+        );
+        const [workspaces, jobs] = await Promise.all([
+          this.repository.listWorkspaces(),
+          this.repository.listRecentIndexJobs(jobLimit),
+        ]);
+        const observedWorkspaces = await Promise.all(
+          workspaces.map(async (workspace) => {
+            const engine = this.engineFor(workspace);
+            const indexed = await engine.hasIndex();
+            return {
+              workspace: workspacePayload(workspace),
+              indexed,
+              stats: indexed ? await engine.stats() : null,
+            };
+          }),
+        );
+        const memory = process.memoryUsage();
+        const requests = this.telemetry.snapshot(requestLimit);
+        json(response, 200, {
+          generated_at: new Date().toISOString(),
+          service: {
+            status: "online",
+            storage: "postgresql+pgvector",
+            uptime_seconds: this.telemetry.uptimeSeconds(),
+            node_version: process.version,
+            pid: process.pid,
+            authentication_required: Boolean(this.apiKey) && !this.allowUnauthenticated,
+            memory: {
+              rss_bytes: memory.rss,
+              heap_used_bytes: memory.heapUsed,
+              heap_total_bytes: memory.heapTotal,
+              external_bytes: memory.external,
+            },
+          },
+          requests: {
+            active: requests.active,
+            total: requests.total,
+            errors: requests.errors,
+            error_rate: requests.errorRate,
+            average_ms: requests.averageMs,
+            p95_ms: requests.p95Ms,
+            routes: requests.routes.map((route) => ({
+              method: route.method,
+              route: route.route,
+              requests: route.requests,
+              errors: route.errors,
+              average_ms: route.averageMs,
+              p95_ms: route.p95Ms,
+            })),
+            recent: requests.recent.map((item) => ({
+              id: item.id,
+              method: item.method,
+              route: item.route,
+              status: item.status,
+              duration_ms: item.durationMs,
+              started_at: item.startedAt,
+            })),
+          },
+          workspaces: observedWorkspaces,
+          jobs: jobs.map(jobPayload),
         });
         return;
       }
@@ -794,6 +932,15 @@ class HttpContextService {
     } catch (error) {
       const mapped = errorPayload(error);
       json(response, mapped.status, mapped.payload);
+    } finally {
+      if (timing) {
+        this.telemetry.complete(
+          request.method,
+          pathname,
+          response.statusCode,
+          timing,
+        );
+      }
     }
   }
 

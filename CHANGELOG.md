@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a multi-stage production Docker image and a complete Docker Compose deployment for the HTTP service plus PostgreSQL/pgvector, including health checks and persistent volumes.
+- Added a self-contained `/dashboard` observability UI with workspace/index health, recent jobs, process metrics, route latency/error telemetry, and a live retrieval probe.
+- Added authenticated `GET /v1/observability/overview`; request telemetry records only normalized routes, status codes, and timings, never request payloads or API keys.
 - Retrieval output is model-neutral: ContextEngine no longer tracks model names, context windows, or reserved output tokens.
 - Library, CLI, MCP, and HTTP retrieval entrypoints return all reranked `topK` hits by default; explicit `max_tokens` remains an optional caller-controlled transport cap.
 - Natural-language queries no longer classify ordinary prose words as code symbols; structured identifiers and acronyms still route through the symbol channel.

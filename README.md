@@ -247,8 +247,42 @@ export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
 
 contextengine-http
 # GET /health, GET /openapi.json
+# Dashboard: http://127.0.0.1:8787/dashboard
 # all /v1 routes use Authorization: Bearer <key>
 ```
+
+### Docker Compose
+
+The repository includes a multi-stage production image and a complete Compose
+stack for ContextEngine plus PostgreSQL/pgvector:
+
+```bash
+export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
+docker compose up -d --build
+docker compose ps
+```
+
+The dashboard is published at `http://127.0.0.1:8790/dashboard` by default.
+Embedding and rerank variables from `.env` are passed into the application
+container. PostgreSQL and the HTTP runtime use named volumes, so a normal
+`docker compose down` preserves indexed data. Use `docker compose down -v` only
+when the database and runtime data should be deleted.
+
+### Observability dashboard
+
+The HTTP server includes a self-contained operational dashboard at
+`/dashboard`. It uses the same Bearer API key as `/v1/*` and shows:
+
+- workspace revisions, indexed files, chunks, and embedding state
+- recent indexing jobs and progress
+- request volume, error rate, average latency, and p95 latency by route
+- process uptime and memory usage
+- a live retrieval probe for indexed workspaces
+
+Request observations contain only method, normalized route, status, and latency.
+Query text, source content, request bodies, and API keys are not captured. The
+dashboard polls `GET /v1/observability/overview` on the same origin and requires
+no separate frontend build or deployment.
 
 Core endpoints are workspace create/list, `/sync/plan`, `PUT /blobs/{sha256}`,
 `/sync/commit`, `/index-jobs`, `/search`, `/context`, and `/file`.

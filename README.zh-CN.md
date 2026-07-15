@@ -249,8 +249,39 @@ export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
 
 contextengine-http
 # GET /health, GET /openapi.json
+# 控制台：http://127.0.0.1:8787/dashboard
 # 所有 /v1 路由使用 Authorization: Bearer <key>
 ```
+
+### Docker Compose 部署
+
+仓库内置多阶段生产镜像，以及包含 ContextEngine 和 PostgreSQL/pgvector
+的完整 Compose 配置：
+
+```bash
+export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
+docker compose up -d --build
+docker compose ps
+```
+
+控制台默认发布在 `http://127.0.0.1:8790/dashboard`。`.env` 中的
+Embedding 和 Rerank 配置会透传到应用容器。PostgreSQL 与 HTTP 运行目录
+使用命名卷，普通的 `docker compose down` 不会删除索引数据；只有明确需要
+清空数据库和运行数据时才使用 `docker compose down -v`。
+
+### 可观测控制台
+
+HTTP 服务内置 `/dashboard` 可观测控制台，与 `/v1/*` 共用 Bearer API Key，
+无需单独构建或部署前端。控制台展示：
+
+- 工作区版本、已索引文件数、切片数与向量状态
+- 最近索引任务及执行进度
+- 请求量、错误率、平均延迟和各路由 P95 延迟
+- 进程运行时间与内存占用
+- 面向已索引工作区的实时检索探针
+
+请求观测只记录方法、归一化路由、状态码和耗时，不采集查询文本、源码内容、
+请求正文或 API Key。控制台通过同源 `GET /v1/observability/overview` 自动刷新。
 
 核心接口包括工作区创建/查询、`/sync/plan`、`PUT /blobs/{sha256}`、
 `/sync/commit`、`/index-jobs`、`/search`、`/context` 与 `/file`。
@@ -265,7 +296,7 @@ contextengine-http
 ```text
 contextengine index [root] [--quiet]
 contextengine search <query> [-k N] [--mode auto|bm25|semantic|hybrid] [--path-prefix p] [--json]
-contextengine context <task> [--context-window-tokens N] [--max-tokens N] [--json]
+contextengine context <task> [--max-tokens N] [--json]
 contextengine status
 contextengine clear-index
 contextengine migrate-sqlite <legacy-index.db>

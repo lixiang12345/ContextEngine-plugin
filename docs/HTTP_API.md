@@ -29,6 +29,7 @@ is explicitly set.
 Public routes:
 
 - `GET /health`
+- `GET /dashboard`
 - `GET /openapi.json`
 
 All `/v1/*` routes require:
@@ -36,6 +37,35 @@ All `/v1/*` routes require:
 ```http
 Authorization: Bearer <CONTEXTENGINE_HTTP_API_KEY>
 ```
+
+## Docker deployment
+
+The included Compose stack builds the production image, waits for PostgreSQL
+and pgvector to become healthy, and then starts the HTTP service:
+
+```bash
+export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
+docker compose up -d --build
+```
+
+The host HTTP port defaults to `8790` and can be changed with
+`CONTEXTENGINE_DOCKER_HTTP_PORT`. Embedding and rerank settings are read from
+the project `.env` file and passed to the application container.
+
+## Observability
+
+`GET /v1/observability/overview` returns a bounded operational snapshot for the
+embedded dashboard:
+
+- process uptime and memory usage
+- normalized per-route request counts, errors, average latency, and p95 latency
+- recent requests without bodies, query text, source content, or API keys
+- workspace index status and aggregate file/chunk statistics
+- recent asynchronous index jobs
+
+Optional query parameters are `request_limit` (1-120, default 60) and
+`job_limit` (1-100, default 25). The dashboard is served at `/dashboard`, stores
+the Bearer key only in browser `sessionStorage`, and performs same-origin requests.
 
 ## Remote workspace sync
 

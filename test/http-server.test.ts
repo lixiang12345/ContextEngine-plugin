@@ -68,10 +68,22 @@ describePostgres("ContextEngine HTTP service", () => {
   }
 
   it("syncs content-addressed files, indexes asynchronously, and retrieves context", async () => {
+    const root = await fetch(`${handle.url}/`, { redirect: "manual" });
+    assert.equal(root.status, 302);
+    assert.equal(root.headers.get("location"), "/dashboard");
+    const dashboard = await fetch(`${handle.url}/dashboard`);
+    assert.equal(dashboard.status, 200);
+    assert.match(dashboard.headers.get("content-type") ?? "", /text\/html/);
+    assert.match(await dashboard.text(), /ContextEngine/);
+
     const health = await fetch(`${handle.url}/health`);
     assert.equal(health.status, 200);
     const unauthorized = await fetch(`${handle.url}/v1/workspaces`);
     assert.equal(unauthorized.status, 401);
+    const unauthorizedOverview = await fetch(
+      `${handle.url}/v1/observability/overview`,
+    );
+    assert.equal(unauthorizedOverview.status, 401);
 
     const created = await request("/v1/workspaces", {
       method: "POST",
@@ -176,6 +188,41 @@ describePostgres("ContextEngine HTTP service", () => {
     assert.equal(context.status, 200);
     const contextPayload = (await context.json()) as { packed_text: string };
     assert.match(contextPayload.packed_text, /requirePermission/);
+
+    const overview = await request(
+      "/v1/observability/overview?request_limit=20&job_limit=10",
+    );
+    assert.equal(overview.status, 200);
+    const overviewPayload = (await overview.json()) as {
+      service: { status: string; storage: string };
+      requests: { total: number; recent: Array<{ route: string }> };
+      workspaces: Array<{
+        workspace: { id: string };
+        indexed: boolean;
+        stats: { fileCount: number; chunkCount: number } | null;
+      }>;
+      jobs: Array<{ id: string; status: string }>;
+    };
+    assert.equal(overviewPayload.service.status, "online");
+    assert.equal(overviewPayload.service.storage, "postgresql+pgvector");
+    assert.ok(overviewPayload.requests.total > 0);
+    assert.ok(
+      overviewPayload.requests.recent.some(
+        (item) => item.route === "/v1/workspaces/{workspaceId}/context",
+      ),
+    );
+    const observedWorkspace = overviewPayload.workspaces.find(
+      (item) => item.workspace.id === workspaceId,
+    );
+    assert.equal(observedWorkspace?.indexed, true);
+    assert.ok((observedWorkspace?.stats?.fileCount ?? 0) >= 2);
+    assert.ok((observedWorkspace?.stats?.chunkCount ?? 0) >= 2);
+    assert.ok(
+      overviewPayload.jobs.some(
+        (item) =>
+          item.id === commit.index_job.id && item.status === "succeeded",
+      ),
+    );
 
     const file = await request(
       `/v1/workspaces/${workspaceId}/file?path=src%2Fauth.ts&start_line=1&end_line=2`,

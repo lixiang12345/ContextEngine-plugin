@@ -604,6 +604,19 @@ export class WorkspaceRepository {
     return result.rows[0] ? jobFromRow(result.rows[0]) : null;
   }
 
+  async listRecentIndexJobs(limit = 25): Promise<StoredIndexJob[]> {
+    const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
+    const result = await this.pool.query<JobRow>(
+      `SELECT id, workspace_id, revision, mode, changed_paths, deleted_paths,
+              status, progress, result, error, created_at, started_at, completed_at
+       FROM ce_index_jobs
+       ORDER BY created_at DESC, id DESC
+       LIMIT $1`,
+      [safeLimit],
+    );
+    return result.rows.map(jobFromRow);
+  }
+
   async listQueuedIndexJobs(): Promise<StoredIndexJob[]> {
     const result = await this.pool.query<JobRow>(
       `SELECT id, workspace_id, revision, mode, changed_paths, deleted_paths,
