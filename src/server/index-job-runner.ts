@@ -46,6 +46,10 @@ export class IndexJobRunner {
     void this.drain();
   }
 
+  isBusy(): boolean {
+    return this.draining || this.queue.length > 0;
+  }
+
   subscribe(jobId: string, listener: IndexJobListener): () => void {
     const event = `job:${jobId}`;
     this.events.on(event, listener);

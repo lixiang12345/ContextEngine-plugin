@@ -9,6 +9,14 @@ export interface EmbeddingProvider {
   embedQuery?(texts: string[]): Promise<number[][]>;
 }
 
+export interface OpenAICompatibleEmbeddingsOptions {
+  batchSize?: number;
+  maxInputChars?: number;
+  sendInputType?: boolean;
+  timeoutMs?: number;
+  retries?: number;
+}
+
 /** Dense vectors returned by providers or loaded from the SQLite float32 BLOB. */
 export type EmbeddingVector = number[] | Float32Array;
 
@@ -19,13 +27,20 @@ export const CODE_RETRIEVAL_QUERY_INSTRUCT =
 /** OpenAI-compatible embeddings API (OpenAI, Azure, Ollama, Voyage-compatible proxies, etc.). */
 export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
   readonly model: string;
-  private readonly apiKey: string;
+  private readonly apiKey: string | undefined;
   private readonly baseUrl: string;
   private readonly dimensions?: number;
   private readonly queryInstruct: string;
   private readonly sendInputType: boolean;
+  private readonly batchSize?: number;
+  private readonly maxInputChars?: number;
+  private readonly timeoutMs?: number;
+  private readonly retries?: number;
 
-  constructor(config: EmbeddingsConfig) {
+  constructor(
+    config: EmbeddingsConfig,
+    options: OpenAICompatibleEmbeddingsOptions = {},
+  ) {
     this.apiKey = config.apiKey;
     this.baseUrl = normalizeOpenAIBaseUrl(config.baseUrl);
     this.model = config.model;
@@ -33,9 +48,15 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
     this.queryInstruct =
       process.env.CONTEXTENGINE_EMBED_QUERY_INSTRUCT?.trim() ||
       CODE_RETRIEVAL_QUERY_INSTRUCT;
-    this.sendInputType = /^(1|true|yes|on)$/i.test(
-      process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE?.trim() || "",
-    );
+    this.sendInputType =
+      options.sendInputType ??
+      /^(1|true|yes|on)$/i.test(
+        process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE?.trim() || "",
+      );
+    this.batchSize = options.batchSize;
+    this.maxInputChars = options.maxInputChars;
+    this.timeoutMs = options.timeoutMs;
+    this.retries = options.retries;
   }
 
   async embed(texts: string[]): Promise<number[][]> {
@@ -61,10 +82,16 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
   ): Promise<number[][]> {
     if (texts.length === 0) return [];
     // Smaller batches avoid OOM on 12GB GPUs when embedding long code chunks.
-    let batchSize = Number(process.env.CONTEXTENGINE_EMBED_BATCH || 8);
+    let batchSize = Number(
+      this.batchSize ?? process.env.CONTEXTENGINE_EMBED_BATCH ?? 8,
+    );
     if (!Number.isFinite(batchSize) || batchSize < 1) batchSize = 8;
     batchSize = Math.floor(batchSize);
-    let maxChars = Number(process.env.CONTEXTENGINE_EMBED_MAX_CHARS || 4000);
+    let maxChars = Number(
+      this.maxInputChars ??
+        process.env.CONTEXTENGINE_EMBED_MAX_CHARS ??
+        4000,
+    );
     if (!Number.isFinite(maxChars) || maxChars < 100) maxChars = 4000;
     maxChars = Math.floor(maxChars);
     const all: number[][] = [];
@@ -106,6 +133,8 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
       label: "Embedding API",
       apiKey: this.apiKey,
       body,
+      timeoutMs: this.timeoutMs,
+      retries: this.retries,
     });
     if (!Array.isArray(json.data) || json.data.length !== batch.length) {
       throw new Error(
@@ -130,7 +159,7 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
 export function createEmbeddingProvider(
   config: EmbeddingsConfig | undefined,
 ): EmbeddingProvider | null {
-  if (!config?.apiKey) return null;
+  if (!config) return null;
   return new OpenAICompatibleEmbeddings(config);
 }
 

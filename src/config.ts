@@ -39,15 +39,18 @@ export function loadDotEnv(cwd: string = process.cwd()): void {
 
 export function resolveEmbeddingsConfig(): EmbeddingsConfig | undefined {
   const apiKey =
-    process.env.CONTEXTENGINE_EMBEDDING_API_KEY ||
-    process.env.OPENAI_API_KEY ||
-    process.env.EMBEDDING_API_KEY;
-  if (!apiKey) return undefined;
+    process.env.CONTEXTENGINE_EMBEDDING_API_KEY?.trim() ||
+    process.env.OPENAI_API_KEY?.trim() ||
+    process.env.EMBEDDING_API_KEY?.trim() ||
+    undefined;
+  const configuredBaseUrl =
+    process.env.CONTEXTENGINE_EMBEDDING_BASE_URL?.trim() ||
+    process.env.OPENAI_BASE_URL?.trim() ||
+    undefined;
+  if (!apiKey && !configuredBaseUrl) return undefined;
 
   const baseUrl = normalizeOpenAIBaseUrl(
-    process.env.CONTEXTENGINE_EMBEDDING_BASE_URL ||
-    process.env.OPENAI_BASE_URL ||
-    "https://api.openai.com/v1",
+    configuredBaseUrl || "https://api.openai.com/v1",
   );
 
   const model =

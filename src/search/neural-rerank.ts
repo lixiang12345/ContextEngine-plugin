@@ -9,7 +9,7 @@ import { normalizeOpenAIBaseUrl, openAIEndpoint } from "../util/api-url.js";
 import { requestJson } from "../util/http-json.js";
 
 export interface NeuralRerankConfig {
-  apiKey: string;
+  apiKey?: string;
   /** Base URL ending with /v1 (same shape as embeddings). */
   baseUrl: string;
   model: string;
@@ -31,6 +31,12 @@ export interface NeuralDoc {
   text: string;
 }
 
+export interface NeuralRerankRequestOptions {
+  timeoutMs?: number;
+  retries?: number;
+  requireScores?: boolean;
+}
+
 function truthy(v: string | undefined): boolean {
   if (!v) return false;
   return /^(1|true|yes|on)$/i.test(v.trim());
@@ -45,18 +51,19 @@ export function resolveNeuralRerankConfig(): NeuralRerankConfig | undefined {
   if (!truthy(process.env.CONTEXTENGINE_NEURAL_RERANK)) return undefined;
 
   const apiKey =
-    process.env.CONTEXTENGINE_RERANK_API_KEY ||
-    process.env.CONTEXTENGINE_EMBEDDING_API_KEY ||
-    process.env.OPENAI_API_KEY ||
-    process.env.EMBEDDING_API_KEY;
-  if (!apiKey) return undefined;
+    process.env.CONTEXTENGINE_RERANK_API_KEY?.trim() ||
+    process.env.CONTEXTENGINE_EMBEDDING_API_KEY?.trim() ||
+    process.env.OPENAI_API_KEY?.trim() ||
+    process.env.EMBEDDING_API_KEY?.trim() ||
+    undefined;
 
-  const baseUrl = (
-    process.env.CONTEXTENGINE_RERANK_BASE_URL ||
-    process.env.CONTEXTENGINE_EMBEDDING_BASE_URL ||
-    process.env.OPENAI_BASE_URL ||
-    "https://api.openai.com/v1"
-  );
+  const configuredBaseUrl =
+    process.env.CONTEXTENGINE_RERANK_BASE_URL?.trim() ||
+    process.env.CONTEXTENGINE_EMBEDDING_BASE_URL?.trim() ||
+    process.env.OPENAI_BASE_URL?.trim() ||
+    undefined;
+  if (!apiKey && !configuredBaseUrl) return undefined;
+  const baseUrl = configuredBaseUrl || "https://api.openai.com/v1";
 
   const model =
     process.env.CONTEXTENGINE_RERANK_MODEL ||
@@ -116,6 +123,7 @@ export async function neuralRerankScores(
   config: NeuralRerankConfig,
   query: string,
   docs: NeuralDoc[],
+  options: NeuralRerankRequestOptions = {},
 ): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (!query.trim() || docs.length === 0) return out;
@@ -139,6 +147,8 @@ export async function neuralRerankScores(
     label: "Rerank API",
     apiKey: config.apiKey,
     body,
+    timeoutMs: options.timeoutMs,
+    retries: options.retries,
   });
 
   const rows = json.results ?? json.data ?? [];
@@ -148,6 +158,10 @@ export async function neuralRerankScores(
     const score = row.relevance_score ?? row.score;
     if (typeof score !== "number" || !Number.isFinite(score)) continue;
     out.set(docs[idx].id, score);
+  }
+
+  if (options.requireScores && out.size === 0) {
+    throw new Error("Rerank API returned no valid scores");
   }
 
   // If API returned nothing usable, assign zeros (caller keeps prior ranking)

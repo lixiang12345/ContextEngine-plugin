@@ -14,7 +14,17 @@ import { loadDotEnv, resolveDatabaseUrl, resolveEngineConfig } from "./config.js
 import { observabilityDashboardHtml } from "./dashboard.js";
 import { ContextEngine } from "./engine.js";
 import { IndexJobRunner } from "./server/index-job-runner.js";
+import {
+  testEmbeddingConnection,
+  testRerankerConnection,
+} from "./server/model-connection-test.js";
 import { RequestTelemetry } from "./server/request-telemetry.js";
+import {
+  RuntimeModelConfiguration,
+  type EmbeddingConfigurationUpdate,
+  type ModelConfigurationUpdate,
+  type RerankerConfigurationUpdate,
+} from "./server/runtime-configuration.js";
 import {
   MissingBlobError,
   RevisionConflictError,
@@ -61,6 +71,79 @@ class HttpError extends Error {
 const hashSchema = z.string().regex(/^[0-9a-fA-F]{64}$/, "expected SHA-256 hex");
 const positiveInteger = z.number().int().min(1);
 const nonNegativeInteger = z.number().int().min(0);
+const optionalHttpUrl = z.string().trim().url().max(2048).optional();
+const embeddingConfigurationSchema = z.object({
+  enabled: z.boolean(),
+  base_url: optionalHttpUrl,
+  model: z.string().trim().min(1).max(300).optional(),
+  dimensions: z.number().int().min(1).max(65_536).nullable().optional(),
+  authentication: z.enum(["bearer", "none"]),
+  api_key: z.string().max(4096).optional(),
+  batch_size: z.number().int().min(1).max(1024),
+  max_input_chars: z.number().int().min(100).max(1_000_000),
+  input_type: z.boolean(),
+});
+const rerankerConfigurationSchema = z.object({
+  enabled: z.boolean(),
+  base_url: optionalHttpUrl,
+  model: z.string().trim().min(1).max(300).optional(),
+  authentication: z.enum(["bearer", "none"]),
+  api_key: z.string().max(4096).optional(),
+  top_n: z.number().int().min(2).max(64),
+  weight: z.number().min(0.05).max(0.85),
+  max_document_chars: z.number().int().min(200).max(1_000_000),
+  instruction: z.string().max(4000).nullable().optional(),
+});
+const modelConfigurationSchema = z
+  .object({
+    embedding: embeddingConfigurationSchema.optional(),
+    reranker: rerankerConfigurationSchema.optional(),
+  })
+  .refine((value) => value.embedding || value.reranker, {
+    message: "At least one model configuration is required",
+  });
+const modelConnectionTestSchema = z.discriminatedUnion("target", [
+  z.object({
+    target: z.literal("embedding"),
+    embedding: embeddingConfigurationSchema,
+  }),
+  z.object({
+    target: z.literal("reranker"),
+    reranker: rerankerConfigurationSchema,
+  }),
+]);
+
+function embeddingConfigurationUpdate(
+  input: z.infer<typeof embeddingConfigurationSchema>,
+): EmbeddingConfigurationUpdate {
+  return {
+    enabled: input.enabled,
+    baseUrl: input.base_url,
+    model: input.model,
+    dimensions: input.dimensions,
+    authentication: input.authentication,
+    apiKey: input.api_key,
+    batchSize: input.batch_size,
+    maxInputChars: input.max_input_chars,
+    inputType: input.input_type,
+  };
+}
+
+function rerankerConfigurationUpdate(
+  input: z.infer<typeof rerankerConfigurationSchema>,
+): RerankerConfigurationUpdate {
+  return {
+    enabled: input.enabled,
+    baseUrl: input.base_url,
+    model: input.model,
+    authentication: input.authentication,
+    apiKey: input.api_key,
+    topN: input.top_n,
+    weight: input.weight,
+    maxDocumentChars: input.max_document_chars,
+    instruction: input.instruction,
+  };
+}
 
 const createWorkspaceSchema = z
   .object({
@@ -395,6 +478,12 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/observability/overview": {
         get: { summary: "Service, workspace, request, and index-job observations" },
       },
+      "/v1/observability/configuration": {
+        put: { summary: "Apply process-local model configuration" },
+      },
+      "/v1/observability/configuration/test": {
+        post: { summary: "Test unsaved embedding or reranker configuration" },
+      },
       "/v1/workspaces": {
         get: { summary: "List workspaces" },
         post: { summary: "Create a blob or local workspace" },
@@ -440,6 +529,7 @@ class HttpContextService {
   private readonly runner: IndexJobRunner;
   private readonly telemetry = new RequestTelemetry();
   private readonly engines = new Map<string, ContextEngine>();
+  private readonly modelConfiguration = new RuntimeModelConfiguration();
   private readonly apiKey: string | undefined;
   private readonly allowUnauthenticated: boolean;
   private readonly allowLocalWorkspaces: boolean;
@@ -632,6 +722,7 @@ class HttpContextService {
               external_bytes: memory.external,
             },
           },
+          configuration: this.configurationSnapshot(),
           requests: {
             active: requests.active,
             total: requests.total,
@@ -658,6 +749,124 @@ class HttpContextService {
           },
           workspaces: observedWorkspaces,
           jobs: jobs.map(jobPayload),
+        });
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        pathname === "/v1/observability/configuration/test"
+      ) {
+        const input = modelConnectionTestSchema.parse(
+          await readJsonBody(request, 64 * 1024),
+        );
+        if (input.target === "embedding") {
+          if (this.disableEmbeddings) {
+            throw new HttpError(409, "Embedding is disabled by the server");
+          }
+          let config;
+          try {
+            config = this.modelConfiguration.embeddingCandidate(
+              embeddingConfigurationUpdate(input.embedding),
+            );
+          } catch (error) {
+            throw new HttpError(
+              400,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+          try {
+            const result = await testEmbeddingConnection(config, {
+              inputType: input.embedding.input_type,
+              maxInputChars: input.embedding.max_input_chars,
+            });
+            json(response, 200, {
+              ok: true,
+              target: input.target,
+              model: result.model,
+              latency_ms: Number(result.latencyMs.toFixed(1)),
+              details: result.details,
+              tested_at: new Date().toISOString(),
+            });
+          } catch (error) {
+            throw new HttpError(
+              502,
+              `Embedding test failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          return;
+        }
+
+        let config;
+        try {
+          config = this.modelConfiguration.rerankerCandidate(
+            rerankerConfigurationUpdate(input.reranker),
+          );
+        } catch (error) {
+          throw new HttpError(
+            400,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        try {
+          const result = await testRerankerConnection(config);
+          json(response, 200, {
+            ok: true,
+            target: input.target,
+            model: result.model,
+            latency_ms: Number(result.latencyMs.toFixed(1)),
+            details: result.details,
+            tested_at: new Date().toISOString(),
+          });
+        } catch (error) {
+          throw new HttpError(
+            502,
+            `Reranker test failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        return;
+      }
+
+      if (
+        request.method === "PUT" &&
+        pathname === "/v1/observability/configuration"
+      ) {
+        if (this.runner.isBusy()) {
+          throw new HttpError(
+            409,
+            "Model configuration cannot change while index jobs are queued or running",
+          );
+        }
+        const input = modelConfigurationSchema.parse(
+          await readJsonBody(request, 64 * 1024),
+        );
+        let result: ReturnType<RuntimeModelConfiguration["update"]>;
+        try {
+          result = this.modelConfiguration.update({
+            embedding: input.embedding
+              ? embeddingConfigurationUpdate(input.embedding)
+              : undefined,
+            reranker: input.reranker
+              ? rerankerConfigurationUpdate(input.reranker)
+              : undefined,
+          } satisfies ModelConfigurationUpdate);
+        } catch (error) {
+          throw new HttpError(
+            400,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        await this.reloadEngines();
+        json(response, 200, {
+          ok: true,
+          changed: result.changed,
+          reindex_required: result.reindexRequired,
+          applied_at: new Date().toISOString(),
+          configuration: this.configurationSnapshot(),
         });
         return;
       }
@@ -976,6 +1185,9 @@ class HttpContextService {
       workspaceId: workspace.id,
       databaseUrl: this.databaseUrl,
     });
+    const modelConfig = this.modelConfiguration.engineConfig();
+    config.embeddings = modelConfig.embeddings;
+    config.neuralRerank = modelConfig.neuralRerank;
     if (this.disableEmbeddings) config.embeddings = undefined;
     const engine = new ContextEngine(config);
     this.engines.set(workspace.id, engine);
@@ -997,6 +1209,24 @@ class HttpContextService {
     const engine = this.engines.get(workspaceId);
     this.engines.delete(workspaceId);
     if (engine) await engine.close();
+  }
+
+  private async reloadEngines(): Promise<void> {
+    const engines = [...this.engines.values()];
+    this.engines.clear();
+    await Promise.all(engines.map((engine) => engine.close()));
+  }
+
+  private configurationSnapshot(): Record<string, unknown> {
+    return this.modelConfiguration.snapshot({
+      databaseUrl: this.databaseUrl,
+      httpApiKey: this.apiKey,
+      allowUnauthenticated: this.allowUnauthenticated,
+      allowLocalWorkspaces: this.allowLocalWorkspaces,
+      localRootAllowlistCount: this.localRootAllowlist.length,
+      maxBlobBytes: this.maxBlobBytes,
+      disableEmbeddings: this.disableEmbeddings,
+    });
   }
 
   private async readBlobFile(

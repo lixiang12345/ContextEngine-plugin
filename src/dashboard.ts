@@ -200,6 +200,33 @@ export function observabilityDashboardHtml(): string {
     .runtime-item:nth-last-child(-n + 2) { border-bottom: 0; }
     .runtime-key { color: var(--muted); font-size: 11px; }
     .runtime-value { margin-top: 4px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .config-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--surface); }
+    .config-panel { min-width: 0; padding: 14px; border-right: 1px solid var(--line); }
+    .config-panel:last-child { border-right: 0; }
+    .config-panel h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 12px; font-size: 13px; }
+    .config-panel .field { margin-top: 9px; }
+    .config-panel .field:first-of-type { margin-top: 0; }
+    .config-panel .field label { margin-bottom: 4px; }
+    .config-panel .control { min-height: 32px; }
+    .config-panel .control[type="number"] { font-variant-numeric: tabular-nums; }
+    .config-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .config-check { display: flex; align-items: center; gap: 7px; min-height: 32px; color: var(--text); font-size: 12px; }
+    .config-check input { accent-color: var(--accent); }
+    .config-help { margin-top: 4px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .model-test { display: flex; align-items: flex-start; flex-direction: column; gap: 8px; margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
+    .model-test .button { align-self: flex-end; }
+    .model-test-status { width: 100%; min-width: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .model-test-status.good { color: #12543d; }
+    .model-test-status.warn { color: #7b4908; }
+    .model-test-status.bad { color: #8b3029; }
+    .config-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+    .config-status { min-height: 18px; color: var(--muted); font-size: 12px; }
+    .config-status.good { color: #12543d; }
+    .config-status.warn { color: #7b4908; }
+    .config-status.bad { color: #8b3029; }
+    .config-readonly { display: grid; gap: 10px; }
+    .config-readonly .runtime-item { min-height: 0; padding: 0 0 9px; border: 0; border-bottom: 1px solid var(--line); }
+    .config-readonly .runtime-item:last-child { padding-bottom: 0; border-bottom: 0; }
     .latency-cell { min-width: 130px; }
     .latency-track { width: 100%; height: 5px; margin-top: 5px; background: #e8ebed; }
     .latency-fill { height: 100%; background: var(--info); }
@@ -222,6 +249,9 @@ export function observabilityDashboardHtml(): string {
     @media (max-width: 1180px) {
       .metric-grid { grid-template-columns: repeat(4, minmax(130px, 1fr)); }
       .split { grid-template-columns: 1fr; }
+      .config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .config-panel:nth-child(2) { border-right: 0; }
+      .config-panel:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
       .probe-form { grid-template-columns: 1fr 2fr 90px 110px; }
       .probe-form .button { grid-column: 1 / -1; justify-self: start; }
     }
@@ -237,6 +267,11 @@ export function observabilityDashboardHtml(): string {
       .runtime-list { grid-template-columns: 1fr; }
       .runtime-item:nth-child(odd) { border-right: 0; }
       .runtime-item:nth-last-child(2) { border-bottom: 1px solid var(--line); }
+      .config-grid { grid-template-columns: 1fr; }
+      .config-panel { border-right: 0; border-bottom: 1px solid var(--line); }
+      .config-panel:last-child { border-bottom: 0; }
+      .config-panel:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+      .config-actions { align-items: flex-start; flex-direction: column; }
       .probe-form { grid-template-columns: 1fr; }
       .probe-form .button { grid-column: auto; width: 100%; }
       .top-link { display: none; }
@@ -293,6 +328,65 @@ export function observabilityDashboardHtml(): string {
       </div>
     </section>
     <section class="section">
+      <div class="section-header"><h2>Model &amp; runtime configuration</h2><span class="section-note">Applied to this process</span></div>
+      <form id="modelConfigForm">
+        <div class="config-grid">
+          <div class="config-panel">
+            <h3><span>Embedding</span><span id="embeddingState" class="badge neutral">--</span></h3>
+            <label class="config-check"><input id="embeddingEnabled" type="checkbox"> Enabled</label>
+            <div class="field"><label for="embeddingBaseUrl">Base URL</label><input id="embeddingBaseUrl" class="control" type="url" spellcheck="false"></div>
+            <div class="field"><label for="embeddingModel">Model</label><input id="embeddingModel" class="control" type="text" spellcheck="false"></div>
+            <div class="field"><label for="embeddingAuth">Authentication</label><select id="embeddingAuth" class="control"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
+            <div class="field"><label for="embeddingApiKey">API key</label><input id="embeddingApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false"></div>
+            <div id="embeddingKeyHelp" class="config-help">Leave blank to keep the current key.</div>
+            <div class="config-field-grid">
+              <div class="field"><label for="embeddingDimensions">Dimensions</label><input id="embeddingDimensions" class="control" type="number" min="1"></div>
+              <div class="field"><label for="embeddingBatchSize">Batch size</label><input id="embeddingBatchSize" class="control" type="number" min="1" max="1024"></div>
+            </div>
+            <div class="config-field-grid">
+              <div class="field"><label for="embeddingMaxChars">Max input chars</label><input id="embeddingMaxChars" class="control" type="number" min="100"></div>
+              <label class="config-check"><input id="embeddingInputType" type="checkbox"> Qwen input type</label>
+            </div>
+            <div class="model-test">
+              <span id="embeddingTestStatus" class="model-test-status" aria-live="polite">Not tested</span>
+              <button id="testEmbedding" class="button" type="button">Test connection</button>
+            </div>
+          </div>
+          <div class="config-panel">
+            <h3><span>Reranker</span><span id="rerankerState" class="badge neutral">--</span></h3>
+            <label class="config-check"><input id="rerankerEnabled" type="checkbox"> Enabled</label>
+            <div class="field"><label for="rerankerBaseUrl">Base URL</label><input id="rerankerBaseUrl" class="control" type="url" spellcheck="false"></div>
+            <div class="field"><label for="rerankerModel">Model</label><input id="rerankerModel" class="control" type="text" spellcheck="false"></div>
+            <div class="field"><label for="rerankerAuth">Authentication</label><select id="rerankerAuth" class="control"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
+            <div class="field"><label for="rerankerApiKey">API key</label><input id="rerankerApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false"></div>
+            <div id="rerankerKeyHelp" class="config-help">Leave blank to keep the current key.</div>
+            <div class="config-field-grid">
+              <div class="field"><label for="rerankerTopN">Top N</label><input id="rerankerTopN" class="control" type="number" min="2" max="64"></div>
+              <div class="field"><label for="rerankerWeight">Weight</label><input id="rerankerWeight" class="control" type="number" min="0.05" max="0.85" step="0.01"></div>
+            </div>
+            <div class="field"><label for="rerankerMaxChars">Max document chars</label><input id="rerankerMaxChars" class="control" type="number" min="200"></div>
+            <div class="field"><label for="rerankerInstruction">Instruction</label><textarea id="rerankerInstruction" class="control" rows="3"></textarea></div>
+            <div class="model-test">
+              <span id="rerankerTestStatus" class="model-test-status" aria-live="polite">Not tested</span>
+              <button id="testReranker" class="button" type="button">Test connection</button>
+            </div>
+          </div>
+          <div class="config-panel">
+            <h3><span>Runtime policy</span><span class="badge info">Effective</span></h3>
+            <div id="runtimeConfigList" class="config-readonly"></div>
+          </div>
+          <div class="config-panel">
+            <h3><span>Server &amp; storage</span><span class="badge info">Effective</span></h3>
+            <div id="serverConfigList" class="config-readonly"></div>
+          </div>
+        </div>
+        <div class="config-actions">
+          <span id="configStatus" class="config-status">Waiting for configuration.</span>
+          <button id="saveConfiguration" class="button primary" type="submit">Apply configuration</button>
+        </div>
+      </form>
+    </section>
+    <section class="section">
       <div class="section-header"><h2>Workspaces</h2><span id="workspaceNote" class="section-note">No workspaces loaded</span></div>
       <div id="workspaceTable" class="empty">Connect to load workspaces.</div>
     </section>
@@ -323,7 +417,7 @@ export function observabilityDashboardHtml(): string {
 (function () {
   "use strict";
   var storageKey = "contextengine.dashboard.apiKey";
-  var state = { token: sessionStorage.getItem(storageKey) || "", data: null, loading: false, timer: null };
+  var state = { token: sessionStorage.getItem(storageKey) || "", data: null, loading: false, timer: null, configDirty: false };
   var byId = function (id) { return document.getElementById(id); };
   var apiKey = byId("apiKey");
   apiKey.value = state.token;
@@ -378,10 +472,11 @@ export function observabilityDashboardHtml(): string {
   function badge(value) {
     var text = String(value || "unknown");
     var tone = "neutral";
-    if (["online", "indexed", "succeeded", "200"].indexOf(text) >= 0) tone = "good";
+    if (["online", "indexed", "succeeded", "200", "enabled", "bearer"].indexOf(text) >= 0) tone = "good";
     else if (["queued", "running", "partial"].indexOf(text) >= 0) tone = "warn";
-    else if (["failed", "offline", "error"].indexOf(text) >= 0) tone = "bad";
-    else if (["blob", "local", "incremental", "rebuild"].indexOf(text) >= 0) tone = "info";
+    else if (["failed", "offline", "error", "unavailable"].indexOf(text) >= 0) tone = "bad";
+    else if (["blob", "local", "incremental", "rebuild", "none", "effective"].indexOf(text) >= 0) tone = "info";
+    else if (["disabled_by_server"].indexOf(text) >= 0) tone = "warn";
     return "<span class=\"badge " + tone + "\">" + escapeHtml(text) + "</span>";
   }
 
@@ -449,6 +544,122 @@ export function observabilityDashboardHtml(): string {
     }).join("");
   }
 
+  function configRows(rows) {
+    return rows.map(function (row) {
+      return "<div class=\"runtime-item\"><div class=\"runtime-key\">" + escapeHtml(row[0]) + "</div><div class=\"runtime-value\">" + escapeHtml(row[1]) + "</div></div>";
+    }).join("");
+  }
+
+  function setInputValue(id, value) {
+    byId(id).value = value == null ? "" : String(value);
+  }
+
+  function stateBadge(id, value) {
+    var text = String(value || "disabled");
+    var tone = text === "enabled" || text === "bearer" ? "good" : text === "disabled_by_server" ? "warn" : "neutral";
+    var node = byId(id);
+    node.className = "badge " + tone;
+    node.textContent = text;
+  }
+
+  function syncModelEditor(prefix, enabled, auth) {
+    byId(prefix + "Enabled").checked = enabled;
+    byId(prefix + "Auth").disabled = !enabled;
+    byId(prefix + "ApiKey").disabled = !enabled || auth === "none";
+    byId("test" + (prefix === "embedding" ? "Embedding" : "Reranker")).disabled = !enabled;
+  }
+
+  function setModelTestStatus(prefix, tone, text) {
+    var node = byId(prefix + "TestStatus");
+    node.className = "model-test-status" + (tone ? " " + tone : "");
+    node.textContent = text;
+  }
+
+  function embeddingFormConfiguration() {
+    var embedding = {
+      enabled: byId("embeddingEnabled").checked,
+      base_url: byId("embeddingBaseUrl").value.trim() || undefined,
+      model: byId("embeddingModel").value.trim() || undefined,
+      dimensions: byId("embeddingDimensions").value ? Number(byId("embeddingDimensions").value) : null,
+      authentication: byId("embeddingAuth").value,
+      batch_size: Number(byId("embeddingBatchSize").value || 8),
+      max_input_chars: Number(byId("embeddingMaxChars").value || 4000),
+      input_type: byId("embeddingInputType").checked
+    };
+    var apiKey = byId("embeddingApiKey").value.trim();
+    if (apiKey) embedding.api_key = apiKey;
+    return embedding;
+  }
+
+  function rerankerFormConfiguration() {
+    var reranker = {
+      enabled: byId("rerankerEnabled").checked,
+      base_url: byId("rerankerBaseUrl").value.trim() || undefined,
+      model: byId("rerankerModel").value.trim() || undefined,
+      authentication: byId("rerankerAuth").value,
+      top_n: Number(byId("rerankerTopN").value || 20),
+      weight: Number(byId("rerankerWeight").value || 0.32),
+      max_document_chars: Number(byId("rerankerMaxChars").value || 1800),
+      instruction: byId("rerankerInstruction").value.trim() || null
+    };
+    var apiKey = byId("rerankerApiKey").value.trim();
+    if (apiKey) reranker.api_key = apiKey;
+    return reranker;
+  }
+
+  function renderConfiguration(data) {
+    var config = data.configuration || {};
+    var embedding = config.embedding || {};
+    var reranker = config.reranker || {};
+    var modelApi = config.model_api || {};
+    var indexing = config.indexing || {};
+    var http = config.http || {};
+    var storage = config.storage || {};
+
+    stateBadge("embeddingState", embedding.state);
+    stateBadge("rerankerState", reranker.state);
+    setInputValue("embeddingBaseUrl", embedding.base_url);
+    setInputValue("embeddingModel", embedding.model);
+    setInputValue("embeddingDimensions", embedding.dimensions);
+    setInputValue("embeddingBatchSize", embedding.batch_size);
+    setInputValue("embeddingMaxChars", embedding.max_input_chars);
+    byId("embeddingAuth").value = embedding.authentication === "none" ? "none" : "bearer";
+    byId("embeddingInputType").checked = Boolean(embedding.input_type);
+    byId("embeddingApiKey").value = "";
+    byId("embeddingApiKey").placeholder = embedding.api_key_hint ? "Keep " + embedding.api_key_hint : "No key configured";
+    byId("embeddingKeyHelp").textContent = embedding.api_key_hint ? "Current key: " + embedding.api_key_hint : "No key is configured.";
+
+    setInputValue("rerankerBaseUrl", reranker.base_url);
+    setInputValue("rerankerModel", reranker.model);
+    setInputValue("rerankerTopN", reranker.top_n == null ? 20 : reranker.top_n);
+    setInputValue("rerankerWeight", reranker.weight == null ? 0.32 : reranker.weight);
+    setInputValue("rerankerMaxChars", reranker.max_document_chars == null ? 1800 : reranker.max_document_chars);
+    setInputValue("rerankerInstruction", reranker.instruction);
+    byId("rerankerAuth").value = reranker.authentication === "none" ? "none" : "bearer";
+    byId("rerankerApiKey").value = "";
+    byId("rerankerApiKey").placeholder = reranker.api_key_hint ? "Keep " + reranker.api_key_hint : "No key configured";
+    byId("rerankerKeyHelp").textContent = reranker.api_key_hint ? "Current key: " + reranker.api_key_hint : "No key is configured.";
+
+    syncModelEditor("embedding", embedding.state === "enabled", byId("embeddingAuth").value);
+    syncModelEditor("reranker", reranker.state === "enabled", byId("rerankerAuth").value);
+    byId("embeddingEnabled").disabled = embedding.state === "disabled_by_server";
+
+    byId("runtimeConfigList").innerHTML = configRows([
+      ["API timeout", number(modelApi.timeout_ms) + " ms"],
+      ["API retries", number(modelApi.retries)],
+      ["Max file", bytes(indexing.max_file_bytes)],
+      ["Max chunk", number(indexing.max_chunk_chars) + " chars"],
+    ]);
+    byId("serverConfigList").innerHTML = configRows([
+      ["HTTP auth", String(http.authentication || "--")],
+      ["Max Blob", bytes(http.max_blob_bytes)],
+      ["Local workspaces", http.local_workspaces ? "enabled" : "disabled"],
+      ["Allowlist entries", number(http.local_root_allowlist_count)],
+      ["Database", storage.host ? storage.host + (storage.port ? ":" + storage.port : "") + " / " + (storage.database || "configured") : "--"],
+      ["Database TLS", storage.tls ? "enabled" : "disabled"],
+    ]);
+  }
+
   function renderRoutes(data) {
     var routes = data.requests.routes || [];
     if (!routes.length) { byId("routeTable").className = "empty"; byId("routeTable").textContent = "No request observations yet."; return; }
@@ -512,6 +723,7 @@ export function observabilityDashboardHtml(): string {
     state.data = data;
     renderMetrics(data);
     renderRuntime(data);
+    if (!state.configDirty) renderConfiguration(data);
     renderRoutes(data);
     renderWorkspaces(data);
     renderJobs(data);
@@ -552,6 +764,86 @@ export function observabilityDashboardHtml(): string {
   byId("clearKey").addEventListener("click", function () { state.token = ""; apiKey.value = ""; sessionStorage.removeItem(storageKey); refresh(); });
   byId("refresh").addEventListener("click", refresh);
   byId("autoRefresh").addEventListener("change", schedule);
+
+  Array.prototype.forEach.call(document.querySelectorAll("#modelConfigForm input, #modelConfigForm select, #modelConfigForm textarea"), function (control) {
+    control.addEventListener("input", function () {
+      state.configDirty = true;
+      var prefix = control.id.indexOf("embedding") === 0 ? "embedding" : control.id.indexOf("reranker") === 0 ? "reranker" : "";
+      if (prefix) setModelTestStatus(prefix, "", "Configuration changed; test again");
+      byId("configStatus").className = "config-status";
+      byId("configStatus").textContent = "Unsaved changes";
+    });
+    control.addEventListener("change", function () {
+      state.configDirty = true;
+      if (control.id === "embeddingAuth" || control.id === "embeddingEnabled") syncModelEditor("embedding", byId("embeddingEnabled").checked, byId("embeddingAuth").value);
+      if (control.id === "rerankerAuth" || control.id === "rerankerEnabled") syncModelEditor("reranker", byId("rerankerEnabled").checked, byId("rerankerAuth").value);
+      var prefix = control.id.indexOf("embedding") === 0 ? "embedding" : control.id.indexOf("reranker") === 0 ? "reranker" : "";
+      if (prefix) setModelTestStatus(prefix, "", "Configuration changed; test again");
+      byId("configStatus").className = "config-status";
+      byId("configStatus").textContent = "Unsaved changes";
+    });
+  });
+
+  async function testModelConnection(target) {
+    var isEmbedding = target === "embedding";
+    var prefix = isEmbedding ? "embedding" : "reranker";
+    var button = byId(isEmbedding ? "testEmbedding" : "testReranker");
+    var configuration = isEmbedding ? embeddingFormConfiguration() : rerankerFormConfiguration();
+    if (!configuration.enabled) {
+      setModelTestStatus(prefix, "warn", "Enable the model before testing");
+      return;
+    }
+    button.disabled = true;
+    setModelTestStatus(prefix, "", "Testing...");
+    try {
+      var body = isEmbedding
+        ? { target: "embedding", embedding: configuration }
+        : { target: "reranker", reranker: configuration };
+      var result = await api("/v1/observability/configuration/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      var detail = isEmbedding
+        ? number(result.details && result.details.dimensions) + " dimensions"
+        : number(result.details && result.details.scored_documents) + " scores";
+      setModelTestStatus(prefix, "good", "Available - " + duration(result.latency_ms) + " - " + detail);
+    } catch (error) {
+      setModelTestStatus(prefix, "bad", error.message);
+    } finally {
+      button.disabled = !byId(prefix + "Enabled").checked;
+    }
+  }
+
+  byId("testEmbedding").addEventListener("click", function () { testModelConnection("embedding"); });
+  byId("testReranker").addEventListener("click", function () { testModelConnection("reranker"); });
+
+  byId("modelConfigForm").addEventListener("submit", async function (event) {
+    event.preventDefault();
+    var button = byId("saveConfiguration");
+    button.disabled = true;
+    byId("configStatus").className = "config-status";
+    byId("configStatus").textContent = "Applying...";
+    var embedding = embeddingFormConfiguration();
+    var reranker = rerankerFormConfiguration();
+    try {
+      var result = await api("/v1/observability/configuration", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ embedding: embedding, reranker: reranker })
+      });
+      state.configDirty = false;
+      renderConfiguration({ configuration: result.configuration });
+      byId("configStatus").className = "config-status " + (result.reindex_required ? "warn" : "good");
+      byId("configStatus").textContent = result.reindex_required ? "Applied; reindex required for the current embedding index." : "Applied to the running process.";
+      setTimeout(refresh, 150);
+    } catch (error) {
+      byId("configStatus").className = "config-status bad";
+      byId("configStatus").textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   byId("probeForm").addEventListener("submit", async function (event) {
     event.preventDefault();

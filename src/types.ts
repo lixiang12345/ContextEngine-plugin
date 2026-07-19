@@ -44,7 +44,7 @@ export interface IndexStats {
 }
 
 export interface EmbeddingsConfig {
-  apiKey: string;
+  apiKey?: string;
   baseUrl: string;
   model: string;
   dimensions?: number;
@@ -80,7 +80,7 @@ export interface EngineConfig {
    * Resolved at engine open time from env.
    */
   neuralRerank?: {
-    apiKey: string;
+    apiKey?: string;
     baseUrl: string;
     model: string;
     topN: number;
