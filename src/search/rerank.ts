@@ -90,6 +90,12 @@ const IMPL_EXT =
 const DOC_NOISE =
   /^(readme|changelog|contributing|license|roadmap|architecture|comparison|evaluation|agents)(\.|$)/i;
 
+const DOC_QUERY =
+  /\b(doc|docs|documentation|readme|guide|tutorial|usage|example|examples|install|setup|configure|configuration)\b/i;
+
+const TEST_QUERY =
+  /\b(test|tests|spec|fixture|fixtures|mock|mocks|benchmark|bench|example|examples|demo)\b/i;
+
 /**
  * Code-aware feature score — implementation-first ranking.
  * Higher is better.
@@ -105,6 +111,8 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
     IMPL_EXT.test(chunk.path) &&
     chunk.language !== "markdown" &&
     chunk.language !== "git-commit";
+  const asksForDocs = DOC_QUERY.test(q.raw);
+  const asksForTests = TEST_QUERY.test(q.raw);
 
   // Exact / fuzzy identifier hits
   for (const id of q.identifiers) {
@@ -137,7 +145,7 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
       chunk.path,
     )
   ) {
-    score -= 1.45;
+    score -= asksForTests ? 0.35 : 1.65;
   }
   // Multi-lang test layouts: jvmTest, androidHostTest, *_test.go, *_test.rs, *Test.java
   if (
@@ -145,16 +153,20 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
       chunk.path,
     )
   ) {
-    score -= 1.35;
+    score -= asksForTests ? 0.3 : 1.75;
   }
-  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) score -= 1.2;
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(chunk.path)) {
+    score -= asksForTests ? 0.25 : 1.55;
+  }
   if (/_test\.(c|cc|cpp|cxx|go|rs|java|kt|kts|py)$/i.test(chunk.path)) {
-    score -= 1.25;
+    score -= asksForTests ? 0.25 : 1.6;
   }
   if (/(_test|Test|Tests)\.(java|kt|kts|go|rs|py|c|cc|cpp)$/i.test(chunk.path)) {
-    score -= 1.25;
+    score -= asksForTests ? 0.25 : 1.6;
   }
-  if (/\b(test|spec|mock|fixture|bench)\b/i.test(chunk.path)) score -= 0.4;
+  if (/\b(test|spec|mock|fixture|bench)\b/i.test(chunk.path)) {
+    score -= asksForTests ? 0.1 : 0.55;
+  }
   // Prefer .c/.cc implementation over headers when scores are close
   if (/\.(h|hpp|hxx|hh)$/i.test(chunk.path) && q.intent !== "path") {
     score -= 0.55;
@@ -168,7 +180,7 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
       chunk.path,
     )
   ) {
-    score -= 1.15;
+    score -= asksForDocs ? 0.25 : q.intent === "symbol" || q.intent === "path" ? 1.85 : 1.45;
   }
   // Root-level project markdown (README, ROADMAP, COMPARISON, …)
   if (
@@ -177,9 +189,10 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
     DOC_NOISE.test(base)
   ) {
     // Keep a little signal for pure doc questions, crush for code tasks
-    if (q.intent === "symbol" || q.intent === "path") score -= 1.35;
+    if (asksForDocs) score -= 0.2;
+    else if (q.intent === "symbol" || q.intent === "path") score -= 1.75;
     else if (q.intent === "history") score -= 0.35;
-    else score -= 1.05;
+    else score -= 1.35;
   }
   if (/\.d\.ts$/i.test(chunk.path) || /(^|\/)typings?(\/|$)/i.test(chunk.path)) {
     score -= 0.85;

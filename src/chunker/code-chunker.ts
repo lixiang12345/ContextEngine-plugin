@@ -24,6 +24,14 @@ interface LangProfile {
   commentPrefixes: string[];
 }
 
+interface ChunkRange {
+  start: number;
+  end: number;
+  prefix?: string;
+  symbol?: string;
+  noOverlap?: boolean;
+}
+
 const PROFILES: Record<string, LangProfile> = {
   typescript: {
     start:
@@ -156,12 +164,33 @@ const PROFILES: Record<string, LangProfile> = {
 
 const SYMBOL_EXTRACTORS: Array<{ re: RegExp; group: number }> = [
   {
-    re: /(?:function\*?|class|interface|type|enum|def|fn|struct|trait|mod|fun|protocol|extension|namespace|record|object|actor)\s+([A-Za-z_][\w]*)/,
+    re: /(?:function\*?|class|interface|type|enum|def|fn|func|struct|trait|mod|fun|protocol|extension|namespace|record|object|actor)\s+([A-Za-z_$][\w$]*)/,
     group: 1,
   },
-  { re: /(?:const|let|var|val)\s+([A-Za-z_][\w]*)\s*=/, group: 1 },
-  { re: /func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)/, group: 1 },
-  { re: /\b([A-Za-z_][\w]*)\s*\([^;{]*\)\s*\{/, group: 1 },
+  { re: /(?:const|let|var|val)\s+([A-Za-z_$][\w$]*)\s*=/, group: 1 },
+  { re: /func\s+(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)/, group: 1 },
+  { re: /\bfunc\s+\([^)]*\)\s+([A-Za-z_$][\w$]*)\s*\(/, group: 1 },
+  {
+    re: /^\s*(?:(?:public|private|protected|internal|static|readonly|override|abstract|async|get|set|final|open|suspend)\s+)*\*?([A-Za-z_$][\w$]*)\s*(?:<[^>{}]*>)?\s*\([^;{}]*\)\s*(?::[^{]+)?\{/m,
+    group: 1,
+  },
+  {
+    re: /^\s*(?:(?:public|private|protected|internal|static|final|abstract|synchronized|native|default|override|virtual|async|open|sealed|extern)\s+)*(?:[\w$<>\[\],.?]+\s+)+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[^{]+)?\{/m,
+    group: 1,
+  },
+  {
+    re: /^\s*([A-Za-z_$][\w$]*)\s*:\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/m,
+    group: 1,
+  },
+  {
+    re: /\b(?:exports|module\.exports|prototype)\.([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/,
+    group: 1,
+  },
+  {
+    re: /^\s*(?!(?:if|for|while|switch|catch|return)\b)(?:(?:static|inline|extern|const|unsigned|signed|volatile|constexpr|virtual|explicit|friend)\s+)*(?:[\w:<>*&~\s]+?)\s+([A-Za-z_~][\w]*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?\{/m,
+    group: 1,
+  },
+  { re: /\b([A-Za-z_$][\w$]*)\s*\([^;{]*\)\s*\{/, group: 1 },
   { re: /^#+\s+(.+)$/m, group: 1 },
 ];
 
@@ -178,10 +207,14 @@ function profileFor(language: string): LangProfile {
 
 const NON_SYMBOL_NAMES = new Set([
   "catch",
+  "constructor",
+  "describe",
   "for",
   "if",
+  "it",
   "return",
   "switch",
+  "test",
   "while",
 ]);
 
@@ -196,16 +229,21 @@ function symbolSource(content: string, language: string): string {
   return source;
 }
 
-function extractSymbol(content: string, language: string): string | undefined {
+export function extractSymbolNames(content: string, language: string): string[] {
   const source = symbolSource(content, language);
+  const names = new Set<string>();
   for (const { re, group } of SYMBOL_EXTRACTORS) {
     const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
     for (const match of source.matchAll(new RegExp(re.source, flags))) {
       const value = match[group]?.trim().slice(0, 120);
-      if (value && !NON_SYMBOL_NAMES.has(value.toLowerCase())) return value;
+      if (value && !NON_SYMBOL_NAMES.has(value.toLowerCase())) names.add(value);
     }
   }
-  return undefined;
+  return [...names];
+}
+
+function extractSymbol(content: string, language: string): string | undefined {
+  return extractSymbolNames(content, language)[0];
 }
 
 function splitLines(text: string): string[] {
@@ -408,6 +446,204 @@ function attachHeader(
   return s;
 }
 
+function commentMarker(language: string): string {
+  return language === "python" || language === "ruby" || language === "markdown"
+    ? "#"
+    : "//";
+}
+
+function containerContextPrefix(
+  lines: string[],
+  start: number,
+  language: string,
+): { prefix: string; symbol: string | undefined } {
+  let symbol: string | undefined;
+  let oneLine = "";
+  for (let i = start; i < Math.min(lines.length, start + 12); i++) {
+    const line = lines[i] ?? "";
+    if (isCommentOrBlank(line, profileFor(language).commentPrefixes)) continue;
+    if (isDecoratorLine(line, language)) continue;
+    oneLine = line.trim().replace(/\s+/g, " ");
+    symbol = extractSymbol(oneLine, language);
+    break;
+  }
+  const label = symbol ? `${symbol} (${oneLine})` : oneLine;
+  return {
+    prefix: label
+      ? `${commentMarker(language)} Context: ${label.slice(0, 180)}\n`
+      : "",
+    symbol,
+  };
+}
+
+function memberNameFromLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed || /^(?:if|for|while|switch|catch|return|else|do)\b/.test(trimmed)) {
+    return null;
+  }
+
+  const patterns: Array<{ re: RegExp; group: number }> = [
+    {
+      re: /^(?:(?:public|private|protected|internal|static|final|open|suspend|override|abstract|inline|operator)\s+)*fun\s+([A-Za-z_$][\w$]*)\s*\(/,
+      group: 1,
+    },
+    {
+      re: /^(?:(?:pub(?:\([^)]*\))?|async|unsafe|const|extern)\s+)*fn\s+([A-Za-z_$][\w$]*)\s*\(/,
+      group: 1,
+    },
+    {
+      re: /^(?:async\s+)?def\s+([A-Za-z_][\w]*)\s*\(/,
+      group: 1,
+    },
+    {
+      re: /^(?:(?:private|protected|override|final|abstract|implicit)\s+)*def\s+([A-Za-z_$][\w$]*)\s*[(:=]/,
+      group: 1,
+    },
+    {
+      re: /^func\s+(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)\s*\(/,
+      group: 1,
+    },
+    {
+      re: /^(?:(?:public|private|protected|internal|static|readonly|override|abstract|async|get|set|final|open|suspend)\s+)*\*?([A-Za-z_$][\w$]*)\s*(?:<[^>{}]*>)?\s*\([^;{}]*\)\s*(?::[^{]+)?\{/,
+      group: 1,
+    },
+    {
+      re: /^(?:(?:public|private|protected|internal|static|final|abstract|synchronized|native|default|override|virtual|async|open|sealed|extern)\s+)*(?:[\w$<>\[\],.?]+\s+)+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[^{]+)?\{/,
+      group: 1,
+    },
+    {
+      re: /^([A-Za-z_$][\w$]*)\s*:\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/,
+      group: 1,
+    },
+  ];
+
+  for (const { re, group } of patterns) {
+    const match = trimmed.match(re);
+    const name = match?.[group];
+    if (name && !NON_SYMBOL_NAMES.has(name.toLowerCase())) return name;
+  }
+  return null;
+}
+
+function splitOversizedUnit(
+  lines: string[],
+  start: number,
+  end: number,
+  language: string,
+  profile: LangProfile,
+  maxLines: number,
+  maxChunkChars: number,
+): ChunkRange[] {
+  const context = containerContextPrefix(lines, start, language);
+  const containerIndent = lineIndent(lines[start] ?? "");
+  const candidates: Array<{
+    line: number;
+    start: number;
+    end: number;
+    indent: number;
+    name: string;
+  }> = [];
+
+  for (let i = start + 1; i < end; i++) {
+    const indent = lineIndent(lines[i]);
+    if (indent <= containerIndent) continue;
+    const name = memberNameFromLine(lines[i]);
+    if (!name) continue;
+    const memberEnd = Math.min(end, unitEndLine(lines, i, language, profile));
+    if (memberEnd <= i) continue;
+    candidates.push({
+      line: i,
+      start: Math.max(start + 1, attachHeader(lines, i, language, profile)),
+      end: memberEnd,
+      indent,
+      name,
+    });
+  }
+
+  if (candidates.length < 2) return [];
+
+  const minIndent = Math.min(...candidates.map((candidate) => candidate.indent));
+  const members = candidates
+    .filter((candidate) => candidate.indent <= minIndent + 2)
+    .sort((left, right) => left.line - right.line);
+  if (members.length < 2) return [];
+
+  const ranges: ChunkRange[] = [];
+  const firstMemberStart = members[0].start;
+  if (firstMemberStart > start) {
+    ranges.push({
+      start,
+      end: firstMemberStart,
+      symbol: context.symbol,
+      noOverlap: true,
+    });
+  }
+
+  let previousEnd = start;
+  for (let i = 0; i < members.length; i++) {
+    const member = members[i];
+    if (member.line < previousEnd) continue;
+    const nextStart = members[i + 1]?.start ?? end;
+    const memberEnd = Math.min(member.end, nextStart);
+    const symbol = context.symbol ? `${context.symbol}.${member.name}` : member.name;
+    const prefix = context.prefix;
+
+    if (memberEnd - member.start > maxLines) {
+      for (let p = member.start; p < memberEnd; p += maxLines) {
+        ranges.push({
+          start: p,
+          end: Math.min(memberEnd, p + maxLines),
+          prefix,
+          symbol,
+          noOverlap: true,
+        });
+      }
+    } else {
+      const text = lines.slice(member.start, memberEnd).join("\n");
+      if (text.length > maxChunkChars * 1.5 && memberEnd - member.start > 12) {
+        for (let p = member.start; p < memberEnd; p += maxLines) {
+          ranges.push({
+            start: p,
+            end: Math.min(memberEnd, p + maxLines),
+            prefix,
+            symbol,
+            noOverlap: true,
+          });
+        }
+      } else {
+        ranges.push({
+          start: member.start,
+          end: memberEnd,
+          prefix,
+          symbol,
+          noOverlap: true,
+        });
+      }
+    }
+    previousEnd = Math.max(previousEnd, memberEnd);
+  }
+
+  if (previousEnd < end - 1) {
+    ranges.push({
+      start: previousEnd,
+      end,
+      prefix: context.prefix,
+      symbol: context.symbol,
+      noOverlap: true,
+    });
+  }
+
+  return ranges.filter((range) => range.end > range.start);
+}
+
+function lineSplitRange(start: number, end: number, maxLines: number): ChunkRange[] {
+  const ranges: ChunkRange[] = [];
+  for (let p = start; p < end; p += maxLines) {
+    ranges.push({ start: p, end: Math.min(end, p + maxLines) });
+  }
+  return ranges;
+}
+
 /**
  * Split source into overlapping, structure-aware chunks.
  */
@@ -422,13 +658,25 @@ export function chunkFile(
   if (lines.length === 0 || !content.trim()) return [];
 
   const maxLines = Math.max(40, Math.floor(maxChunkChars / 40));
-  const ranges: Array<{ start: number; end: number }> = [];
+  const ranges: ChunkRange[] = [];
   const starts = findUnitStarts(lines, language, profile);
 
   if (starts.length === 0) {
-    for (let p = 0; p < lines.length; p += maxLines) {
-      ranges.push({ start: p, end: Math.min(lines.length, p + maxLines) });
-    }
+    const splitUnit =
+      lines.length > maxLines || content.length > maxChunkChars * 1.5
+        ? splitOversizedUnit(
+            lines,
+            0,
+            lines.length,
+            language,
+            profile,
+            maxLines,
+            maxChunkChars,
+          )
+        : [];
+    ranges.push(
+      ...(splitUnit.length ? splitUnit : lineSplitRange(0, lines.length, maxLines)),
+    );
   } else {
     // preamble before first unit
     const firstAttached = attachHeader(lines, starts[0], language, profile);
@@ -444,10 +692,20 @@ export function chunkFile(
         end = Math.min(end, nextAttached);
       }
       if (end <= start) continue;
-      if (end - start > maxLines) {
-        for (let p = start; p < end; p += maxLines) {
-          ranges.push({ start: p, end: Math.min(end, p + maxLines) });
-        }
+      const unitText = lines.slice(start, end).join("\n");
+      if (end - start > maxLines || unitText.length > maxChunkChars * 1.5) {
+        const splitUnit = splitOversizedUnit(
+          lines,
+          start,
+          end,
+          language,
+          profile,
+          maxLines,
+          maxChunkChars,
+        );
+        ranges.push(
+          ...(splitUnit.length ? splitUnit : lineSplitRange(start, end, maxLines)),
+        );
       } else {
         ranges.push({ start, end });
       }
@@ -459,7 +717,7 @@ export function chunkFile(
   }
 
   // Merge tiny non-code fragments only
-  const merged: Array<{ start: number; end: number }> = [];
+  const merged: ChunkRange[] = [];
   for (const r of ranges) {
     if (r.end <= r.start) continue;
     const text = lines.slice(r.start, r.end).join("\n").trim();
@@ -469,7 +727,9 @@ export function chunkFile(
       !/\b(function|class|def|fn|func|interface|type|enum|struct|impl|trait|module|namespace)\b/i.test(
         text,
       );
-    if (isFragment && merged.length > 0) {
+    if (r.prefix || r.symbol) {
+      merged.push({ ...r });
+    } else if (isFragment && merged.length > 0) {
       merged[merged.length - 1].end = r.end;
     } else if (text.length > 0) {
       merged.push({ ...r });
@@ -480,13 +740,14 @@ export function chunkFile(
   const overlap = 2;
 
   for (let i = 0; i < merged.length; i++) {
-    let { start, end } = merged[i];
-    if (i > 0) start = Math.max(0, start - overlap);
+    const range = merged[i];
+    let { start, end } = range;
+    if (i > 0 && !range.noOverlap) start = Math.max(0, start - overlap);
 
-    let text = lines.slice(start, end).join("\n");
+    let text = `${range.prefix ?? ""}${lines.slice(start, end).join("\n")}`;
     while (text.length > maxChunkChars * 1.5 && end - start > 12) {
       end -= Math.ceil((end - start) / 5);
-      text = lines.slice(start, end).join("\n");
+      text = `${range.prefix ?? ""}${lines.slice(start, end).join("\n")}`;
     }
     if (!text.trim()) continue;
 
@@ -506,7 +767,7 @@ export function chunkFile(
       startLine: start1,
       endLine: end1,
       content: text,
-      symbol: extractSymbol(text, language),
+      symbol: range.symbol ?? extractSymbol(text, language),
       hash: sha256(text),
     });
   }

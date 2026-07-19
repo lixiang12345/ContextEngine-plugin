@@ -61,6 +61,43 @@ describe("rerank", () => {
     );
   });
 
+  it("pushes docs and tests below implementation files for code queries", () => {
+    const q = analyzeQuery("request header accept idempotent length querystring");
+    const impl: CodeChunk = {
+      id: "impl",
+      path: "lib/request.js",
+      language: "javascript",
+      startLine: 1,
+      endLine: 80,
+      content:
+        "module.exports = { get header() {}, accepts() {}, get idempotent() {}, get length() {}, get querystring() {} }",
+      symbol: "header",
+      hash: "impl",
+    };
+    const docs: CodeChunk = {
+      ...impl,
+      id: "docs",
+      path: "docs/api/request.md",
+      language: "markdown",
+      content:
+        "# Request API\nrequest header accept idempotent length querystring examples usage",
+      symbol: "Request API",
+      hash: "docs",
+    };
+    const test: CodeChunk = {
+      ...impl,
+      id: "test",
+      path: "__tests__/request/length.test.js",
+      content:
+        "test request header accept idempotent length querystring behavior",
+      symbol: "request length test",
+      hash: "test",
+    };
+
+    assert.ok(featureScore(impl, q) > featureScore(docs, q));
+    assert.ok(featureScore(impl, q) > featureScore(test, q));
+  });
+
   it("preferImplementation tie-breaks toward source files", () => {
     const a = {
       id: "1",

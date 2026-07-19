@@ -2,11 +2,13 @@ import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg
 import pgvector from "pgvector/pg";
 import path from "node:path";
 import type { CodeChunk, IndexStats } from "../types.js";
+import { extractSymbolNames } from "../chunker/code-chunker.js";
 import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 const INDEX_VERSION = 3;
 const SCHEMA_LOCK_ID = 842847321;
+const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 
 export interface StoreSearchFilter {
   pathPrefix?: string;
@@ -68,13 +70,40 @@ function redactDatabaseUrl(value: string): string {
   }
 }
 
-function extractDefNames(content: string): string[] {
-  const names = new Set<string>();
-  const pattern =
-    /(?:function\*?|class|interface|type|enum|def|fn|struct|trait|mod|fun)\s+([A-Za-z_][\w]*)/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(content))) names.add(match[1]);
-  return [...names];
+function extractDefNames(content: string, language: string): string[] {
+  return extractSymbolNames(content, language);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pgErrorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function isRetryableSchemaError(error: unknown): boolean {
+  const code = pgErrorCode(error);
+  return code === "40P01" || code === "40001";
+}
+
+async function retrySchemaDdl(operation: () => Promise<void>): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < SCHEMA_DDL_MAX_ATTEMPTS; attempt++) {
+    try {
+      await operation();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableSchemaError(error) || attempt === SCHEMA_DDL_MAX_ATTEMPTS - 1) {
+        throw error;
+      }
+      await sleep(75 * 2 ** attempt);
+    }
+  }
+  throw lastError;
 }
 
 /**
@@ -82,6 +111,8 @@ function extractDefNames(content: string): string[] {
  * SQLite BLOB or a process-wide in-memory map.
  */
 export class PostgresStore {
+  private static readonly schemaMigrations = new Map<string, Promise<void>>();
+
   readonly databaseUrl: string;
   readonly workspaceId: string;
   private readonly pool: Pool;
@@ -106,7 +137,10 @@ export class PostgresStore {
     });
     const store = new PostgresStore(options.databaseUrl, options.workspaceId, pool);
     try {
-      await store.migrate();
+      await PostgresStore.ensureMigrated(options.databaseUrl);
+      if (options.workspaceId) {
+        await store.setMeta("index_version", String(INDEX_VERSION));
+      }
     } catch (error) {
       await pool.end();
       const detail = error instanceof Error ? error.message : String(error);
@@ -123,16 +157,28 @@ export class PostgresStore {
    * engine namespace.
    */
   static async ensureSchema(databaseUrl: string): Promise<void> {
+    await PostgresStore.ensureMigrated(databaseUrl);
+  }
+
+  private static async ensureMigrated(databaseUrl: string): Promise<void> {
+    const existing = PostgresStore.schemaMigrations.get(databaseUrl);
+    if (existing) return existing;
+
     const pool = new Pool({
       connectionString: databaseUrl,
       max: Number(process.env.CONTEXTENGINE_PG_POOL_MAX || 8),
     });
     const store = new PostgresStore(databaseUrl, "", pool);
-    try {
-      await store.migrate(false);
-    } finally {
-      await pool.end();
-    }
+    const migration = retrySchemaDdl(() => store.migrate(false))
+      .catch((error) => {
+        PostgresStore.schemaMigrations.delete(databaseUrl);
+        throw error;
+      })
+      .finally(async () => {
+        await pool.end();
+      });
+    PostgresStore.schemaMigrations.set(databaseUrl, migration);
+    return migration;
   }
 
   get hasFts(): boolean {
@@ -272,7 +318,7 @@ export class PostgresStore {
 
       const symbols = new Set<string>([
         ...(chunk.symbol ? [chunk.symbol] : []),
-        ...extractDefNames(chunk.content),
+        ...extractDefNames(chunk.content, chunk.language),
       ]);
       for (const name of symbols) {
         await this.query(
@@ -482,7 +528,9 @@ export class PostgresStore {
     const symbols = new Set<string>();
     for (const chunk of seedChunks) {
       if (chunk.symbol) symbols.add(chunk.symbol);
-      for (const name of extractDefNames(chunk.content)) symbols.add(name);
+      for (const name of extractDefNames(chunk.content, chunk.language)) {
+        symbols.add(name);
+      }
     }
 
     const ids: string[] = [];
@@ -690,23 +738,25 @@ export class PostgresStore {
   async ensureVectorIndex(dim: number): Promise<void> {
     if (!Number.isInteger(dim) || dim <= 0 || dim > 16_000) return;
     const indexName = `ce_embeddings_hnsw_${dim}`;
-    const client = this.client ?? (await this.pool.connect());
-    const release = !this.client;
-    try {
-      await client.query(`SELECT pg_advisory_lock(${SCHEMA_LOCK_ID})`);
+    await retrySchemaDdl(async () => {
+      const client = this.client ?? (await this.pool.connect());
+      const release = !this.client;
       try {
-        await client.query(
-          `CREATE INDEX IF NOT EXISTS ${indexName}
-           ON ce_embeddings
-           USING hnsw ((embedding::vector(${dim})) vector_cosine_ops)
-           WHERE dim = ${dim}`,
-        );
+        await client.query(`SELECT pg_advisory_lock(${SCHEMA_LOCK_ID})`);
+        try {
+          await client.query(
+            `CREATE INDEX IF NOT EXISTS ${indexName}
+             ON ce_embeddings
+             USING hnsw ((embedding::vector(${dim})) vector_cosine_ops)
+             WHERE dim = ${dim}`,
+          );
+        } finally {
+          await client.query(`SELECT pg_advisory_unlock(${SCHEMA_LOCK_ID})`);
+        }
       } finally {
-        await client.query(`SELECT pg_advisory_unlock(${SCHEMA_LOCK_ID})`);
+        if (release) client.release();
       }
-    } finally {
-      if (release) client.release();
-    }
+    });
   }
 
   async stats(root: string): Promise<IndexStats> {
