@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "name": "contextengine-pr-sample",
+  "repository": "..",
+  "baseRef": "HEAD",
+  "isolation": "sanitized",
+  "agent": {
+    "command": [
+      "agent-wrapper",
+      "--workspace",
+      "{workspace}",
+      "--prompt-file",
+      "{prompt_file}",
+      "--metrics-file",
+      "{metrics_file}"
+    ],
+    "timeoutMs": 900000
+  },
+  "setupCommand": ["npm", "ci"],
+  "testCommand": ["npm", "test"],
+  "verifyBaseline": true,
+  "requireChanges": true,
+  "repetitions": 3,
+  "variants": [
+    {
+      "id": "baseline",
+      "context": "none"
+    },
+    {
+      "id": "contextengine",
+      "context": {
+        "mode": "packed",
+        "topK": 20,
+        "maxTokens": 12000
+      }
+    }
+  ],
+  "cases": [
+    {
+      "id": "replace-with-real-task",
+      "prompt": "Replace this sample with a fixed historical engineering task.",
+      "expectedChangedPaths": ["src/"]
+    }
+  ]
+}

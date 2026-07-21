@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -7,12 +7,29 @@ import {
   type ServerResponse,
 } from "node:http";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { z, ZodError } from "zod";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { loadDotEnv, resolveDatabaseUrl, resolveEngineConfig } from "./config.js";
 import { observabilityDashboardHtml } from "./dashboard.js";
 import { ContextEngine } from "./engine.js";
+import {
+  GitHubConnectorClient,
+  GitHubConnectorError,
+} from "./connectors/github.js";
+import { createRetrievalMcpServer } from "./mcp-tools.js";
+import {
+  ConnectorSyncConflictError,
+  ConnectorSyncCoordinator,
+} from "./server/connector-sync.js";
+import {
+  createHttpAuthenticator,
+  type HttpApiKeyConfig,
+  type HttpBearerAuthenticator,
+  type HttpPrincipal,
+} from "./server/http-auth.js";
 import { IndexJobRunner } from "./server/index-job-runner.js";
 import {
   testEmbeddingConnection,
@@ -28,27 +45,41 @@ import {
 import {
   MissingBlobError,
   RevisionConflictError,
+  SyncPlanConflictError,
+  SyncPlanExpiredError,
   type StoredIndexJob,
+  type StoredConnectorSource,
   type StoredWorkspace,
+  type WorkspacePermission,
   WorkspaceNotFoundError,
   WorkspaceRepository,
+  workspacePermissionAllows,
   type SyncChange,
 } from "./server/workspace-repository.js";
 import type { SearchHit } from "./types.js";
+import type { IndexGenerationStatus } from "./store/postgres-store.js";
 
 const DEFAULT_MAX_BLOB_BYTES = 2 * 1024 * 1024;
+const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_MCP_MAX_SESSIONS = 128;
 const MAX_BATCH_BLOBS = 16;
 
 export interface HttpServerOptions {
   host?: string;
   port?: number;
   apiKey?: string;
+  apiKeys?: HttpApiKeyConfig[];
   databaseUrl?: string;
   allowUnauthenticated?: boolean;
   allowLocalWorkspaces?: boolean;
   localRootAllowlist?: string[];
   maxBlobBytes?: number;
+  mcpSessionIdleTtlMs?: number;
+  mcpMaxSessions?: number;
   disableEmbeddings?: boolean;
+  githubToken?: string;
+  githubApiBaseUrl?: string;
+  githubTimeoutMs?: number;
 }
 
 export interface HttpServerHandle {
@@ -71,7 +102,21 @@ class HttpError extends Error {
 const hashSchema = z.string().regex(/^[0-9a-fA-F]{64}$/, "expected SHA-256 hex");
 const positiveInteger = z.number().int().min(1);
 const nonNegativeInteger = z.number().int().min(0);
-const optionalHttpUrl = z.string().trim().url().max(2048).optional();
+const optionalHttpUrl = z
+  .string()
+  .trim()
+  .url()
+  .max(2048)
+  .refine((value) => {
+    try {
+      const protocol = new URL(value).protocol;
+      return protocol === "http:" || protocol === "https:";
+    } catch {
+      // Zod can continue refinements after a preceding `.url()` issue.
+      return false;
+    }
+  }, "Model base URL must use http:// or https://")
+  .optional();
 const embeddingConfigurationSchema = z.object({
   enabled: z.boolean(),
   base_url: optionalHttpUrl,
@@ -218,6 +263,34 @@ const batchBlobSchema = z.object({
     .max(MAX_BATCH_BLOBS),
 });
 
+const httpApiKeysSchema = z.array(
+  z.object({
+    principal_id: z.string().trim().min(1).max(200),
+    token: z.string().min(1).max(4096),
+    role: z.enum(["user", "operator"]).optional(),
+    admin: z.boolean().optional(),
+  }),
+);
+const workspacePermissionSchema = z.object({
+  permission: z.enum(["reader", "writer", "owner"]),
+});
+const githubSourceSchema = z.object({
+  owner: z.string().trim().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/),
+  repository: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .refine((value) => !/[\/\u0000-\u001f\u007f]/.test(value), "invalid repository"),
+  ref: z
+    .string()
+    .trim()
+    .min(1)
+    .max(255)
+    .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "invalid ref")
+    .default("HEAD"),
+});
+
 function readBoolean(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(value?.trim() ?? "");
 }
@@ -225,6 +298,31 @@ function readBoolean(value: string | undefined): boolean {
 function numberFromEnv(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function positiveOption(value: number, name: string): number {
+  const normalized = Math.floor(value);
+  if (!Number.isFinite(value) || value <= 0 || normalized < 1) {
+    throw new Error(`${name} must be a positive finite number`);
+  }
+  return normalized;
+}
+
+function apiKeysFromEnv(value: string | undefined): HttpApiKeyConfig[] {
+  if (!value?.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("CONTEXTENGINE_HTTP_API_KEYS must be valid JSON");
+  }
+  const entries = httpApiKeysSchema.parse(parsed);
+  return entries.map((entry) => ({
+    principalId: entry.principal_id,
+    token: entry.token,
+    role: entry.role,
+    admin: entry.admin,
+  }));
 }
 
 function normalizedRelativePath(value: string): string {
@@ -282,6 +380,25 @@ function jobPayload(job: StoredIndexJob): Record<string, unknown> {
   };
 }
 
+function connectorSourcePayload(source: StoredConnectorSource): Record<string, unknown> {
+  return {
+    id: source.id,
+    workspace_id: source.workspaceId,
+    provider: source.provider,
+    external_id: source.externalId,
+    config: source.config,
+    cursor: source.cursor,
+    cursor_version: source.cursorVersion,
+    upstream_revision: source.upstreamRevision,
+    status: source.status,
+    last_error: source.lastError,
+    last_synced_at: source.lastSyncedAt,
+    created_by: source.createdBy,
+    created_at: source.createdAt,
+    updated_at: source.updatedAt,
+  };
+}
+
 function hitPayload(hit: SearchHit): Record<string, unknown> {
   return {
     path: hit.chunk.path,
@@ -295,6 +412,18 @@ function hitPayload(hit: SearchHit): Record<string, unknown> {
     source: hit.source,
     intent: hit.intent ?? null,
     channels: hit.channels ?? null,
+    degraded_channels: hit.degradedChannels ?? [],
+  };
+}
+
+function generationPayload(status: IndexGenerationStatus): Record<string, unknown> {
+  return {
+    generation_id: status.generationId,
+    source_revision: status.sourceRevision,
+    indexed_revision: status.indexedRevision,
+    pending_revision: status.pendingRevision,
+    status: status.status,
+    updated_at: status.updatedAt,
   };
 }
 
@@ -320,6 +449,19 @@ function json(response: ServerResponse, status: number, payload: unknown): void 
   response.setHeader("content-type", "application/json; charset=utf-8");
   response.setHeader("cache-control", "no-store");
   response.end(JSON.stringify(payload));
+}
+
+function mcpError(response: ServerResponse, status: number, message: string): void {
+  response.statusCode = status;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.setHeader("cache-control", "no-store");
+  response.end(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: -32000, message },
+      id: null,
+    }),
+  );
 }
 
 function html(response: ServerResponse, payload: string): void {
@@ -407,6 +549,18 @@ function errorPayload(error: unknown): {
       },
     };
   }
+  if (error instanceof SyncPlanConflictError) {
+    return {
+      status: 409,
+      payload: { error: { code: "sync_plan_conflict", message: error.message } },
+    };
+  }
+  if (error instanceof SyncPlanExpiredError) {
+    return {
+      status: 409,
+      payload: { error: { code: "sync_plan_expired", message: error.message } },
+    };
+  }
   const message = error instanceof Error ? error.message : String(error);
   return {
     status: 500,
@@ -443,17 +597,6 @@ async function readJsonBody(
   } catch {
     throw new HttpError(400, "Request body must be valid JSON");
   }
-}
-
-function matchesBearer(
-  request: IncomingMessage,
-  apiKey: string | undefined,
-  allowUnauthenticated: boolean,
-): boolean {
-  if (!apiKey) return allowUnauthenticated;
-  const expected = Buffer.from(`Bearer ${apiKey}`);
-  const given = Buffer.from(request.headers.authorization ?? "");
-  return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
 function openApiDocument(): Record<string, unknown> {
@@ -495,6 +638,25 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/sync/plan": {
         post: { summary: "Create a content-addressed file sync plan" },
       },
+      "/v1/workspaces/{workspaceId}/acl": {
+        get: { summary: "List workspace principal permissions" },
+      },
+      "/v1/workspaces/{workspaceId}/acl/{principalId}": {
+        put: { summary: "Grant or update a workspace permission" },
+        delete: { summary: "Revoke a workspace permission" },
+      },
+      "/v1/workspaces/{workspaceId}/sources": {
+        get: { summary: "List connector sources and synchronization state" },
+      },
+      "/v1/workspaces/{workspaceId}/sources/github": {
+        post: { summary: "Attach a read-only GitHub repository source" },
+      },
+      "/v1/workspaces/{workspaceId}/sources/{sourceId}": {
+        get: { summary: "Get connector source state" },
+      },
+      "/v1/workspaces/{workspaceId}/sources/{sourceId}/sync": {
+        post: { summary: "Synchronize and queue indexing for a connector source" },
+      },
       "/v1/blobs/{sha256}": {
         put: { summary: "Upload a raw source Blob after SHA-256 verification" },
       },
@@ -520,53 +682,110 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/file": {
         get: { summary: "Read a synchronized source file or line range" },
       },
+      "/v1/workspaces/{workspaceId}/mcp": {
+        post: { summary: "MCP Streamable HTTP initialize or tool request" },
+        get: { summary: "MCP Streamable HTTP event stream" },
+        delete: { summary: "Close an MCP Streamable HTTP session" },
+      },
     },
   };
+}
+
+interface McpHttpSession {
+  workspaceId: string;
+  principalId: string;
+  server: ReturnType<typeof createRetrievalMcpServer>;
+  transport: StreamableHTTPServerTransport;
+  lastSeenAt: number;
+  activeRequests: number;
 }
 
 class HttpContextService {
   private readonly repository: WorkspaceRepository;
   private readonly runner: IndexJobRunner;
+  private readonly connectorSync: ConnectorSyncCoordinator;
   private readonly telemetry = new RequestTelemetry();
   private readonly engines = new Map<string, ContextEngine>();
   private readonly modelConfiguration = new RuntimeModelConfiguration();
-  private readonly apiKey: string | undefined;
-  private readonly allowUnauthenticated: boolean;
+  private readonly authenticator: HttpBearerAuthenticator;
+  private readonly aclEnabled: boolean;
   private readonly allowLocalWorkspaces: boolean;
   private readonly localRootAllowlist: string[];
   private readonly maxBlobBytes: number;
+  private readonly mcpSessionIdleTtlMs: number;
+  private readonly mcpMaxSessions: number;
   private readonly databaseUrl: string;
   private readonly disableEmbeddings: boolean;
+  private readonly mcpSessions = new Map<string, McpHttpSession>();
+  private readonly mcpSessionCleanupTimer: NodeJS.Timeout;
+  private pendingMcpInitializations = 0;
 
   private constructor(
     repository: WorkspaceRepository,
+    authenticator: HttpBearerAuthenticator,
+    aclEnabled: boolean,
     options: Required<
       Pick<
         HttpServerOptions,
         | "databaseUrl"
-        | "allowUnauthenticated"
         | "allowLocalWorkspaces"
         | "localRootAllowlist"
         | "maxBlobBytes"
+        | "mcpSessionIdleTtlMs"
+        | "mcpMaxSessions"
         | "disableEmbeddings"
+        | "githubTimeoutMs"
       >
     > &
-      Pick<HttpServerOptions, "apiKey">,
+      Pick<HttpServerOptions, "githubToken" | "githubApiBaseUrl">,
   ) {
     this.repository = repository;
-    this.apiKey = options.apiKey;
-    this.allowUnauthenticated = options.allowUnauthenticated;
+    this.authenticator = authenticator;
+    this.aclEnabled = aclEnabled;
     this.allowLocalWorkspaces = options.allowLocalWorkspaces;
-    this.localRootAllowlist = options.localRootAllowlist.map((root) =>
-      path.resolve(root),
-    );
+    this.localRootAllowlist = options.localRootAllowlist.map((root) => {
+      const resolved = path.resolve(root);
+      try {
+        return realpathSync.native(resolved);
+      } catch {
+        // Preserve invalid entries so a misconfigured allowlist fails closed.
+        return resolved;
+      }
+    });
     this.maxBlobBytes = options.maxBlobBytes;
+    this.mcpSessionIdleTtlMs = options.mcpSessionIdleTtlMs;
+    this.mcpMaxSessions = options.mcpMaxSessions;
     this.databaseUrl = options.databaseUrl;
     this.disableEmbeddings = options.disableEmbeddings;
     this.runner = new IndexJobRunner({
       repository,
       engineFor: (workspace) => this.engineFor(workspace),
     });
+    const github = new GitHubConnectorClient({
+      token: options.githubToken,
+      apiBaseUrl: options.githubApiBaseUrl,
+      timeoutMs: options.githubTimeoutMs,
+    });
+    this.connectorSync = new ConnectorSyncCoordinator({
+      repository,
+      runner: this.runner,
+      github,
+      maxBlobBytes: options.maxBlobBytes,
+      secrets: options.githubToken ? [options.githubToken] : [],
+    });
+    const cleanupIntervalMs = Math.max(
+      1_000,
+      Math.min(60_000, Math.floor(this.mcpSessionIdleTtlMs / 2)),
+    );
+    this.mcpSessionCleanupTimer = setInterval(() => {
+      void this.pruneExpiredMcpSessions().catch((error: unknown) => {
+        console.error(
+          "[mcp http] session cleanup failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+    }, cleanupIntervalMs);
+    this.mcpSessionCleanupTimer.unref();
   }
 
   static async create(options: HttpServerOptions): Promise<HttpContextService> {
@@ -579,16 +798,31 @@ class HttpContextService {
       readBoolean(process.env.CONTEXTENGINE_HTTP_ALLOW_UNAUTHENTICATED);
     const apiKey =
       options.apiKey ?? (process.env.CONTEXTENGINE_HTTP_API_KEY?.trim() || undefined);
-    if (!apiKey && !allowUnauthenticated) {
-      throw new Error(
-        "CONTEXTENGINE_HTTP_API_KEY is required unless CONTEXTENGINE_HTTP_ALLOW_UNAUTHENTICATED=1",
-      );
-    }
-    const repository = await WorkspaceRepository.open(databaseUrl);
-    const service = new HttpContextService(repository, {
-      databaseUrl,
+    const apiKeys = options.apiKeys ?? apiKeysFromEnv(process.env.CONTEXTENGINE_HTTP_API_KEYS);
+    const authenticator = createHttpAuthenticator({
       apiKey,
+      apiKeys,
       allowUnauthenticated,
+    });
+    const mcpSessionIdleTtlMs = positiveOption(
+      options.mcpSessionIdleTtlMs ??
+        numberFromEnv(
+          process.env.CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS,
+          DEFAULT_MCP_SESSION_IDLE_TTL_MS,
+        ),
+      "mcpSessionIdleTtlMs",
+    );
+    const mcpMaxSessions = positiveOption(
+      options.mcpMaxSessions ??
+        numberFromEnv(
+          process.env.CONTEXTENGINE_MCP_MAX_SESSIONS,
+          DEFAULT_MCP_MAX_SESSIONS,
+        ),
+      "mcpMaxSessions",
+    );
+    const repository = await WorkspaceRepository.open(databaseUrl);
+    const service = new HttpContextService(repository, authenticator, apiKeys.length > 0, {
+      databaseUrl,
       allowLocalWorkspaces:
         options.allowLocalWorkspaces ??
         readBoolean(process.env.CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES),
@@ -601,13 +835,37 @@ class HttpContextService {
       maxBlobBytes:
         options.maxBlobBytes ??
         numberFromEnv(process.env.CONTEXTENGINE_HTTP_MAX_BLOB_BYTES, DEFAULT_MAX_BLOB_BYTES),
+      mcpSessionIdleTtlMs,
+      mcpMaxSessions,
       disableEmbeddings: options.disableEmbeddings ?? false,
+      githubToken:
+        options.githubToken ?? (process.env.CONTEXTENGINE_GITHUB_TOKEN?.trim() || undefined),
+      githubApiBaseUrl:
+        options.githubApiBaseUrl ??
+        (process.env.CONTEXTENGINE_GITHUB_API_BASE_URL?.trim() || undefined),
+      githubTimeoutMs: positiveOption(
+        options.githubTimeoutMs ??
+          numberFromEnv(process.env.CONTEXTENGINE_GITHUB_TIMEOUT_MS, 30_000),
+        "githubTimeoutMs",
+      ),
     });
     await service.runner.start();
     return service;
   }
 
   async close(): Promise<void> {
+    clearInterval(this.mcpSessionCleanupTimer);
+    const sessions = [...new Set(this.mcpSessions.values())];
+    this.mcpSessions.clear();
+    await Promise.all(
+      sessions.map(async (session) => {
+        try {
+          await session.transport.close();
+        } finally {
+          await session.server.close();
+        }
+      }),
+    );
     await Promise.all([...this.engines.values()].map((engine) => engine.close()));
     this.engines.clear();
     await this.repository.close();
@@ -649,15 +907,38 @@ class HttpContextService {
         json(response, 200, openApiDocument());
         return;
       }
-      if (!matchesBearer(request, this.apiKey, this.allowUnauthenticated)) {
+      const principal = this.authenticator.authenticate(request);
+      if (!principal) {
         throw new HttpError(401, "Missing or invalid Bearer API key");
+      }
+
+      const mcpMatch = /^\/v1\/workspaces\/([^/]+)\/mcp$/.exec(pathname);
+      if (
+        mcpMatch &&
+        (request.method === "POST" ||
+          request.method === "GET" ||
+          request.method === "DELETE")
+      ) {
+        await this.handleMcpRequest(
+          decodeURIComponent(mcpMatch[1]),
+          principal,
+          request,
+          response,
+        );
+        return;
       }
 
       if (request.method === "GET" && pathname === "/v1/capabilities") {
         json(response, 200, {
           storage: "postgresql+pgvector",
-          transports: ["http", "mcp-stdio"],
+          transports: ["http", "mcp-stdio", "mcp-streamable-http"],
           workspace_source_modes: ["blob", "local"],
+          connectors: ["github"],
+          authorization: {
+            principals: true,
+            workspace_acl: this.aclEnabled,
+            permissions: ["reader", "writer", "owner"],
+          },
           sync: {
             content_addressed_blobs: true,
             revisioned_commits: true,
@@ -668,7 +949,15 @@ class HttpContextService {
             server_sent_events: true,
             incremental: true,
           },
-          retrieval: ["search", "context", "file"],
+          retrieval: ["search", "context", "file", "codebase-retrieval"],
+          mcp: {
+            transport: "streamable-http",
+            endpoint_template: "/v1/workspaces/{workspaceId}/mcp",
+            authentication: "bearer",
+            tools: ["codebase-retrieval"],
+            session_idle_ttl_ms: this.mcpSessionIdleTtlMs,
+            max_sessions: this.mcpMaxSessions,
+          },
           observability: {
             dashboard: "/dashboard",
             overview: "/v1/observability/overview",
@@ -679,6 +968,7 @@ class HttpContextService {
       }
 
       if (request.method === "GET" && pathname === "/v1/observability/overview") {
+        this.requireAdmin(principal);
         const requestLimit = queryLimit(
           requestUrl.searchParams.get("request_limit"),
           60,
@@ -695,13 +985,28 @@ class HttpContextService {
         ]);
         const observedWorkspaces = await Promise.all(
           workspaces.map(async (workspace) => {
-            const engine = this.engineFor(workspace);
-            const indexed = await engine.hasIndex();
-            return {
-              workspace: workspacePayload(workspace),
-              indexed,
-              stats: indexed ? await engine.stats() : null,
-            };
+            try {
+              const sources = await this.repository.listConnectorSources(workspace.id);
+              const engine = this.engineFor(workspace);
+              const indexed = await engine.hasIndex();
+              return {
+                workspace: workspacePayload(workspace),
+                sources: sources.map(connectorSourcePayload),
+                indexed,
+                stats: indexed ? await engine.stats() : null,
+                error: null,
+              };
+            } catch {
+              // A deleted or temporarily unavailable local root must not make
+              // the whole observability response unusable.
+              return {
+                workspace: workspacePayload(workspace),
+                sources: [],
+                indexed: false,
+                stats: null,
+                error: "Workspace root unavailable",
+              };
+            }
           }),
         );
         const memory = process.memoryUsage();
@@ -714,7 +1019,7 @@ class HttpContextService {
             uptime_seconds: this.telemetry.uptimeSeconds(),
             node_version: process.version,
             pid: process.pid,
-            authentication_required: Boolean(this.apiKey) && !this.allowUnauthenticated,
+            authentication_required: this.authenticator.policy.authenticationRequired,
             memory: {
               rss_bytes: memory.rss,
               heap_used_bytes: memory.heapUsed,
@@ -757,6 +1062,7 @@ class HttpContextService {
         request.method === "POST" &&
         pathname === "/v1/observability/configuration/test"
       ) {
+        this.requireAdmin(principal);
         const input = modelConnectionTestSchema.parse(
           await readJsonBody(request, 64 * 1024),
         );
@@ -835,6 +1141,7 @@ class HttpContextService {
         request.method === "PUT" &&
         pathname === "/v1/observability/configuration"
       ) {
+        this.requireAdmin(principal);
         if (this.runner.isBusy()) {
           throw new HttpError(
             409,
@@ -872,7 +1179,9 @@ class HttpContextService {
       }
 
       if (request.method === "GET" && pathname === "/v1/workspaces") {
-        const workspaces = await this.repository.listWorkspaces();
+        const workspaces = principal.admin
+          ? await this.repository.listWorkspaces()
+          : await this.repository.listWorkspacesForPrincipal(principal.principalId);
         json(response, 200, { workspaces: workspaces.map(workspacePayload) });
         return;
       }
@@ -888,6 +1197,7 @@ class HttpContextService {
           name: input.name,
           sourceMode: input.source_mode,
           localRoot,
+          ownerPrincipalId: this.aclEnabled ? principal.principalId : undefined,
         });
         json(response, 201, { workspace: workspacePayload(workspace) });
         return;
@@ -897,11 +1207,16 @@ class HttpContextService {
       if (workspaceMatch) {
         const workspaceId = decodeURIComponent(workspaceMatch[1]);
         if (request.method === "GET") {
-          const workspace = await this.repository.requireWorkspace(workspaceId);
+          const workspace = await this.requireWorkspaceAccess(
+            principal,
+            workspaceId,
+            "reader",
+          );
           json(response, 200, { workspace: workspacePayload(workspace) });
           return;
         }
         if (request.method === "DELETE") {
+          await this.requireWorkspaceAccess(principal, workspaceId, "owner");
           await this.closeEngine(workspaceId);
           await this.repository.deleteWorkspace(workspaceId);
           json(response, 200, { ok: true });
@@ -911,8 +1226,10 @@ class HttpContextService {
 
       const statusMatch = /^\/v1\/workspaces\/([^/]+)\/status$/.exec(pathname);
       if (request.method === "GET" && statusMatch) {
-        const workspace = await this.repository.requireWorkspace(
+        const workspace = await this.requireWorkspaceAccess(
+          principal,
           decodeURIComponent(statusMatch[1]),
+          "reader",
         );
         const engine = this.engineFor(workspace);
         const indexed = await engine.hasIndex();
@@ -925,9 +1242,153 @@ class HttpContextService {
         return;
       }
 
+      const aclListMatch = /^\/v1\/workspaces\/([^/]+)\/acl$/.exec(pathname);
+      if (request.method === "GET" && aclListMatch) {
+        const workspaceId = decodeURIComponent(aclListMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const entries = await this.repository.listWorkspaceAcl(workspaceId);
+        json(response, 200, {
+          acl: entries.map((entry) => ({
+            principal_id: entry.principalId,
+            permission: entry.permission,
+          })),
+        });
+        return;
+      }
+
+      const aclMemberMatch = /^\/v1\/workspaces\/([^/]+)\/acl\/([^/]+)$/.exec(
+        pathname,
+      );
+      if (aclMemberMatch && (request.method === "PUT" || request.method === "DELETE")) {
+        const workspaceId = decodeURIComponent(aclMemberMatch[1]);
+        const memberId = decodeURIComponent(aclMemberMatch[2]).trim();
+        if (!memberId || memberId.length > 200 || /[\u0000-\u001f\u007f]/.test(memberId)) {
+          throw new HttpError(400, "principalId is invalid");
+        }
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        if (request.method === "PUT") {
+          const input = workspacePermissionSchema.parse(
+            await readJsonBody(request, 64 * 1024),
+          );
+          if (
+            memberId === principal.principalId &&
+            !principal.admin &&
+            input.permission !== "owner"
+          ) {
+            throw new HttpError(409, "An owner cannot downgrade its active credential");
+          }
+          await this.repository.setWorkspacePermission(
+            workspaceId,
+            memberId,
+            input.permission,
+          );
+          json(response, 200, {
+            principal_id: memberId,
+            permission: input.permission,
+          });
+          return;
+        }
+        if (memberId === principal.principalId && !principal.admin) {
+          throw new HttpError(409, "An owner cannot revoke its active credential");
+        }
+        await this.repository.removeWorkspacePermission(workspaceId, memberId);
+        json(response, 200, { ok: true });
+        return;
+      }
+
+      const sourcesMatch = /^\/v1\/workspaces\/([^/]+)\/sources$/.exec(pathname);
+      if (request.method === "GET" && sourcesMatch) {
+        const workspaceId = decodeURIComponent(sourcesMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "reader");
+        const sources = await this.repository.listConnectorSources(workspaceId);
+        json(response, 200, { sources: sources.map(connectorSourcePayload) });
+        return;
+      }
+
+      const githubSourceMatch = /^\/v1\/workspaces\/([^/]+)\/sources\/github$/.exec(
+        pathname,
+      );
+      if (request.method === "POST" && githubSourceMatch) {
+        const workspaceId = decodeURIComponent(githubSourceMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const input = githubSourceSchema.parse(await readJsonBody(request, 64 * 1024));
+        let source: StoredConnectorSource;
+        try {
+          source = await this.repository.createConnectorSource({
+            workspaceId,
+            provider: "github",
+            externalId: `${input.owner}/${input.repository}`,
+            config: {
+              owner: input.owner,
+              repository: input.repository,
+              ref: input.ref,
+            },
+            createdBy: principal.principalId,
+          });
+        } catch (error) {
+          if (error instanceof WorkspaceNotFoundError) throw error;
+          throw new HttpError(
+            409,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        json(response, 201, { source: connectorSourcePayload(source) });
+        return;
+      }
+
+      const sourceMatch = /^\/v1\/workspaces\/([^/]+)\/sources\/([^/]+)$/.exec(
+        pathname,
+      );
+      if (request.method === "GET" && sourceMatch) {
+        const workspaceId = decodeURIComponent(sourceMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "reader");
+        const source = await this.repository.getConnectorSource(
+          workspaceId,
+          decodeURIComponent(sourceMatch[2]),
+        );
+        if (!source) throw new HttpError(404, "Connector source not found");
+        json(response, 200, { source: connectorSourcePayload(source) });
+        return;
+      }
+
+      const sourceSyncMatch =
+        /^\/v1\/workspaces\/([^/]+)\/sources\/([^/]+)\/sync$/.exec(pathname);
+      if (request.method === "POST" && sourceSyncMatch) {
+        const workspaceId = decodeURIComponent(sourceSyncMatch[1]);
+        const sourceId = decodeURIComponent(sourceSyncMatch[2]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "writer");
+        const source = await this.repository.getConnectorSource(workspaceId, sourceId);
+        if (!source) throw new HttpError(404, "Connector source not found");
+        try {
+          const result = await this.connectorSync.syncGitHub(workspaceId, sourceId);
+          json(response, result.noop ? 200 : 202, {
+            source: connectorSourcePayload(result.source),
+            noop: result.noop,
+            revision: result.revision,
+            changed_paths: result.changedPaths,
+            deleted_paths: result.deletedPaths,
+            skipped_oversized: result.skippedOversized,
+            index_job: result.indexJob ? jobPayload(result.indexJob) : null,
+          });
+        } catch (error) {
+          if (error instanceof ConnectorSyncConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          if (error instanceof GitHubConnectorError) {
+            throw new HttpError(502, error.message);
+          }
+          throw error;
+        }
+        return;
+      }
+
       const syncPlanMatch = /^\/v1\/workspaces\/([^/]+)\/sync\/plan$/.exec(pathname);
       if (request.method === "POST" && syncPlanMatch) {
         const workspaceId = decodeURIComponent(syncPlanMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "writer");
+        if (await this.repository.workspaceHasConnector(workspaceId)) {
+          throw new HttpError(409, "Use the attached connector to synchronize this workspace");
+        }
         const input = syncPlanSchema.parse(await readJsonBody(request, 8 * 1024 * 1024));
         const paths = new Set<string>();
         const changes = input.changes.map((change) => {
@@ -946,6 +1407,8 @@ class HttpContextService {
           workspaceId,
           input.base_revision,
           changes,
+          15 * 60 * 1000,
+          !this.aclEnabled,
         );
         json(response, 201, {
           sync_id: plan.id,
@@ -961,7 +1424,21 @@ class HttpContextService {
       if (request.method === "PUT" && blobMatch) {
         const content = await readRequestBody(request, this.maxBlobBytes);
         if (!content.length) throw new HttpError(400, "Blob content must not be empty");
-        await this.repository.putBlob(blobMatch[1].toLowerCase(), content);
+        if (this.aclEnabled) {
+          const syncId = requestUrl.searchParams.get("sync_id");
+          if (!syncId) throw new HttpError(400, "sync_id is required for Blob upload");
+          const workspaceId = await this.repository.getSyncWorkspaceId(syncId);
+          if (!workspaceId) throw new HttpError(404, "Sync session not found");
+          await this.requireWorkspaceAccess(principal, workspaceId, "writer");
+          await this.repository.putBlobForSync(
+            workspaceId,
+            syncId,
+            blobMatch[1].toLowerCase(),
+            content,
+          );
+        } else {
+          await this.repository.putBlob(blobMatch[1].toLowerCase(), content);
+        }
         json(response, 201, {
           ok: true,
           sha256: blobMatch[1].toLowerCase(),
@@ -974,12 +1451,30 @@ class HttpContextService {
           await readJsonBody(request, this.maxBlobBytes * MAX_BATCH_BLOBS),
         );
         const uploaded: Array<{ sha256: string; bytes: number }> = [];
+        let scopedSync: { id: string; workspaceId: string } | null = null;
+        if (this.aclEnabled) {
+          const syncId = requestUrl.searchParams.get("sync_id");
+          if (!syncId) throw new HttpError(400, "sync_id is required for Blob upload");
+          const workspaceId = await this.repository.getSyncWorkspaceId(syncId);
+          if (!workspaceId) throw new HttpError(404, "Sync session not found");
+          await this.requireWorkspaceAccess(principal, workspaceId, "writer");
+          scopedSync = { id: syncId, workspaceId };
+        }
         for (const blob of input.blobs) {
           const content = Buffer.from(blob.content_base64, "base64");
           if (!content.length || content.length > this.maxBlobBytes) {
             throw new HttpError(413, "A batch blob is empty or exceeds the configured size limit");
           }
-          await this.repository.putBlob(blob.sha256.toLowerCase(), content);
+          if (scopedSync) {
+            await this.repository.putBlobForSync(
+              scopedSync.workspaceId,
+              scopedSync.id,
+              blob.sha256.toLowerCase(),
+              content,
+            );
+          } else {
+            await this.repository.putBlob(blob.sha256.toLowerCase(), content);
+          }
           uploaded.push({ sha256: blob.sha256.toLowerCase(), bytes: content.length });
         }
         json(response, 201, { uploaded });
@@ -989,19 +1484,14 @@ class HttpContextService {
       const syncCommitMatch = /^\/v1\/workspaces\/([^/]+)\/sync\/commit$/.exec(pathname);
       if (request.method === "POST" && syncCommitMatch) {
         const workspaceId = decodeURIComponent(syncCommitMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "writer");
         const input = syncCommitSchema.parse(await readJsonBody(request, 64 * 1024));
-        const commit = await this.repository.commitSync(workspaceId, input.sync_id);
-        let job: StoredIndexJob | null = null;
-        if (input.auto_index) {
-          job = await this.repository.createIndexJob({
-            workspaceId,
-            revision: commit.revision,
-            mode: "incremental",
-            changedPaths: commit.changedPaths,
-            deletedPaths: commit.deletedPaths,
-          });
-          this.runner.enqueue(job.id);
-        }
+        const commit = await this.repository.commitSync(workspaceId, input.sync_id, {
+          allowGlobalBlobs: !this.aclEnabled,
+          createIndexJob: input.auto_index,
+        });
+        const job = commit.indexJob ?? null;
+        if (job) this.runner.enqueue(job.id);
         json(response, 200, {
           ok: true,
           revision: commit.revision,
@@ -1015,10 +1505,14 @@ class HttpContextService {
       const indexJobCreateMatch = /^\/v1\/workspaces\/([^/]+)\/index-jobs$/.exec(pathname);
       if (request.method === "POST" && indexJobCreateMatch) {
         const workspaceId = decodeURIComponent(indexJobCreateMatch[1]);
+        const workspace = await this.requireWorkspaceAccess(
+          principal,
+          workspaceId,
+          "writer",
+        );
         const input = z
           .object({ mode: z.enum(["incremental", "rebuild"]).default("incremental") })
           .parse(await readJsonBody(request, 64 * 1024));
-        const workspace = await this.repository.requireWorkspace(workspaceId);
         const job = await this.repository.createIndexJob({
           workspaceId,
           revision: workspace.revision,
@@ -1036,6 +1530,7 @@ class HttpContextService {
         const jobId = decodeURIComponent(jobEventMatch[1]);
         const job = await this.repository.getIndexJob(jobId);
         if (!job) throw new HttpError(404, `Index job not found: ${jobId}`);
+        await this.requireWorkspaceAccess(principal, job.workspaceId, "reader");
         this.streamJobEvents(request, response, job);
         return;
       }
@@ -1044,14 +1539,17 @@ class HttpContextService {
       if (request.method === "GET" && jobMatch) {
         const job = await this.repository.getIndexJob(decodeURIComponent(jobMatch[1]));
         if (!job) throw new HttpError(404, "Index job not found");
+        await this.requireWorkspaceAccess(principal, job.workspaceId, "reader");
         json(response, 200, { job: jobPayload(job) });
         return;
       }
 
       const searchMatch = /^\/v1\/workspaces\/([^/]+)\/search$/.exec(pathname);
       if (request.method === "POST" && searchMatch) {
-        const workspace = await this.repository.requireWorkspace(
+        const workspace = await this.requireWorkspaceAccess(
+          principal,
           decodeURIComponent(searchMatch[1]),
+          "reader",
         );
         const input = z
           .object({
@@ -1076,8 +1574,13 @@ class HttpContextService {
           includeCommits: input.include_commits,
           neuralRerank: input.neural_rerank,
         });
+        const index = await engine.indexStatus();
         json(response, 200, {
           count: hits.length,
+          index: generationPayload(index),
+          degraded_channels: [
+            ...new Set(hits.flatMap((hit) => hit.degradedChannels ?? [])),
+          ],
           results: hits.map(hitPayload),
         });
         return;
@@ -1085,8 +1588,10 @@ class HttpContextService {
 
       const contextMatch = /^\/v1\/workspaces\/([^/]+)\/context$/.exec(pathname);
       if (request.method === "POST" && contextMatch) {
-        const workspace = await this.repository.requireWorkspace(
+        const workspace = await this.requireWorkspaceAccess(
+          principal,
           decodeURIComponent(contextMatch[1]),
+          "reader",
         );
         const input = z
           .object({
@@ -1108,8 +1613,11 @@ class HttpContextService {
           pathPrefix: input.path_prefix,
           diversify: true,
         });
+        const index = await engine.indexStatus();
         json(response, 200, {
           task: packed.task,
+          index: generationPayload(index),
+          degraded_channels: packed.degradedChannels ?? [],
           packed_text: packed.packedText,
           estimated_tokens: packed.estimatedTokens,
           truncated: packed.truncated,
@@ -1120,8 +1628,10 @@ class HttpContextService {
 
       const fileMatch = /^\/v1\/workspaces\/([^/]+)\/file$/.exec(pathname);
       if (request.method === "GET" && fileMatch) {
-        const workspace = await this.repository.requireWorkspace(
+        const workspace = await this.requireWorkspaceAccess(
+          principal,
           decodeURIComponent(fileMatch[1]),
+          "reader",
         );
         const sourcePath = normalizedRelativePath(
           requestUrl.searchParams.get("path") ?? "",
@@ -1153,6 +1663,202 @@ class HttpContextService {
     }
   }
 
+  private async handleMcpRequest(
+    workspaceId: string,
+    principal: HttpPrincipal,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    await this.pruneExpiredMcpSessions();
+    try {
+      await this.requireWorkspaceAccess(principal, workspaceId, "reader");
+    } catch {
+      mcpError(response, 404, "MCP workspace was not found");
+      return;
+    }
+    const sessionHeader = request.headers["mcp-session-id"];
+    const sessionId = Array.isArray(sessionHeader)
+      ? sessionHeader[0]
+      : sessionHeader;
+    const existing = sessionId ? this.mcpSessions.get(sessionId) : undefined;
+
+    if (
+      existing &&
+      (existing.workspaceId !== workspaceId ||
+        existing.principalId !== principal.principalId)
+    ) {
+      mcpError(response, 404, "MCP session does not belong to this workspace");
+      return;
+    }
+
+    if (existing) {
+      existing.lastSeenAt = Date.now();
+      existing.activeRequests += 1;
+      try {
+        await existing.transport.handleRequest(request, response);
+      } finally {
+        existing.activeRequests = Math.max(0, existing.activeRequests - 1);
+        existing.lastSeenAt = Date.now();
+      }
+      return;
+    }
+
+    if (sessionId) {
+      mcpError(response, 404, "MCP session was not found or has expired");
+      return;
+    }
+
+    if (request.method !== "POST") {
+      mcpError(response, 400, "A valid mcp-session-id is required");
+      return;
+    }
+
+    const body = await readJsonBody(request, 128 * 1024);
+    if (!isInitializeRequest(body)) {
+      mcpError(response, 400, "The first MCP request must be initialize");
+      return;
+    }
+
+    // Validate the workspace before allocating a long-lived MCP session. The
+    // retrieval tool itself resolves the engine lazily so an unindexed
+    // workspace can still complete MCP initialization and return a useful
+    // error/hint from the tool call.
+    if (
+      this.mcpSessions.size + this.pendingMcpInitializations >=
+      this.mcpMaxSessions
+    ) {
+      response.setHeader("retry-after", "1");
+      mcpError(response, 429, "MCP session capacity has been reached");
+      return;
+    }
+
+    this.pendingMcpInitializations += 1;
+    let session: McpHttpSession | undefined;
+    let initializedSessionId: string | undefined;
+    const server = createRetrievalMcpServer(
+      {
+        ensureReady: async () => {
+          const workspace = await this.requireWorkspaceAccess(
+            principal,
+            workspaceId,
+            "reader",
+          );
+          return this.requireIndexedEngine(workspace);
+        },
+      },
+      { includeLegacyAlias: false },
+    );
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      // JSON responses are easier for remote coding clients and remain fully
+      // compliant with the Streamable HTTP transport.
+      enableJsonResponse: true,
+      onsessioninitialized: (newSessionId) => {
+        if (!session) return;
+        initializedSessionId = newSessionId;
+        session.lastSeenAt = Date.now();
+        this.mcpSessions.set(newSessionId, session);
+      },
+      onsessionclosed: (closedSessionId) => {
+        const closed = this.mcpSessions.get(closedSessionId);
+        if (!closed) return;
+        this.mcpSessions.delete(closedSessionId);
+        void closed.server.close().catch(() => undefined);
+      },
+    });
+    session = {
+      workspaceId,
+      principalId: principal.principalId,
+      server,
+      transport,
+      lastSeenAt: Date.now(),
+      activeRequests: 1,
+    };
+    transport.onerror = (error) => {
+      // Keep protocol errors out of the JSON response once headers are sent,
+      // but retain a concise server-side diagnostic for operators.
+      console.error("[mcp http]", error.message);
+    };
+
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(request, response, body);
+      session.lastSeenAt = Date.now();
+    } catch (error) {
+      if (
+        initializedSessionId &&
+        this.mcpSessions.get(initializedSessionId) === session
+      ) {
+        this.mcpSessions.delete(initializedSessionId);
+      }
+      if (!response.headersSent) {
+        mcpError(
+          response,
+          500,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+      await transport.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+    } finally {
+      session.activeRequests = Math.max(0, session.activeRequests - 1);
+      this.pendingMcpInitializations = Math.max(
+        0,
+        this.pendingMcpInitializations - 1,
+      );
+    }
+  }
+
+  private async pruneExpiredMcpSessions(now = Date.now()): Promise<void> {
+    const expired = [...this.mcpSessions.entries()].filter(
+      ([, session]) =>
+        session.activeRequests === 0 &&
+        now - session.lastSeenAt >= this.mcpSessionIdleTtlMs,
+    );
+    await Promise.all(
+      expired.map(([sessionId, session]) =>
+        this.closeMcpSession(sessionId, session),
+      ),
+    );
+  }
+
+  private async closeMcpSession(
+    sessionId: string,
+    session: McpHttpSession,
+  ): Promise<void> {
+    if (this.mcpSessions.get(sessionId) !== session) return;
+    this.mcpSessions.delete(sessionId);
+    try {
+      await session.transport.close();
+    } finally {
+      await session.server.close();
+    }
+  }
+
+  private requireAdmin(principal: HttpPrincipal): void {
+    if (!principal.admin) {
+      throw new HttpError(403, "Operator access is required");
+    }
+  }
+
+  private async requireWorkspaceAccess(
+    principal: HttpPrincipal,
+    workspaceId: string,
+    required: WorkspacePermission,
+  ): Promise<StoredWorkspace> {
+    if (principal.admin) {
+      return this.repository.requireWorkspace(workspaceId);
+    }
+    const permission = await this.repository.getWorkspacePermission(
+      workspaceId,
+      principal.principalId,
+    );
+    if (!workspacePermissionAllows(permission, required)) {
+      throw new HttpError(404, "Workspace not found");
+    }
+    return this.repository.requireWorkspace(workspaceId);
+  }
+
   private resolveLocalRoot(input: string): string {
     if (!this.allowLocalWorkspaces) {
       throw new HttpError(
@@ -1160,8 +1866,20 @@ class HttpContextService {
         "Local workspaces are disabled; use a blob workspace for remote clients",
       );
     }
-    const root = path.resolve(input);
-    if (!existsSync(root)) throw new HttpError(400, `Local root does not exist: ${root}`);
+    const requestedRoot = path.resolve(input);
+    if (!existsSync(requestedRoot)) {
+      throw new HttpError(400, `Local root does not exist: ${requestedRoot}`);
+    }
+    let root: string;
+    try {
+      root = realpathSync.native(requestedRoot);
+      if (!statSync(root).isDirectory()) {
+        throw new HttpError(400, `Local root is not a directory: ${root}`);
+      }
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(400, `Local root cannot be resolved: ${requestedRoot}`);
+    }
     if (
       this.localRootAllowlist.length > 0 &&
       !this.localRootAllowlist.some(
@@ -1174,12 +1892,15 @@ class HttpContextService {
   }
 
   private engineFor(workspace: StoredWorkspace): ContextEngine {
-    const existing = this.engines.get(workspace.id);
-    if (existing) return existing;
     const root =
       workspace.sourceMode === "local" && workspace.localRoot
-        ? workspace.localRoot
+        // Re-resolve on every access. A local directory can be replaced after
+        // workspace creation; checking the current real path keeps the
+        // allowlist effective even when an engine is already cached.
+        ? this.resolveLocalRoot(workspace.localRoot)
         : path.join(process.cwd(), ".contextengine-http", workspace.id);
+    const existing = this.engines.get(workspace.id);
+    if (existing) return existing;
     const config = resolveEngineConfig({
       root,
       workspaceId: workspace.id,
@@ -1220,11 +1941,15 @@ class HttpContextService {
   private configurationSnapshot(): Record<string, unknown> {
     return this.modelConfiguration.snapshot({
       databaseUrl: this.databaseUrl,
-      httpApiKey: this.apiKey,
-      allowUnauthenticated: this.allowUnauthenticated,
+      httpApiKey: this.authenticator.policy.authenticationRequired
+        ? "configured"
+        : undefined,
+      allowUnauthenticated: !this.authenticator.policy.authenticationRequired,
       allowLocalWorkspaces: this.allowLocalWorkspaces,
       localRootAllowlistCount: this.localRootAllowlist.length,
       maxBlobBytes: this.maxBlobBytes,
+      mcpSessionIdleTtlMs: this.mcpSessionIdleTtlMs,
+      mcpMaxSessions: this.mcpMaxSessions,
       disableEmbeddings: this.disableEmbeddings,
     });
   }

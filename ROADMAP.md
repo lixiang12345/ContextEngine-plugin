@@ -51,7 +51,11 @@
 ## Future (optional)
 
 - [ ] Code-specialized embeddings / hard-negative training
-- [ ] HTTP docs / wiki / GitHub connectors + auto-sync
+- [x] Read-only GitHub connector + incremental on-demand sync
+- [ ] HTTP docs / wiki connectors + webhook auto-sync
 - [ ] Distributed / remote index for huge monorepos
-- [ ] Open PR-generation / agent task benchmark suite
+- [x] Open PR-generation / agent task harness (isolated Git repositories + repetition-aware paired reports)
+- [x] Seed fixed historical corpus with fail-to-pass base/gold validation
+- [ ] Curated public PR task corpus + repeated model-controlled benchmark results
+- [ ] Container/VM execution mode for OS-level agent and hidden-oracle isolation
 - [ ] npm publish automation

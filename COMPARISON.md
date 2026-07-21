@@ -4,7 +4,10 @@ This document is an honest capability gap analysis.
 **ContextEngine-plugin** is an open, portable retrieval layer.  
 **Augment Context Engine** is a commercial, productized context platform.
 
-Last updated: 2026-07-13 · ContextEngine **v0.4.0** (based on public Augment product pages / MCP docs).
+Last updated: 2026-07-21 · ContextEngine **v0.4.0** (based on public Augment product pages / MCP, SDK, connector, rules, and permissions docs).
+
+For the detailed capability-to-code audit and staged roadmap, see
+[docs/AUGMENT_ALIGNMENT.md](./docs/AUGMENT_ALIGNMENT.md).
 
 ---
 
@@ -22,19 +25,20 @@ Last updated: 2026-07-13 · ContextEngine **v0.4.0** (based on public Augment pr
 
 | Capability | ContextEngine-plugin | Augment Context Engine | Gap severity |
 |------------|----------------------|------------------------|--------------|
-| MCP for Claude Code / Cursor / Zed | ✅ stdio MCP tools | ✅ polished multi-client MCP | Low |
+| MCP for Claude Code / Cursor / Zed | ✅ stdio MCP, `codebase-retrieval`, default live watcher | ✅ local + hosted MCP with multi-client setup | Low–Medium |
+| Remote MCP over HTTP | ✅ workspace-scoped Streamable HTTP, Bearer auth, bounded session lifecycle | ✅ hosted/connector HTTP MCP with OAuth/API key and deployment options | **Medium** |
 | Hybrid lexical + semantic search | ✅ PostgreSQL FTS + pgvector + symbol + path + RRF + feature rerank | ✅ specialized semantic retrieval | **Medium** (model still theirs) |
 | Code-native embeddings | ⚠️ BYO OpenAI-compatible; two-stage rerank | ✅ **paired / trained retrieval models** for code | **High** |
 | Real-time local indexing | ✅ hash incremental + `watch` | ✅ local indexer, “next query reflects edits” | Medium |
 | Large monorepo scale | ⚠️ PostgreSQL + pgvector; avoids full vector maps, still needs scale testing | ✅ production indexing at monorepo scale | **High** |
-| Multi-repo / org index | ✅ multi-root in one index + profiles | ✅ multi-repo connectors, org-wide index | Medium |
-| Non-code sources (docs, wikis, tickets) | ⚠️ docs/extra roots (local trees) | ✅ Context Connectors (docs, GitHub/GitLab, …) | Medium–High |
+| Multi-repo / org index | ✅ multi-root + profiles + HTTP workspaces | ✅ multi-repo connectors, org-wide index | Medium–High |
+| Non-code sources (docs, wikis, tickets) | ⚠️ local extra roots and content-addressed Blobs | ✅ Context Connectors (docs, websites, GitHub/GitLab, …) | **High** |
 | Commit / history context | ✅ recent git log as searchable chunks | ✅ deeper Context Lineage / history products | Medium |
 | Symbol / dependency awareness | ✅ symbol table + import graph expand | ✅ deeper codebase understanding (proprietary) | Medium |
-| Team index sharing | ✅ shared PostgreSQL workspace namespaces | ✅ share indexes across team | Medium |
-| Enterprise security / auth | ❌ none | ✅ private repos, proof-of-possession, trust center | **High** |
-| Benchmarked agent quality lift | ✅ Recall/MRR/nDCG harness (not full PR eval) | ✅ published PR benchmarks (e.g. Elasticsearch 300 PRs) | **High** |
-| Agent quality / token efficiency claims | Not claimed | Claims fewer tool calls, faster completion | Product |
+| Team index sharing | ✅ shared PostgreSQL workspace namespaces | ✅ S3/object-store sharing and hosted team indexes | Medium–High |
+| Enterprise security / auth | ⚠️ Bearer auth, root allowlist, path/URL boundary checks | ✅ source permissions, policy controls, proof-of-possession, trust center | **High** |
+| Benchmarked agent quality lift | ⚠️ Recall/MRR/nDCG plus repeated paired PR orchestration and a 3-case fixed internal corpus; no real-model result yet | ✅ published PR benchmarks (e.g. Elasticsearch 300 PRs) | **High** |
+| Agent quality / token efficiency claims | Not claimed | Claims fewer tool calls, faster completion | Product claim; not independently reproduced |
 | Open source / self-host | ✅ | ❌ (product) | Our advantage |
 | Offline / no SaaS | ✅ BM25-only works offline | Partial (local indexer, cloud product) | Our advantage |
 | Cost | Free infra; pay only if you use embedding API | Product pricing / free query tier | Depends |
@@ -70,7 +74,11 @@ We only index **local filesystem + recent git commits**.
 ### 4. Measured agent outcomes
 
 Augment publishes end-to-end agent quality lifts (correctness, completeness, fewer turns).  
-We ship a **path-recall eval harness**, not a PR-generation benchmark.
+We now ship both a **path-recall eval harness** and a V1 PR orchestration runner
+for isolated Git repositories, repeated paired baseline/context execution,
+tests, patch statistics, optional agent metrics, and a fixed three-task corpus
+from this repository's history. We have not yet published controlled real-model
+runs, a broad public PR corpus, or an Augment-comparable result.
 
 ### 5. Enterprise packaging
 
@@ -115,8 +123,11 @@ We clone the **agent-facing retrieval contract**: “give me the right slices fo
 | Metric | Us | Augment (public) |
 |--------|----|------------------|
 | Self-repo path recall eval | ✅ `contextengine eval --self` | Not comparable |
+| PR task orchestration | ✅ repetition-aware V1 paired runner and reports | ✅ internal/product benchmark stack |
+| Fixed PR corpus | ⚠️ 3 internal historical tasks | ✅ published Elasticsearch study |
+| Repeated controlled model results | ❌ not published yet | ✅ published study |
 | 300-PR Elasticsearch agent eval | ❌ | ✅ published |
-| Token / tool-call reduction study | ❌ | ✅ claimed in product |
+| Token / tool-call reduction study | ❌ | ✅ claimed in product; not independently reproduced |
 | Index latency on 10k files | Reasonable (local) | Optimized product |
 
 ---
@@ -125,12 +136,12 @@ We clone the **agent-facing retrieval contract**: “give me the right slices fo
 
 If this project continues, the highest ROI vs Augment is **not** “more MCP tools”:
 
-1. **Better code embeddings** (fine-tuned or strong code models + hard-negative mining)
-2. **Structure-first retrieval** (SCIP/LSIF/tsc symbols, call graph) before pure vectors
-3. **Task-aware packing** (edit surface vs explanation surface)
-4. **Golden task suite** on real open-source PRs (open version of their eval)
-5. **Docs/wiki connectors** (second source type)
-6. Only then: distributed/remote index for huge monorepos
+1. **Expand the seed corpus into a reproducible public corpus and run matched-model trials** (fixed commits, repetitions, token/tool-call trace, P95, test outcome)
+2. **Connector and webhook SDK** (Git providers, websites, tickets, external docs)
+3. **Source-level ACL and provenance proof** before exposing shared indexes
+4. **Structure-first retrieval and stronger code embeddings** (SCIP/LSIF/call graph + hard negatives)
+5. **Task-aware packing** with extractive/model-backed policies and explicit budgets
+6. **Distributed generation storage and remote index sharing** for very large monorepos
 
 ---
 

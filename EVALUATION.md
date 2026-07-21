@@ -1,6 +1,6 @@
 # Evaluation practice report
 
-**Date:** 2026-07-13 · **Engine:** ContextEngine-plugin v0.4.0  
+**Date:** 2026-07-21 · **Engine:** ContextEngine-plugin v0.4.0
 **Question:** Have we validated on mid-size repos? How do others evaluate? How does auto-reindex work?
 
 ---
@@ -15,7 +15,19 @@
 | **Practical mid-repo RAG** | Many open RAG tools | **Recall@k / MRR / Hit@k** on hand-labeled “query → must-hit files” | Fast regression signal for context engines |
 
 We implement the **practical IR layer** (Recall / MRR / nDCG / Top‑k hit) on real mid-size OSS, which is the right first gate.  
-We do **not** yet run Augment-style 900 PR-generation trials (needs an agent harness + judge + budget).
+The repository now also includes an isolated paired-agent orchestration harness
+(`contextengine eval-pr`), repetition-aware paired scoring, and a three-case
+fixed corpus from this repository's history. We still do **not** run
+Augment-style 900 PR-generation trials: a broad public task corpus, matched
+agent/model budget, real repeated runs, and judge/test plan are still required.
+
+The current automated project suite is **111/111**. PR-harness coverage uses a
+deterministic fake agent to verify argv handling, isolated Git repositories,
+a separate sanitized baseline-oracle workspace, hidden-test application order,
+raw/agent-prompt/context hashes, all `none x packed` paired comparisons, and
+JSON/Markdown report generation with resolved base/gold commits. The historical
+corpus oracles were verified fail-to-pass against fixed base/gold commits. This
+is still not a real-model quality experiment.
 
 ---
 
@@ -25,7 +37,9 @@ We do **not** yet run Augment-style 900 PR-generation trials (needs an agent har
 
 - ~20–25 source files under `src/`, ~5k lines of project docs+code  
 - Built-in: `contextengine eval --self`  
-- Result (v0.4): **8/8** cases, mean Recall@k = **1.0**, mean MRR ≈ **0.84–0.90**
+- Current configured semantic stack (2026-07-20, existing index): **8/8** cases,
+  Recall/MRR/nDCG and Top-1/3/5 = **1.0**, mean latency **2.14 s**, P95
+  **4.17 s**. The latency is dominated by the remote embedding/rerank service.
 
 This only proves the engine works on its own sources — **not** mid-size production code.
 
@@ -117,10 +131,18 @@ PostgreSQL (+ FTS + symbols) updated
 | `contextengine watch` | **Yes** (dedicated process) |
 | `contextengine index` | Manual / CI |
 | MCP `reindex_workspace` | Manual tool call by agent |
-| MCP default server process | **No background watch** (agent must reindex or user runs `watch`) |
+| MCP default server process | **Yes** — watcher is enabled by default; set `CONTEXTENGINE_MCP_WATCH=0` to disable |
 | Augment Local mode (product claim) | Local indexer keeps index live for “next query” |
 
-**Gap vs Augment:** our MCP server does **not** yet embed a long-lived watcher; real-time is opt-in via `contextengine watch` (or agent calling `reindex_workspace` after large edits).
+The current MCP server embeds the same long-lived watcher path. It shares a
+single-flight initial/index operation with the first MCP request, watches the
+primary and configured extra roots, and refreshes the reader after each
+debounced pass. A dedicated `contextengine watch` process remains useful when
+the MCP server is not running.
+
+**Remaining gap vs Augment:** the watcher is local-filesystem only. It does not
+yet consume provider webhooks, GitHub Actions events, or external document
+connectors.
 
 ---
 
@@ -130,7 +152,30 @@ PostgreSQL (+ FTS + symbols) updated
 2. **Without embeddings**, multi-signal FTS + symbol + path-aware rerank already reaches **~0.9 MRR / ~1.0 Top-3** on this labeled set — good for mid-size libraries with clear `lib/` structure.  
 3. Metrics match **common IR practice** (CodeSearchNet-style nDCG/MRR), **not** Augment’s PR-generation benchmark.  
 4. **Incremental hash indexing works**; **watch works** when the watch process is running.  
-5. Remaining gaps for “Augment-class ops”: embed MCP-side live indexing, multi-repo scale tests (100k+ files), and agent-level PR evals.
+5. Remaining gaps for “Augment-class ops”: connector-driven remote indexing,
+   multi-repo scale tests (100k+ files), and real repeated PR suites on a fixed
+   public corpus. The V1 PR harness provides orchestration and reporting, not
+   equivalent benchmark results by itself.
+
+The optional PR `testPatch` is kept out of the agent's evaluated Git repository
+and excluded from patch statistics. Baseline verification runs in its own
+sanitized workspace, so ignored setup artifacts cannot cross into the agent
+workspace. This remains a repository-level safeguard, not an OS security
+boundary: a host process with sufficient filesystem access may still read the
+patch source; use a hardened container or VM when that threat model matters.
+
+The fixed corpus oracle patches each add one unique new `test/pr-history-*.test.ts`
+file. `npm run eval:pr:corpus:validate` is the CI fail-to-pass gate: it verifies
+patch application plus base-fail/gold-pass behavior without invoking an agent.
+The full paired corpus run needs a full source Git clone, a PostgreSQL URL (or
+`docker compose up -d postgres`), and a real `agent-wrapper`; its package script
+intentionally carries `--allow-exec`. These prerequisites and the absence of a
+checked-in real-model experiment are documented in `docs/PR_EVAL.md`.
+
+The built-in TypeScript eval report now also emits Top-1/Top-3/Top-5 accuracy,
+mean search latency, per-case latency, and P95 latency. These metrics are
+additive to Recall/MRR/nDCG and are intended as CI regression signals; they do
+not make the existing suites equivalent to Augment's end-to-end PR benchmark.
 
 ### Reproduce
 
@@ -142,6 +187,15 @@ node scripts/practice-eval.mjs --root /tmp/express4 --cases examples/eval.expres
 
 # Self
 node dist/cli.js eval --self --reindex
+
+# Fixed-corpus CI oracle gate (no agent execution)
+npm run eval:pr:corpus:validate
+
+# Full fixed-corpus run: requires a full clone, PostgreSQL, and agent-wrapper.
+# The package script includes --allow-exec; review the manifest first.
+docker compose up -d postgres
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine
+npm run eval:pr:corpus
 
 # Watch demo
 node dist/cli.js watch /tmp/express4

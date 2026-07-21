@@ -301,8 +301,7 @@ program
         },
       });
       const stop = () => {
-        handle.close();
-        process.exit(0);
+        void handle.close().finally(() => process.exit(0));
       };
       process.on("SIGINT", stop);
       process.on("SIGTERM", stop);
@@ -379,6 +378,90 @@ program
       await engine.close();
       console.log(JSON.stringify(report, null, 2));
       if (report.failed > 0) process.exitCode = 1;
+    },
+  );
+
+program
+  .command("eval-pr")
+  .alias("pr-eval")
+  .description("Run agent PR tasks in isolated Git repositories")
+  .requiredOption("-m, --manifest <file>", "versioned PR eval manifest JSON")
+  .option("-o, --out <file>", "write the full JSON report")
+  .option("--markdown <file>", "write a compact Markdown report")
+  .option("--case <ids...>", "run only selected case ids")
+  .option("--variant <ids...>", "run only selected variant ids")
+  .option("--keep-worktrees", "keep temporary repositories for debugging")
+  .option(
+    "--allow-exec",
+    "allow setup, agent, and test commands from the manifest",
+  )
+  .option(
+    "--fail-on-unsolved",
+    "exit non-zero when any task is not solved",
+  )
+  .action(
+    async (opts: {
+      manifest: string;
+      out?: string;
+      markdown?: string;
+      case?: string[];
+      variant?: string[];
+      keepWorktrees?: boolean;
+      allowExec?: boolean;
+      failOnUnsolved?: boolean;
+    }) => {
+      if (!opts.allowExec) {
+        throw new Error(
+          "eval-pr executes manifest commands; review the file and pass --allow-exec",
+        );
+      }
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const {
+        formatPrEvalReportMarkdown,
+        loadPrEvalSuite,
+        runPrEvalSuite,
+      } = await import("./eval/pr-harness.js");
+      const suite = loadPrEvalSuite(opts.manifest);
+      const report = await runPrEvalSuite(suite, {
+        caseIds: opts.case,
+        variantIds: opts.variant,
+        keepWorktrees: opts.keepWorktrees,
+        onProgress: (progress) => {
+          if (progress.phase === "start") {
+            console.error(
+              `[${progress.completedRuns + 1}/${progress.totalRuns}] ${progress.caseId} / r${progress.repetition} / ${progress.variantId}`,
+            );
+          } else {
+            console.error(`  ${progress.status}`);
+          }
+        },
+      });
+      const json = JSON.stringify(report, null, 2);
+      if (opts.out) {
+        const outputPath = path.resolve(opts.out);
+        mkdirSync(path.dirname(outputPath), { recursive: true });
+        writeFileSync(outputPath, `${json}\n`, "utf8");
+        console.error(`JSON report: ${outputPath}`);
+      } else {
+        console.log(json);
+      }
+      if (opts.markdown) {
+        const markdownPath = path.resolve(opts.markdown);
+        mkdirSync(path.dirname(markdownPath), { recursive: true });
+        writeFileSync(
+          markdownPath,
+          formatPrEvalReportMarkdown(report),
+          "utf8",
+        );
+        console.error(`Markdown report: ${markdownPath}`);
+      }
+      if (report.summary.errors > 0) process.exitCode = 2;
+      else if (
+        opts.failOnUnsolved &&
+        report.summary.passed !== report.summary.totalRuns
+      ) {
+        process.exitCode = 1;
+      }
     },
   );
 

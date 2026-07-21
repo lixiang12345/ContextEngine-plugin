@@ -4,7 +4,7 @@
 
 多信号检索（PostgreSQL FTS + 符号 + 路径 + pgvector + 图扩展 + MMR），让 Agent 少花 token 乱 grep，多花回合改对代码。
 
-设计说明：[ARCHITECTURE.md](./ARCHITECTURE.md) · 与 Augment 的诚实对比：[COMPARISON.md](./COMPARISON.md)
+设计说明：[ARCHITECTURE.md](./ARCHITECTURE.md) · 与 Augment 的诚实对比：[COMPARISON.md](./COMPARISON.md) · [深度对齐审计](./docs/AUGMENT_ALIGNMENT.md)
 
 **English:** [README.md](./README.md)
 
@@ -48,9 +48,9 @@ npx contextengine-plugin context "Add logging to payment requests"
 | 多根目录 | 代码 + 文档 / 额外仓库同一索引 |
 | 提交血缘 | 近期 git 历史块 |
 | Watch 模式 | 防抖增量重建索引 |
-| MCP | 主工具 `codebase_retrieval` + 搜索 / 文件 / 索引 |
+| MCP | 主工具 `codebase-retrieval`（兼容 Augment；`codebase_retrieval` 为旧别名）+ 搜索 / 文件 / 索引 |
 | HTTP | 带鉴权的工作区同步、索引任务、检索与 SSE 进度 |
-| 评测 | Recall@k、**MRR**、**nDCG@k** |
+| 评测 | Recall/MRR/nDCG + 重复成对 PR 运行 + 固定历史 corpus |
 
 **与 Augment 的对比：** [COMPARISON.md](./COMPARISON.md) · **架构：** [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -204,6 +204,10 @@ claude mcp add contextengine -- contextengine-mcp
 ```bash
 export CONTEXTENGINE_ROOT=/path/to/repo
 export CONTEXTENGINE_AUTO_INDEX=1
+# MCP watcher 默认开启；设为 0 可关闭
+export CONTEXTENGINE_MCP_WATCH=1
+# 可选：逗号分隔的 name:path 根目录，例如 docs:/path/to/docs
+export CONTEXTENGINE_EXTRA_ROOTS=docs:/path/to/docs
 export OPENAI_API_KEY=...
 ```
 
@@ -227,6 +231,7 @@ args: ["/absolute/path/to/ContextEngine-plugin/dist/mcp-server.js"]
 
 | 工具 | 用途 |
 |------|------|
+| `codebase-retrieval` / `codebase_retrieval` | Augment 兼容的上下文打包检索（优先调用） |
 | `codebase_search` | 混合搜索 → 路径、行号、符号、内容 |
 | `get_task_context` | 在 token 预算下打包排序后的代码块 |
 | `get_file_context` | 读取文件 / 行范围 |
@@ -264,8 +269,9 @@ docker compose up -d --build
 docker compose ps
 ```
 
-控制台默认发布在 `http://127.0.0.1:8790/dashboard`。`.env` 中的
-Embedding 和 Rerank 配置会透传到应用容器。PostgreSQL 与 HTTP 运行目录
+控制台默认发布在 `http://127.0.0.1:8790/dashboard`，主机绑定默认仅限回环地址。
+只有可信远程部署才应设置 `CONTEXTENGINE_DOCKER_HTTP_BIND_HOST=0.0.0.0`。
+`.env` 中的 Embedding 和 Rerank 配置会透传到应用容器。PostgreSQL 与 HTTP 运行目录
 使用命名卷，普通的 `docker compose down` 不会删除索引数据；只有明确需要
 清空数据库和运行数据时才使用 `docker compose down -v`。
 
@@ -285,6 +291,11 @@ HTTP 服务内置 `/dashboard` 可观测控制台，与 `/v1/*` 共用 Bearer AP
 
 核心接口包括工作区创建/查询、`/sync/plan`、`PUT /blobs/{sha256}`、
 `/sync/commit`、`/index-jobs`、`/search`、`/context` 与 `/file`。
+
+多 Principal Bearer Key 可按工作区实施 `reader`、`writer`、`owner` 权限。
+只读 GitHub Connector 可将一个仓库绑定到空 Blob 工作区，进行增量同步，并在
+控制台展示来源状态。配置方式见 `CONTEXTENGINE_HTTP_API_KEYS`、
+`CONTEXTENGINE_GITHUB_TOKEN` 和 HTTP API 文档中的 Connector/ACL 路由。
 
 完整的客户端协议、入参出参、SSE 索引进度以及已检查 IntelliJ 插件的适配映射
 见 [docs/HTTP_API.md](./docs/HTTP_API.md)。
@@ -313,6 +324,11 @@ ContextEngine 与模型无关。它只负责召回、重排、去重和证据格
 模型名称或上下文窗口。默认返回 `topK` 选中的全部命中；调用方只有在明确
 需要缩小传输内容时，才传入 `maxTokens` / `max_tokens`。
 
+MCP server 默认监听主工作区和 `CONTEXTENGINE_EXTRA_ROOTS` 配置的额外根目录，
+对文件变更做防抖增量索引并刷新检索器。设置 `CONTEXTENGINE_MCP_WATCH=0`
+（也支持 `false`、`off`、`no`）可关闭 watcher；关闭后，缺少索引时是否在
+首次 MCP 请求自动建立由 `CONTEXTENGINE_AUTO_INDEX=1` 控制。
+
 ---
 
 ## 配置
@@ -321,13 +337,20 @@ ContextEngine 与模型无关。它只负责召回、重排、去重和证据格
 |----------|------|
 | `CONTEXTENGINE_DATABASE_URL` / `DATABASE_URL` | **必填** PostgreSQL 连接串；自动启用 pgvector |
 | `CONTEXTENGINE_ROOT` | MCP 使用的工作区根目录 |
+| `CONTEXTENGINE_EXTRA_ROOTS` | 可选的逗号分隔 `name:path` 根目录，会一起索引和监听 |
 | `CONTEXTENGINE_DATA_DIR` | 仅由 `migrate-sqlite` 用于旧 SQLite 目录 |
 | `CONTEXTENGINE_AUTO_INDEX` | `1` = MCP 首次使用时若无索引则自动建 |
+| `CONTEXTENGINE_MCP_WATCH` | MCP 文件 watcher；默认开启，设为 `0` / `false` 关闭 |
 | `CONTEXTENGINE_HTTP_API_KEY` | HTTP 服务必填 Bearer 密钥 |
 | `CONTEXTENGINE_HTTP_HOST` / `_PORT` | HTTP 监听地址和端口 |
 | `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES` | 单个同步源 Blob 最大字节数（默认 2 MiB） |
+| `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` | 远程 MCP 空闲会话保留时间（默认 30 分钟） |
+| `CONTEXTENGINE_MCP_MAX_SESSIONS` | 每个 HTTP 进程的远程 MCP 会话上限（默认 128） |
 | `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | 允许服务器本地路径工作区（默认关闭） |
+| `CONTEXTENGINE_HTTP_ALLOW_PRIVATE_MODEL_URLS` | 允许运行时配置私网/本地模型地址，仅用于可信部署（默认关闭） |
 | `CONTEXTENGINE_COMMIT_LIMIT` | 索引的近期 commit 数量（默认 `80`，`0` = 关闭） |
+| `CONTEXTENGINE_SEARCH_SEMANTIC_TIMEOUT_MS` / `_RERANK_TIMEOUT_MS` | 单次查询模型预算（默认 `2000` ms），超时自动回退词法检索 |
+| `CONTEXTENGINE_SEARCH_BREAKER_FAILURE_THRESHOLD` / `_COOLDOWN_MS` | 模型熔断阈值 / 冷却时间（默认 `3` / `30000` ms） |
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | 启用 embeddings |
 | `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API 基址 |
 | `OPENAI_EMBEDDING_MODEL` / `CONTEXTENGINE_EMBEDDING_MODEL` | 模型名 |
@@ -404,11 +427,39 @@ contextengine eval --cases examples/eval.sample.json --root /path/to/repo
 # 中等规模练习（Express 4.x）— IR 指标 + 增量耗时
 # git clone --depth 1 --branch 4.21.2 https://github.com/expressjs/express.git /tmp/express4
 node scripts/practice-eval.mjs --root /tmp/express4 --cases examples/eval.express.json
+
+# 成对 Agent PR 评测（manifest 命令需要显式授权）
+contextengine eval-pr \
+  --manifest /path/to/pr-suite.json \
+  --allow-exec \
+  --out eval-results/pr-suite.json \
+  --markdown eval-results/pr-suite.md
+
+# 固定 corpus 的 CI oracle 门禁：每个测试补丁必须可应用，base 必须失败、gold 必须通过。
+# 不会调用 Agent；必须在完整源码 Git clone 中运行。
+npm run eval:pr:corpus:validate
+
+# 完整固定 corpus 运行：需要 PostgreSQL 和真实的 agent-wrapper。
+# package script 有意包含 --allow-exec；运行前先审阅 manifest。
+docker compose up -d postgres
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine
+npm run eval:pr:corpus
 ```
 
-实践报告（方法 + 多仓套件 + watch）：**[EVALUATION.md](./EVALUATION.md)**  
-代码 embedding 选型：**[docs/EMBEDDINGS.md](./docs/EMBEDDINGS.md)**  
-GPU embed + rerank 部署：**[docs/DEPLOY_EMBED_RERANK.md](./docs/DEPLOY_EMBED_RERANK.md)**  
+实践报告（方法 + 多仓套件 + watch）：**[EVALUATION.md](./EVALUATION.md)**
+
+PR 级 harness、manifest、隔离与 Agent 指标：**[docs/PR_EVAL.md](./docs/PR_EVAL.md)**
+
+V1 runner 已具备重复成对编排、确定性测试门禁、报告能力和 3 个固定历史任务：
+它会记录原始任务、实际 Agent prompt 与 context 的哈希，报告已解析的 base/gold commit，
+并比较每一组 `none x packed` 变体。baseline oracle 在独立的 sanitized workspace 中运行，
+忽略文件产生的构建产物不会流入 Agent workspace。固定 corpus 必须使用包含历史提交的完整 Git clone，
+且完整运行需要 PostgreSQL 和 `agent-wrapper`。但尚未发布公共大样本 corpus、受控真实模型实验或可与
+Augment 对比的质量结果。`testPatch` 的不可见性是仓库级防误泄漏措施，不是 OS 安全边界。
+
+代码 embedding 选型：**[docs/EMBEDDINGS.md](./docs/EMBEDDINGS.md)**
+
+GPU embed + rerank 部署：**[docs/DEPLOY_EMBED_RERANK.md](./docs/DEPLOY_EMBED_RERANK.md)**
 多语言 IR 指标：**[docs/MULTILANG_BENCH.md](./docs/MULTILANG_BENCH.md)**
 
 ```bash
@@ -466,7 +517,7 @@ npm run mcp
 - PostgreSQL FTS + 符号 + 路径多信号检索
 - 查询分析、特征重排、MMR 打包
 - 多根 / 文档根
-- MCP 主工具 `codebase_retrieval`
+- MCP 主工具 `codebase-retrieval`（`codebase_retrieval` 为旧别名）
 - MRR + nDCG 指标
 
 ### Phase 5 — 进行中
@@ -485,10 +536,11 @@ npm run mcp
 | 自研代码检索模型 | ❌ 自带 / BYO embeddings | ✅ |
 | 多源（文档 / wiki / 组织） | ❌ | ✅ |
 | 巨型 monorepo / 企业规模 | ⚠️ 中等 | ✅ |
+| 已发布 Agent PR benchmark | ⚠️ 固定内部 corpus，无真实模型结果 | ✅ |
 | 开源 / 可离线 | ✅ | ❌ 产品 |
 | MCP + 混合搜索 | ✅ | ✅ |
 
-详情见 **[COMPARISON.md](./COMPARISON.md)**。
+详情见 **[COMPARISON.md](./COMPARISON.md)** 和 **[深度对齐审计](./docs/AUGMENT_ALIGNMENT.md)**。
 
 ## 设计原则
 

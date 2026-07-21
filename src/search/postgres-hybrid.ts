@@ -27,6 +27,143 @@ export interface PostgresHybridSearchInput {
   embedder?: EmbeddingProvider | null;
   hasEmbeddings: boolean;
   neuralRerank?: NeuralRerankConfig | null;
+  /** Optional overrides for tests or embedded deployments. */
+  reliability?: Partial<PostgresHybridReliabilityOptions>;
+}
+
+export interface PostgresHybridReliabilityOptions {
+  semanticTimeoutMs: number;
+  rerankTimeoutMs: number;
+  failureThreshold: number;
+  cooldownMs: number;
+}
+
+type RetrievalHit = { id: string; score: number };
+
+interface LexicalChannelHits {
+  fts: RetrievalHit[];
+  symbol: RetrievalHit[];
+  path: RetrievalHit[];
+}
+
+// Each symbol/path term currently maps to an independent PostgreSQL query.
+// Bound user-controlled fanout until those store calls are implemented as
+// set-based SQL queries.
+const MAX_IDENTIFIER_HINTS = 12;
+const MAX_PATH_HINTS = 24;
+const DEFAULT_MODEL_TIMEOUT_MS = 2_000;
+const DEFAULT_BREAKER_FAILURE_THRESHOLD = 3;
+const DEFAULT_BREAKER_COOLDOWN_MS = 30_000;
+
+function boundedNumber(
+  value: number | string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
+
+function reliabilityOptions(
+  overrides: Partial<PostgresHybridReliabilityOptions> | undefined,
+): PostgresHybridReliabilityOptions {
+  return {
+    semanticTimeoutMs: boundedNumber(
+      overrides?.semanticTimeoutMs ??
+        process.env.CONTEXTENGINE_SEARCH_SEMANTIC_TIMEOUT_MS,
+      DEFAULT_MODEL_TIMEOUT_MS,
+      1,
+      120_000,
+    ),
+    rerankTimeoutMs: boundedNumber(
+      overrides?.rerankTimeoutMs ??
+        process.env.CONTEXTENGINE_SEARCH_RERANK_TIMEOUT_MS,
+      DEFAULT_MODEL_TIMEOUT_MS,
+      1,
+      120_000,
+    ),
+    failureThreshold: boundedNumber(
+      overrides?.failureThreshold ??
+        process.env.CONTEXTENGINE_SEARCH_BREAKER_FAILURE_THRESHOLD,
+      DEFAULT_BREAKER_FAILURE_THRESHOLD,
+      1,
+      20,
+    ),
+    cooldownMs: boundedNumber(
+      overrides?.cooldownMs ??
+        process.env.CONTEXTENGINE_SEARCH_BREAKER_COOLDOWN_MS,
+      DEFAULT_BREAKER_COOLDOWN_MS,
+      1,
+      10 * 60_000,
+    ),
+  };
+}
+
+class ModelCallTimeoutError extends Error {
+  constructor(channel: "semantic" | "rerank", timeoutMs: number) {
+    super(`${channel} model call exceeded ${timeoutMs}ms`);
+    this.name = "ModelCallTimeoutError";
+  }
+}
+
+async function withinModelBudget<T>(
+  channel: "semantic" | "rerank",
+  timeoutMs: number,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new ModelCallTimeoutError(channel, timeoutMs);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([operation(controller.signal), timedOut]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Small per-process breaker. Once the cooldown elapses, exactly one request is
+ * admitted as a half-open probe so a recovering model is not stampede-tested.
+ */
+class FailureCircuitBreaker {
+  private failures = 0;
+  private openUntil = 0;
+  private probeInFlight = false;
+
+  constructor(
+    private readonly failureThreshold: number,
+    private readonly cooldownMs: number,
+  ) {}
+
+  tryAcquire(now = Date.now()): boolean {
+    if (this.openUntil === 0) return true;
+    if (now < this.openUntil || this.probeInFlight) return false;
+    this.probeInFlight = true;
+    return true;
+  }
+
+  recordSuccess(): void {
+    this.failures = 0;
+    this.openUntil = 0;
+    this.probeInFlight = false;
+  }
+
+  recordFailure(now = Date.now()): void {
+    this.probeInFlight = false;
+    this.failures++;
+    if (this.failures >= this.failureThreshold) {
+      this.openUntil = now + this.cooldownMs;
+    }
+  }
 }
 
 function previewOf(content: string, max = 220): string {
@@ -43,16 +180,39 @@ export class PostgresHybridSearcher {
   private embedder: EmbeddingProvider | null = null;
   private hasEmbeddings = false;
   private neuralRerank: NeuralRerankConfig | null = null;
+  private reliability = reliabilityOptions(undefined);
+  private semanticBreaker = new FailureCircuitBreaker(
+    this.reliability.failureThreshold,
+    this.reliability.cooldownMs,
+  );
+  private rerankBreaker = new FailureCircuitBreaker(
+    this.reliability.failureThreshold,
+    this.reliability.cooldownMs,
+  );
+
+  constructor(
+    private readonly rerankScores: typeof neuralRerankScores = neuralRerankScores,
+  ) {}
 
   load(input: PostgresHybridSearchInput): void {
     this.store = input.store;
     this.embedder = input.embedder ?? null;
     this.hasEmbeddings = input.hasEmbeddings;
     this.neuralRerank = input.neuralRerank ?? null;
+    this.reliability = reliabilityOptions(input.reliability);
+    this.semanticBreaker = new FailureCircuitBreaker(
+      this.reliability.failureThreshold,
+      this.reliability.cooldownMs,
+    );
+    this.rerankBreaker = new FailureCircuitBreaker(
+      this.reliability.failureThreshold,
+      this.reliability.cooldownMs,
+    );
   }
 
   async search(opts: SearchOptions): Promise<SearchHit[]> {
     if (!this.store) throw new Error("PostgreSQL searcher is not loaded");
+    const store = this.store;
 
     const topK = opts.topK ?? 8;
     const requested = opts.mode ?? "auto";
@@ -62,6 +222,7 @@ export class PostgresHybridSearcher {
           ? "hybrid"
           : "bm25"
         : requested;
+    const degradedChannels = new Set<string>();
     const analyzed = analyzeQuery(opts.query);
     const candidateLimit = Math.max(topK * 16, 128);
     const filter: StoreSearchFilter = {
@@ -70,72 +231,130 @@ export class PostgresHybridSearcher {
       includeCommits: opts.includeCommits,
     };
 
+    const identifiers = analyzed.identifiers.slice(0, MAX_IDENTIFIER_HINTS);
+    const pathHints = new Set<string>();
+    const addPathHint = (hint: string): boolean => {
+      if (pathHints.size >= MAX_PATH_HINTS) return false;
+      const value = hint.trim();
+      if (value) pathHints.add(value);
+      return pathHints.size < MAX_PATH_HINTS;
+    };
+    for (const hint of analyzed.pathHints) {
+      if (!addPathHint(hint)) break;
+    }
+    if (pathHints.size < MAX_PATH_HINTS) {
+      for (const identifier of identifiers) {
+        if (!addPathHint(identifier)) break;
+        for (const part of tokenize(identifier)) {
+          if (part.length >= 4 && !addPathHint(part)) break;
+        }
+        if (pathHints.size >= MAX_PATH_HINTS) break;
+      }
+    }
+
+    const searchLexical = async (): Promise<LexicalChannelHits> => {
+      const [fts, symbol, path] = await Promise.all([
+        store.ftsSearch(opts.query, candidateLimit, filter),
+        identifiers.length
+          ? store.searchSymbols(identifiers, candidateLimit, filter)
+          : Promise.resolve([]),
+        pathHints.size
+          ? store.searchByPathHints(
+              [...pathHints],
+              candidateLimit,
+              filter,
+            )
+          : Promise.resolve([]),
+      ]);
+      return { fts, symbol, path };
+    };
+
+    const searchSemantic = async (): Promise<RetrievalHit[]> => {
+      const embedder = this.embedder;
+      if (!this.hasEmbeddings || !embedder) {
+        if (mode === "semantic" || mode === "hybrid") {
+          degradedChannels.add("semantic");
+        }
+        return [];
+      }
+      if (!this.semanticBreaker.tryAcquire()) {
+        degradedChannels.add("semantic");
+        return [];
+      }
+
+      let queryVector: number[] | undefined;
+      try {
+        const embedQuery =
+          embedder.embedQuery?.bind(embedder) ?? embedder.embed.bind(embedder);
+        [queryVector] = await withinModelBudget(
+          "semantic",
+          this.reliability.semanticTimeoutMs,
+          (signal) =>
+            embedQuery([opts.query], {
+              signal,
+              timeoutMs: this.reliability.semanticTimeoutMs,
+              retries: 0,
+            }),
+        );
+        if (!queryVector?.length) {
+          throw new Error("Embedding API returned an empty query vector");
+        }
+        this.semanticBreaker.recordSuccess();
+      } catch {
+        this.semanticBreaker.recordFailure();
+        degradedChannels.add("semantic");
+        return [];
+      }
+
+      try {
+        return await store.semanticSearch(
+          queryVector,
+          embedder.model,
+          candidateLimit,
+          filter,
+        );
+      } catch {
+        // PostgreSQL/vector failures also degrade to lexical retrieval, but do
+        // not poison the model circuit after a successful embedding call.
+        degradedChannels.add("semantic");
+        return [];
+      }
+    };
+
+    let lexicalHits: LexicalChannelHits | null = null;
+    let semanticHits: RetrievalHit[] = [];
+    if (mode === "hybrid") {
+      [lexicalHits, semanticHits] = await Promise.all([
+        searchLexical(),
+        searchSemantic(),
+      ]);
+    } else if (mode === "semantic") {
+      semanticHits = await searchSemantic();
+      if (!semanticHits.length) lexicalHits = await searchLexical();
+    } else {
+      lexicalHits = await searchLexical();
+    }
+
     const lists: Array<Array<{ id: string; score: number }>> = [];
     const channelFts = new Map<string, number>();
     const channelSymbol = new Map<string, number>();
     const channelPath = new Map<string, number>();
     const channelSem = new Map<string, number>();
-    const wantLexical = mode !== "semantic";
-    const wantSemantic =
-      (mode === "semantic" || mode === "hybrid") &&
-      this.hasEmbeddings &&
-      this.embedder !== null;
 
-    if (wantLexical) {
-      const ftsHits = await this.store.ftsSearch(opts.query, candidateLimit, filter);
-      for (const hit of ftsHits) channelFts.set(hit.id, hit.score);
-      if (ftsHits.length) lists.push(ftsHits);
+    if (lexicalHits) {
+      for (const hit of lexicalHits.fts) channelFts.set(hit.id, hit.score);
+      for (const hit of lexicalHits.symbol) channelSymbol.set(hit.id, hit.score);
+      for (const hit of lexicalHits.path) channelPath.set(hit.id, hit.score);
+      if (lexicalHits.fts.length) lists.push(lexicalHits.fts);
+      if (lexicalHits.symbol.length) lists.push(lexicalHits.symbol);
+      if (lexicalHits.path.length) lists.push(lexicalHits.path);
     }
-
-    if (wantLexical && analyzed.identifiers.length) {
-      const symbolHits = await this.store.searchSymbols(
-        analyzed.identifiers,
-        candidateLimit,
-        filter,
-      );
-      for (const hit of symbolHits) channelSymbol.set(hit.id, hit.score);
-      if (symbolHits.length) lists.push(symbolHits);
-    }
-
-    const pathHints = new Set(analyzed.pathHints);
-    for (const identifier of analyzed.identifiers) {
-      pathHints.add(identifier);
-      for (const part of tokenize(identifier)) {
-        if (part.length >= 4) pathHints.add(part);
-      }
-    }
-    if (wantLexical && pathHints.size) {
-      const pathHits = await this.store.searchByPathHints(
-        [...pathHints],
-        candidateLimit,
-        filter,
-      );
-      for (const hit of pathHits) channelPath.set(hit.id, hit.score);
-      if (pathHits.length) lists.push(pathHits);
-    }
-
-    if (wantSemantic && this.embedder) {
-      try {
-        const embedQuery =
-          this.embedder.embedQuery?.bind(this.embedder) ??
-          this.embedder.embed.bind(this.embedder);
-        const [queryVector] = await embedQuery([opts.query]);
-        const semanticHits = await this.store.semanticSearch(
-          queryVector,
-          this.embedder.model,
-          candidateLimit,
-          filter,
-        );
-        for (const hit of semanticHits) channelSem.set(hit.id, hit.score);
-        if (semanticHits.length) lists.push(semanticHits);
-      } catch {
-        // Keep lexical retrieval available when the remote embedding API fails.
-      }
-    }
+    for (const hit of semanticHits) channelSem.set(hit.id, hit.score);
+    if (semanticHits.length) lists.push(semanticHits);
 
     if (!lists.length) return [];
     const rrfMap = rrfFuse(lists);
-    const chunks = await this.store.getChunksByIds([...rrfMap.keys()]);
+    const chunks = await store.getChunksByIds([...rrfMap.keys()]);
     const chunksById = new Map(chunks.map((chunk) => [chunk.id, chunk]));
 
     let maxRrf = 0;
@@ -179,7 +398,7 @@ export class PostgresHybridSearcher {
 
     candidates.sort(preferImplementation);
     if (opts.expandGraph !== false && candidates.length) {
-      const expanded = await this.store.expandGraph(
+      const expanded = await store.expandGraph(
         candidates.slice(0, Math.max(topK * 2, 8)).map((candidate) => candidate.chunk),
         Math.max(topK * 2, 12),
         filter,
@@ -200,7 +419,7 @@ export class PostgresHybridSearcher {
       }
     }
     candidates.sort(preferImplementation);
-    await this.applyNeuralRerank(candidates, opts);
+    await this.applyNeuralRerank(candidates, opts, degradedChannels);
 
     const fileCandidates = collapseByPath(candidates, analyzed);
     const lambda = channelSem.size > 0 ? 0.88 : 0.8;
@@ -209,7 +428,8 @@ export class PostgresHybridSearcher {
         ? fileCandidates.slice(0, topK)
         : mmrSelect(fileCandidates, topK, lambda);
     const source: SearchHit["source"] =
-      channelSem.size && (channelFts.size || channelSymbol.size)
+      channelSem.size &&
+      (channelFts.size || channelSymbol.size || channelPath.size)
         ? "hybrid"
         : channelSem.size
           ? "semantic"
@@ -222,12 +442,16 @@ export class PostgresHybridSearcher {
       preview: previewOf(candidate.chunk.content),
       channels: candidate.channels,
       intent: analyzed.intent,
+      degradedChannels: degradedChannels.size
+        ? [...degradedChannels]
+        : undefined,
     }));
   }
 
   private async applyNeuralRerank(
     candidates: RankedCandidate[],
     opts: SearchOptions,
+    degradedChannels: Set<string>,
   ): Promise<void> {
     const enabled =
       opts.neuralRerank === true
@@ -236,28 +460,42 @@ export class PostgresHybridSearcher {
           ? false
           : this.neuralRerank !== null;
     if (!enabled || !this.neuralRerank || candidates.length < 2) return;
+    if (!this.rerankBreaker.tryAcquire()) {
+      degradedChannels.add("rerank");
+      return;
+    }
 
     try {
       const config = this.neuralRerank;
       const slice = candidates.slice(0, Math.min(config.topN, candidates.length));
-      const scores = await neuralRerankScores(
-        config,
-        opts.query,
-        slice.map((candidate) => ({
-          id: candidate.id,
-          text: formatRerankDocument({
-            path: candidate.chunk.path,
-            symbol: candidate.chunk.symbol,
-            language: candidate.chunk.language,
-            content: candidate.chunk.content,
-            maxChars: config.maxDocChars,
+      const documents = slice.map((candidate) => ({
+        id: candidate.id,
+        text: formatRerankDocument({
+          path: candidate.chunk.path,
+          symbol: candidate.chunk.symbol,
+          language: candidate.chunk.language,
+          content: candidate.chunk.content,
+          maxChars: config.maxDocChars,
+        }),
+      }));
+      const scores = await withinModelBudget(
+        "rerank",
+        this.reliability.rerankTimeoutMs,
+        (signal) =>
+          this.rerankScores(config, opts.query, documents, {
+            signal,
+            timeoutMs: this.reliability.rerankTimeoutMs,
+            retries: 0,
+            requireScores: true,
           }),
-        })),
       );
+      this.rerankBreaker.recordSuccess();
       blendNeuralScores(slice, scores, config.weight);
       candidates.sort(preferImplementation);
     } catch {
       // Neural rerank is optional; retain the deterministic hybrid order.
+      this.rerankBreaker.recordFailure();
+      degradedChannels.add("rerank");
     }
   }
 }

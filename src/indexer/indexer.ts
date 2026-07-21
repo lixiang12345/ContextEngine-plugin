@@ -1,4 +1,5 @@
 import { statSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import type { EngineConfig, IndexProgress, IndexRoot } from "../types.js";
 import { chunkFile } from "../chunker/code-chunker.js";
@@ -14,8 +15,10 @@ import {
 } from "../util/fs.js";
 import { sha256 } from "../util/hash.js";
 import { commitsToChunks, harvestCommits } from "../lineage/commits.js";
+import { SEARCH_TOKENIZER_VERSION } from "../search/bm25.js";
 
 const EMBEDDING_FORMAT_VERSION = 2;
+const SEARCH_TOKENIZER_META_KEY = "search_tokenizer_version";
 
 export interface IndexResult {
   filesScanned: number;
@@ -25,6 +28,9 @@ export interface IndexResult {
   embeddingsWritten: number;
   durationMs: number;
   roots: string[];
+  generationId?: string;
+  sourceRevision?: string | null;
+  indexedRevision?: string | null;
 }
 
 /**
@@ -35,6 +41,8 @@ export interface IndexResult {
 export interface VirtualSourceDocument {
   path: string;
   content: string;
+  /** False when the stored Blob is not valid indexable text. */
+  indexable?: boolean;
   hash: string;
   language: string;
   mtimeMs: number;
@@ -46,8 +54,28 @@ export interface VirtualIndexOptions {
   filesTotal: number;
   deletedPaths?: string[];
   rebuild?: boolean;
+  /** True when `documents` contains every current workspace source file. */
+  fullScan?: boolean;
+  /** Source revision associated with this sync/job. */
+  sourceRevision?: string | number | null;
   rootLabel?: string;
   onProgress?: (progress: IndexProgress) => void;
+}
+
+function localSourceRevision(root: string): string {
+  try {
+    const head = execFileSync(
+      "git",
+      ["-C", root, "rev-parse", "--verify", "HEAD"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    // Include a monotonic scan marker because uncommitted edits can change
+    // without changing `git rev-parse HEAD` (or even git status output).
+    if (head) return `git:${head}:working:${Date.now()}`;
+  } catch {
+    // Non-git directories are valid ContextEngine roots.
+  }
+  return `scan:${Date.now()}`;
 }
 
 interface ResolvedRoot {
@@ -92,213 +120,248 @@ export async function indexWorkspace(
   onProgress?: (p: IndexProgress) => void,
 ): Promise<IndexResult> {
   const started = Date.now();
-  const store = await PostgresStore.open({
+  const baseStore = await PostgresStore.open({
     databaseUrl: requireDatabaseUrl(config),
     workspaceId: config.workspaceId ?? config.root,
+    lockWorkspace: true,
   });
-  await store.setMeta("root", config.root);
-  if (config.extraRoots?.length) {
-    await store.setMeta("extra_roots", JSON.stringify(config.extraRoots));
-  }
+  const sourceRevision = localSourceRevision(config.root);
+  let store = baseStore;
+  let generationStarted = false;
+  try {
+    store = await baseStore.beginGeneration(sourceRevision);
+    generationStarted = true;
+    await store.setMeta("root", config.root);
+    if (config.extraRoots?.length) {
+      await store.setMeta("extra_roots", JSON.stringify(config.extraRoots));
+    }
 
-  const roots = resolveRoots(config);
-  await store.setMeta(
-    "roots",
-    JSON.stringify(
-      roots.map((r) => ({ name: r.name, path: r.absPath, kind: r.kind })),
-    ),
-  );
+    const roots = resolveRoots(config);
+    await store.setMeta(
+      "roots",
+      JSON.stringify(
+        roots.map((r) => ({ name: r.name, path: r.absPath, kind: r.kind })),
+      ),
+    );
+    const tokenizerVersion = String(SEARCH_TOKENIZER_VERSION);
+    const tokenizerChanged =
+      (await store.getMeta(SEARCH_TOKENIZER_META_KEY)) !== tokenizerVersion;
 
-  type FileJob = {
-    root: ResolvedRoot;
-    absPath: string;
-    relPath: string;
-    indexRel: string;
-    size: number;
-  };
+    type FileJob = {
+      root: ResolvedRoot;
+      absPath: string;
+      relPath: string;
+      indexRel: string;
+    };
 
-  const extraIgnores = [
-    ...(config.extraIgnores ?? []),
-    ...parseExcludeEnv(),
-  ];
-  const jobs: FileJob[] = [];
-  for (const root of roots) {
-    const files = walkSourceFiles(root.absPath, config.maxFileBytes, {
-      extraIgnores,
-    });
-    for (const f of files) {
-      jobs.push({
-        root,
-        absPath: f.absPath,
-        relPath: f.relPath,
-        indexRel: indexPath(root, f.relPath),
-        size: f.size,
+    const extraIgnores = [
+      ...(config.extraIgnores ?? []),
+      ...parseExcludeEnv(),
+    ];
+    const jobs: FileJob[] = [];
+    for (const root of roots) {
+      const files = walkSourceFiles(root.absPath, config.maxFileBytes, {
+        extraIgnores,
       });
+      for (const f of files) {
+        jobs.push({
+          root,
+          absPath: f.absPath,
+          relPath: f.relPath,
+          indexRel: indexPath(root, f.relPath),
+        });
+      }
     }
-  }
 
-  onProgress?.({
-    phase: "scan",
-    filesTotal: jobs.length,
-    filesDone: 0,
-    chunksTotal: 0,
-    message: `Found ${jobs.length} files across ${roots.length} root(s)`,
-  });
+    onProgress?.({
+      phase: "scan",
+      filesTotal: jobs.length,
+      filesDone: 0,
+      chunksTotal: 0,
+      message: `Found ${jobs.length} files across ${roots.length} root(s)`,
+    });
 
-  const livePaths = new Set(jobs.map((j) => j.indexRel));
-  // Keep synthetic commit paths
-  for (const p of await store.listFilePaths()) {
-    if (p.startsWith(".git/commits/")) livePaths.add(p);
-  }
-
-  let filesRemoved = 0;
-  for (const existing of await store.listFilePaths()) {
-    if (!livePaths.has(existing) && !existing.startsWith(".git/commits/")) {
-      await store.deleteFile(existing);
-      filesRemoved++;
+    const existingPaths = await store.listFilePaths();
+    const livePaths = new Set(jobs.map((j) => j.indexRel));
+    // Keep synthetic commit paths
+    for (const p of existingPaths) {
+      if (p.startsWith(".git/commits/")) livePaths.add(p);
     }
-  }
 
-  let filesIndexed = 0;
-  let chunksWritten = 0;
-  let filesDone = 0;
+    let filesRemoved = 0;
+    for (const existing of existingPaths) {
+      if (!livePaths.has(existing) && !existing.startsWith(".git/commits/")) {
+        await store.deleteFile(existing);
+        filesRemoved++;
+      }
+    }
 
-  for (const job of jobs) {
-    filesDone++;
-    const content = readTextFile(job.absPath);
-    if (content === null) continue;
+    let filesIndexed = 0;
+    let chunksWritten = 0;
+    let filesDone = 0;
 
-    const fileHash = sha256(content);
-    if ((await store.getFileHash(job.indexRel)) === fileHash) {
+    for (const job of jobs) {
+      filesDone++;
+      const previousHash = await store.getFileHash(job.indexRel);
+      const content = readTextFile(job.absPath);
+      const actualSize = content === null ? 0 : Buffer.byteLength(content, "utf8");
+      if (content === null || actualSize > config.maxFileBytes) {
+        if (previousHash !== null) {
+          await store.deleteFile(job.indexRel);
+          filesRemoved++;
+        }
+        continue;
+      }
+
+      const fileHash = sha256(content);
+      if (!tokenizerChanged && previousHash === fileHash) {
+        onProgress?.({
+          phase: "chunk",
+          filesTotal: jobs.length,
+          filesDone,
+          chunksTotal: chunksWritten,
+        });
+        continue;
+      }
+
+      const chunks = chunkFile(job.indexRel, content, config.maxChunkChars);
+      let mtimeMs = Date.now();
+      try {
+        mtimeMs = statSync(job.absPath).mtimeMs;
+      } catch {
+        // ignore
+      }
+
+      await store.transaction(async (tx) => {
+        await tx.upsertFile({
+          path: job.indexRel,
+          hash: fileHash,
+          language: languageForPath(job.relPath),
+          mtimeMs,
+          size: actualSize,
+          rootAlias: job.root.name,
+        });
+        await tx.replaceChunksForFile(job.indexRel, chunks, job.root.name);
+      });
+
+      filesIndexed++;
+      chunksWritten += chunks.length;
       onProgress?.({
         phase: "chunk",
         filesTotal: jobs.length,
         filesDone,
         chunksTotal: chunksWritten,
+        message: job.indexRel,
       });
-      continue;
     }
 
-    const chunks = chunkFile(job.indexRel, content, config.maxChunkChars);
-    let mtimeMs = Date.now();
-    try {
-      mtimeMs = statSync(job.absPath).mtimeMs;
-    } catch {
-      // ignore
+    // Commit lineage from primary root only (skip rewrite when head set unchanged)
+    const commitLimit = Number(process.env.CONTEXTENGINE_COMMIT_LIMIT ?? 80);
+    if (commitLimit > 0) {
+      onProgress?.({
+        phase: "write",
+        filesTotal: jobs.length,
+        filesDone: jobs.length,
+        chunksTotal: chunksWritten,
+        message: "Indexing commit lineage…",
+      });
+      const commits = harvestCommits(config.root, commitLimit);
+      const lineageKey = commits.map((c) => c.hash).join(",");
+      const prevKey = await store.getMeta("commit_lineage_key");
+      if (tokenizerChanged || lineageKey !== prevKey) {
+        const commitChunks = commitsToChunks(commits);
+        await store.transaction(async (tx) => {
+          for (const p of await tx.listFilePaths()) {
+            if (p.startsWith(".git/commits/")) await tx.deleteFile(p);
+          }
+          for (const chunk of commitChunks) {
+            await tx.upsertFile({
+              path: chunk.path,
+              hash: chunk.hash,
+              language: "git-commit",
+              mtimeMs: Date.now(),
+              size: chunk.content.length,
+              rootAlias: "main",
+            });
+            await tx.replaceChunksForFile(chunk.path, [chunk], "main");
+            chunksWritten++;
+          }
+        });
+        await store.setMeta("commit_lineage_key", lineageKey);
+      }
     }
 
-    await store.transaction(async (tx) => {
-      await tx.upsertFile({
-        path: job.indexRel,
-        hash: fileHash,
-        language: languageForPath(job.relPath),
-        mtimeMs,
-        size: job.size,
-        rootAlias: job.root.name,
+    let embeddingsWritten = 0;
+    const embedder = createEmbeddingProvider(config.embeddings);
+    if (embedder) {
+      const embeddingSignature = JSON.stringify({
+        version: EMBEDDING_FORMAT_VERSION,
+        model: embedder.model,
+        dimensions: config.embeddings?.dimensions ?? null,
+        inputType: /^(1|true|yes|on)$/i.test(
+          process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE?.trim() || "",
+        ),
+        maxChars: Number(process.env.CONTEXTENGINE_EMBED_MAX_CHARS || 4000),
       });
-      await tx.replaceChunksForFile(job.indexRel, chunks, job.root.name);
-    });
+      const previousSignature = await store.getMeta("embedding_signature");
+      // A legacy index without a signature may contain vectors produced with
+      // different model/query settings, so rebuild it once rather than mixing.
+      if (
+        previousSignature !== embeddingSignature &&
+        (previousSignature || (await store.embeddingCount()) > 0)
+      ) {
+        await store.clearEmbeddings();
+      }
+      const embedded = await embedMissing(
+        store,
+        embedder,
+        onProgress,
+        jobs.length,
+      );
+      embeddingsWritten = embedded.written;
+      if (embedded.dimension) await store.ensureVectorIndex(embedded.dimension);
+      await store.setMeta("embedding_signature", embeddingSignature);
+    }
 
-    filesIndexed++;
-    chunksWritten += chunks.length;
-    onProgress?.({
-      phase: "chunk",
-      filesTotal: jobs.length,
-      filesDone,
-      chunksTotal: chunksWritten,
-      message: job.indexRel,
-    });
-  }
+    await store.setMeta(SEARCH_TOKENIZER_META_KEY, tokenizerVersion);
+    await store.setMeta("last_indexed_at", new Date().toISOString());
+    if (embedder) await store.setMeta("embedding_model", embedder.model);
 
-  // Commit lineage from primary root only (skip rewrite when head set unchanged)
-  const commitLimit = Number(process.env.CONTEXTENGINE_COMMIT_LIMIT ?? 80);
-  if (commitLimit > 0) {
     onProgress?.({
-      phase: "write",
+      phase: "done",
       filesTotal: jobs.length,
       filesDone: jobs.length,
       chunksTotal: chunksWritten,
-      message: "Indexing commit lineage…",
+      message: "Index complete",
     });
-    const commits = harvestCommits(config.root, commitLimit);
-    const lineageKey = commits.map((c) => c.hash).join(",");
-    const prevKey = await store.getMeta("commit_lineage_key");
-    if (lineageKey !== prevKey) {
-      const commitChunks = commitsToChunks(commits);
-      await store.transaction(async (tx) => {
-        for (const p of await tx.listFilePaths()) {
-          if (p.startsWith(".git/commits/")) await tx.deleteFile(p);
-        }
-        for (const chunk of commitChunks) {
-          await tx.upsertFile({
-            path: chunk.path,
-            hash: chunk.hash,
-            language: "git-commit",
-            mtimeMs: Date.now(),
-            size: chunk.content.length,
-            rootAlias: "main",
-          });
-          await tx.replaceChunksForFile(chunk.path, [chunk], "main");
-          chunksWritten++;
-        }
-      });
-      await store.setMeta("commit_lineage_key", lineageKey);
+
+    await store.promoteGeneration();
+    const generation = await store.generationStatus();
+    return {
+      filesScanned: jobs.length,
+      filesIndexed,
+      filesRemoved,
+      chunksWritten,
+      embeddingsWritten,
+      durationMs: Date.now() - started,
+      roots: roots.map((r) => r.absPath),
+      generationId: generation.generationId ?? undefined,
+      sourceRevision: generation.sourceRevision,
+      indexedRevision: generation.indexedRevision,
+    };
+  } catch (error) {
+    if (generationStarted) {
+      try {
+        await store.discardGeneration();
+      } catch {
+        // Preserve the original indexing error; failed generations are
+        // harmless and can be cleaned up by a later retention job.
+      }
     }
+    throw error;
+  } finally {
+    await store.close();
   }
-
-  let embeddingsWritten = 0;
-  const embedder = createEmbeddingProvider(config.embeddings);
-  if (embedder) {
-    const embeddingSignature = JSON.stringify({
-      version: EMBEDDING_FORMAT_VERSION,
-      model: embedder.model,
-      dimensions: config.embeddings?.dimensions ?? null,
-      inputType: /^(1|true|yes|on)$/i.test(
-        process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE?.trim() || "",
-      ),
-      maxChars: Number(process.env.CONTEXTENGINE_EMBED_MAX_CHARS || 4000),
-    });
-    const previousSignature = await store.getMeta("embedding_signature");
-    // A legacy index without a signature may contain vectors produced with
-    // different model/query settings, so rebuild it once rather than mixing.
-    if (
-      previousSignature !== embeddingSignature &&
-      (previousSignature || (await store.embeddingCount()) > 0)
-    ) {
-      await store.clearEmbeddings();
-    }
-    const embedded = await embedMissing(
-      store,
-      embedder,
-      onProgress,
-      jobs.length,
-    );
-    embeddingsWritten = embedded.written;
-    if (embedded.dimension) await store.ensureVectorIndex(embedded.dimension);
-    await store.setMeta("embedding_signature", embeddingSignature);
-  }
-
-  await store.setMeta("last_indexed_at", new Date().toISOString());
-  if (embedder) await store.setMeta("embedding_model", embedder.model);
-  await store.close();
-
-  onProgress?.({
-    phase: "done",
-    filesTotal: jobs.length,
-    filesDone: jobs.length,
-    chunksTotal: chunksWritten,
-    message: "Index complete",
-  });
-
-  return {
-    filesScanned: jobs.length,
-    filesIndexed,
-    filesRemoved,
-    chunksWritten,
-    embeddingsWritten,
-    durationMs: Date.now() - started,
-    roots: roots.map((r) => r.absPath),
-  };
 }
 
 /**
@@ -313,10 +376,14 @@ export async function indexVirtualWorkspace(
 ): Promise<IndexResult> {
   const started = Date.now();
   const workspaceId = config.workspaceId ?? config.root;
-  const store = await PostgresStore.open({
+  const baseStore = await PostgresStore.open({
     databaseUrl: requireDatabaseUrl(config),
     workspaceId,
+    lockWorkspace: true,
   });
+  const sourceRevision = options.sourceRevision ?? `sync:${Date.now()}`;
+  let store = baseStore;
+  let generationStarted = false;
   const onProgress = options.onProgress;
   const filesTotal = Math.max(0, options.filesTotal);
   let filesScanned = 0;
@@ -325,6 +392,8 @@ export async function indexVirtualWorkspace(
   let chunksWritten = 0;
 
   try {
+    store = await baseStore.beginGeneration(sourceRevision);
+    generationStarted = true;
     if (options.rebuild) {
       await store.clearWorkspace();
     }
@@ -339,6 +408,9 @@ export async function indexVirtualWorkspace(
         },
       ]),
     );
+    const tokenizerVersion = String(SEARCH_TOKENIZER_VERSION);
+    const tokenizerChanged =
+      (await store.getMeta(SEARCH_TOKENIZER_META_KEY)) !== tokenizerVersion;
 
     onProgress?.({
       phase: "scan",
@@ -352,11 +424,32 @@ export async function indexVirtualWorkspace(
       await store.deleteFile(relPath);
       filesRemoved++;
     }
-
     for await (const document of documents) {
       filesScanned++;
-      if (document.size > config.maxFileBytes) continue;
-      if ((await store.getFileHash(document.path)) === document.hash) {
+      const previousHash = await store.getFileHash(document.path);
+      if (document.indexable === false) {
+        if (previousHash !== null) {
+          await store.deleteFile(document.path);
+          filesRemoved++;
+        }
+        continue;
+      }
+      // The repository supplies the authoritative raw Blob byte length. Keep
+      // the re-encoded length as a lower bound for other virtual-source
+      // callers, while accounting for bytes such as a UTF-8 BOM that the
+      // decoder intentionally strips from `content`.
+      const actualSize = Math.max(
+        document.size,
+        Buffer.byteLength(document.content, "utf8"),
+      );
+      if (actualSize > config.maxFileBytes) {
+        if (previousHash !== null) {
+          await store.deleteFile(document.path);
+          filesRemoved++;
+        }
+        continue;
+      }
+      if (!tokenizerChanged && previousHash === document.hash) {
         onProgress?.({
           phase: "chunk",
           filesTotal,
@@ -377,7 +470,7 @@ export async function indexVirtualWorkspace(
           hash: document.hash,
           language: document.language,
           mtimeMs: document.mtimeMs,
-          size: document.size,
+          size: actualSize,
           rootAlias: document.rootAlias ?? "main",
         });
         await tx.replaceChunksForFile(
@@ -423,6 +516,9 @@ export async function indexVirtualWorkspace(
       await store.setMeta("embedding_model", embedder.model);
     }
 
+    if (options.fullScan || !tokenizerChanged) {
+      await store.setMeta(SEARCH_TOKENIZER_META_KEY, tokenizerVersion);
+    }
     await store.setMeta("last_indexed_at", new Date().toISOString());
     onProgress?.({
       phase: "done",
@@ -432,6 +528,8 @@ export async function indexVirtualWorkspace(
       message: "Index complete",
     });
 
+    await store.promoteGeneration();
+    const generation = await store.generationStatus();
     return {
       filesScanned,
       filesIndexed,
@@ -440,7 +538,19 @@ export async function indexVirtualWorkspace(
       embeddingsWritten,
       durationMs: Date.now() - started,
       roots: [options.rootLabel ?? `remote://${workspaceId}`],
+      generationId: generation.generationId ?? undefined,
+      sourceRevision: generation.sourceRevision,
+      indexedRevision: generation.indexedRevision,
     };
+  } catch (error) {
+    if (generationStarted) {
+      try {
+        await store.discardGeneration();
+      } catch {
+        // Keep the original indexing error.
+      }
+    }
+    throw error;
   } finally {
     await store.close();
   }
@@ -457,11 +567,13 @@ async function embedMissing(
 
   let written = 0;
   let dimension: number | null = null;
+  let afterId: string | undefined;
   const batchSize = 32;
   for (;;) {
     const batch = await store.chunksMissingEmbeddings(
       embedder.model,
       batchSize,
+      afterId,
     );
     if (batch.length === 0) break;
     const texts = batch.map(
@@ -477,12 +589,15 @@ async function embedMissing(
     });
     const vectors = await embedder.embed(texts);
     if (vectors[0]) dimension = vectors[0].length;
-    await store.transaction(async (tx) => {
-      for (let j = 0; j < batch.length; j++) {
-        await tx.upsertEmbedding(batch[j].id, embedder.model, vectors[j]);
-        written++;
-      }
-    });
+    await store.upsertEmbeddings(
+      embedder.model,
+      batch.map((chunk, index) => ({
+        chunkId: chunk.id,
+        vector: vectors[index],
+      })),
+    );
+    written += batch.length;
+    afterId = batch[batch.length - 1].id;
   }
   return { written, dimension };
 }

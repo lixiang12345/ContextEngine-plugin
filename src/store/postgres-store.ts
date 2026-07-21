@@ -1,14 +1,18 @@
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 import pgvector from "pgvector/pg";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { CodeChunk, IndexStats } from "../types.js";
 import { extractSymbolNames } from "../chunker/code-chunker.js";
 import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 const INDEX_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
+const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
+const GENERATION_GC_BATCH = 8;
 
 export interface StoreSearchFilter {
   pathPrefix?: string;
@@ -19,6 +23,8 @@ export interface StoreSearchFilter {
 interface PostgresStoreOptions {
   databaseUrl: string;
   workspaceId: string;
+  /** Hold a cross-process workspace lock for the full indexing operation. */
+  lockWorkspace?: boolean;
 }
 
 interface FileMetadata {
@@ -28,6 +34,48 @@ interface FileMetadata {
   mtimeMs: number;
   size: number;
   rootAlias?: string;
+}
+
+export interface IndexGenerationStatus {
+  generationId: string | null;
+  sourceRevision: string | null;
+  indexedRevision: string | null;
+  pendingRevision: string | null;
+  status: "active" | "building" | "retired" | "failed" | null;
+  updatedAt: string | null;
+}
+
+interface ResolvedGeneration {
+  generationId: string;
+  storageWorkspaceId: string;
+}
+
+function generationRetentionMs(): number {
+  const parsed = Number(process.env.CONTEXTENGINE_GENERATION_RETENTION_MS);
+  if (!Number.isFinite(parsed)) return DEFAULT_GENERATION_RETENTION_MS;
+  return Math.max(60_000, Math.min(7 * 24 * 60 * 60 * 1000, Math.floor(parsed)));
+}
+
+/** Numeric revisions and timestamp-suffixed local scan revisions are ordered. */
+function comparableRevision(value: string | null | undefined): bigint | null {
+  const text = value?.trim();
+  if (!text) return null;
+  const exact = /^\d+$/.test(text) ? text : /:(\d+)$/.exec(text)?.[1];
+  if (!exact) return null;
+  try {
+    return BigInt(exact);
+  } catch {
+    return null;
+  }
+}
+
+export class StaleGenerationError extends Error {
+  constructor(readonly generationRevision: string, readonly currentRevision: string) {
+    super(
+      `Index generation revision ${generationRevision} is older than current revision ${currentRevision}`,
+    );
+    this.name = "StaleGenerationError";
+  }
 }
 
 function rowToChunk(row: {
@@ -114,41 +162,104 @@ export class PostgresStore {
   private static readonly schemaMigrations = new Map<string, Promise<void>>();
 
   readonly databaseUrl: string;
+  /** Physical namespace used by all index tables. */
   readonly workspaceId: string;
+  /** Stable caller-facing workspace id whose active generation is resolved. */
+  readonly logicalWorkspaceId: string;
+  readonly generationId: string;
   private readonly pool: Pool;
   private readonly client: PoolClient | null;
+  private lockClient: PoolClient | null;
+  private lockKey: string | null;
+  private closed = false;
 
   private constructor(
     databaseUrl: string,
     workspaceId: string,
     pool: Pool,
     client: PoolClient | null = null,
+    logicalWorkspaceId = workspaceId,
+    generationId = "legacy",
+    lockClient: PoolClient | null = null,
+    lockKey: string | null = null,
   ) {
     this.databaseUrl = databaseUrl;
     this.workspaceId = workspaceId;
+    this.logicalWorkspaceId = logicalWorkspaceId;
+    this.generationId = generationId;
     this.pool = pool;
     this.client = client;
+    this.lockClient = lockClient;
+    this.lockKey = lockKey;
   }
 
   static async open(options: PostgresStoreOptions): Promise<PostgresStore> {
     const pool = new Pool({
       connectionString: options.databaseUrl,
-      max: Number(process.env.CONTEXTENGINE_PG_POOL_MAX || 8),
+      max: Math.max(2, Number(process.env.CONTEXTENGINE_PG_POOL_MAX || 8) || 8),
     });
-    const store = new PostgresStore(options.databaseUrl, options.workspaceId, pool);
+    let lockClient: PoolClient | null = null;
+    let lockKey: string | null = null;
     try {
       await PostgresStore.ensureMigrated(options.databaseUrl);
+      const bootstrap = new PostgresStore(
+        options.databaseUrl,
+        options.workspaceId,
+        pool,
+      );
+      // Run bounded retention cleanup before taking an indexing lock. This
+      // keeps pool size 1 deployments from deadlocking on their lock session.
+      if (options.workspaceId) {
+        try {
+          await bootstrap.gcGenerations();
+        } catch {
+          // Retention cleanup is best effort and must not make readers fail to
+          // open. A later open will retry the bounded batch.
+        }
+      }
+      if (options.lockWorkspace && options.workspaceId) {
+        const lock = await bootstrap.acquireWorkspaceLock(options.workspaceId);
+        lockClient = lock.client;
+        lockKey = lock.key;
+      }
+      const resolved = options.workspaceId
+        ? await bootstrap.resolveActiveGeneration(options.workspaceId)
+        : {
+            generationId: "legacy",
+            storageWorkspaceId: options.workspaceId,
+          };
+      const store = new PostgresStore(
+        options.databaseUrl,
+        resolved.storageWorkspaceId,
+        pool,
+        null,
+        options.workspaceId,
+        resolved.generationId,
+        lockClient,
+        lockKey,
+      );
       if (options.workspaceId) {
         await store.setMeta("index_version", String(INDEX_VERSION));
       }
+      lockClient = null;
+      lockKey = null;
+      return store;
     } catch (error) {
+      if (lockClient) {
+        try {
+          if (lockKey) {
+            await lockClient.query(`SELECT pg_advisory_unlock($1::bigint)`, [lockKey]);
+          }
+        } finally {
+          lockClient.release();
+        }
+      }
       await pool.end();
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(
         `PostgreSQL + pgvector is required. Set CONTEXTENGINE_DATABASE_URL and enable the vector extension. ${detail}`,
       );
     }
-    return store;
   }
 
   /**
@@ -166,7 +277,7 @@ export class PostgresStore {
 
     const pool = new Pool({
       connectionString: databaseUrl,
-      max: Number(process.env.CONTEXTENGINE_PG_POOL_MAX || 8),
+      max: Math.max(2, Number(process.env.CONTEXTENGINE_PG_POOL_MAX || 8) || 8),
     });
     const store = new PostgresStore(databaseUrl, "", pool);
     const migration = retrySchemaDdl(() => store.migrate(false))
@@ -186,6 +297,21 @@ export class PostgresStore {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    const lockClient = this.lockClient;
+    const lockKey = this.lockKey;
+    this.lockClient = null;
+    this.lockKey = null;
+    if (lockClient) {
+      try {
+        if (lockKey) {
+          await lockClient.query(`SELECT pg_advisory_unlock($1::bigint)`, [lockKey]);
+        }
+      } finally {
+        lockClient.release();
+      }
+    }
     if (!this.client) await this.pool.end();
   }
 
@@ -195,7 +321,14 @@ export class PostgresStore {
     try {
       await client.query("BEGIN");
       const result = await fn(
-        new PostgresStore(this.databaseUrl, this.workspaceId, this.pool, client),
+        new PostgresStore(
+          this.databaseUrl,
+          this.workspaceId,
+          this.pool,
+          client,
+          this.logicalWorkspaceId,
+          this.generationId,
+        ),
       );
       await client.query("COMMIT");
       return result;
@@ -205,6 +338,403 @@ export class PostgresStore {
     } finally {
       client.release();
     }
+  }
+
+  private async acquireWorkspaceLock(
+    logicalWorkspaceId: string,
+  ): Promise<{ client: PoolClient; key: string }> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<{ key: string }>(
+        `SELECT hashtextextended($1, 0)::text AS key`,
+        [logicalWorkspaceId],
+      );
+      const key = result.rows[0]?.key;
+      if (!key) throw new Error("Unable to derive workspace index lock key");
+      await client.query(`SELECT pg_advisory_lock($1::bigint)`, [key]);
+      return { client, key };
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+  }
+
+  /**
+   * Start an isolated copy-on-write generation. Readers continue using the
+   * currently promoted namespace while the caller incrementally mutates the
+   * returned staging store. Promotion is a single alias update.
+   */
+  async beginGeneration(sourceRevision?: string | number | null): Promise<PostgresStore> {
+    if (!this.logicalWorkspaceId) {
+      throw new Error("Cannot create an index generation without a workspace id");
+    }
+    const generationId = randomUUID();
+    const storageWorkspaceId = `${this.logicalWorkspaceId}::generation:${generationId}`;
+    const revision = sourceRevision === undefined || sourceRevision === null
+      ? null
+      : String(sourceRevision);
+
+    await this.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO ce_workspace_generations(
+           id, logical_workspace_id, storage_workspace_id, source_revision,
+           pending_revision, status
+         ) VALUES ($1, $2, $3, $4, $4, 'building')`,
+        [generationId, this.logicalWorkspaceId, storageWorkspaceId, revision],
+      );
+
+      // Copy in foreign-key order. JSON/blob content stays in PostgreSQL and
+      // is never materialized in the indexing process.
+      await tx.query(
+        `INSERT INTO ce_meta(workspace_id, key, value)
+         SELECT $2, key, value FROM ce_meta WHERE workspace_id = $1`,
+        [this.workspaceId, storageWorkspaceId],
+      );
+      await tx.query(
+        `INSERT INTO ce_files(workspace_id, path, hash, language, mtime_ms, size, root_alias)
+         SELECT $2, path, hash, language, mtime_ms, size, root_alias
+         FROM ce_files WHERE workspace_id = $1`,
+        [this.workspaceId, storageWorkspaceId],
+      );
+      await tx.query(
+        `INSERT INTO ce_chunks(
+           workspace_id, id, path, language, start_line, end_line,
+           content, symbol, hash, root_alias, search_vector
+         )
+         SELECT $2, id, path, language, start_line, end_line,
+                content, symbol, hash, root_alias, search_vector
+         FROM ce_chunks WHERE workspace_id = $1`,
+        [this.workspaceId, storageWorkspaceId],
+      );
+      await tx.query(
+        `INSERT INTO ce_embeddings(workspace_id, chunk_id, model, dim, embedding)
+         SELECT $2, chunk_id, model, dim, embedding
+         FROM ce_embeddings WHERE workspace_id = $1`,
+        [this.workspaceId, storageWorkspaceId],
+      );
+      await tx.query(
+        `INSERT INTO ce_symbols(
+           workspace_id, name, name_lower, path, chunk_id, start_line, kind
+         )
+         SELECT $2, name, name_lower, path, chunk_id, start_line, kind
+         FROM ce_symbols WHERE workspace_id = $1`,
+        [this.workspaceId, storageWorkspaceId],
+      );
+      await tx.query(
+        `INSERT INTO ce_imports(workspace_id, source_path, target_spec)
+         SELECT $2, source_path, target_spec
+         FROM ce_imports WHERE workspace_id = $1`,
+        [this.workspaceId, storageWorkspaceId],
+      );
+      await tx.query(
+        `INSERT INTO ce_meta(workspace_id, key, value)
+         VALUES ($1, 'generation_id', $2),
+                ($1, 'source_revision', COALESCE($3, '')),
+                ($1, 'pending_revision', COALESCE($3, ''))
+         ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value`,
+        [storageWorkspaceId, generationId, revision],
+      );
+    });
+
+    // The lock belongs to the full indexing lifecycle, not the bootstrap
+    // reader. Transfer it to the staging store so close() releases it only
+    // after promotion or discard.
+    const lockClient = this.lockClient;
+    const lockKey = this.lockKey;
+    this.lockClient = null;
+    this.lockKey = null;
+    return new PostgresStore(
+      this.databaseUrl,
+      storageWorkspaceId,
+      this.pool,
+      null,
+      this.logicalWorkspaceId,
+      generationId,
+      lockClient,
+      lockKey,
+    );
+  }
+
+  /** Atomically make this staging generation visible to newly opened readers. */
+  async promoteGeneration(): Promise<void> {
+    if (this.generationId === "legacy") return;
+    await this.transaction(async (tx) => {
+      const current = await tx.query<{ generation_id: string }>(
+        `SELECT generation_id
+         FROM ce_workspace_aliases
+         WHERE logical_workspace_id = $1
+         FOR UPDATE`,
+        [this.logicalWorkspaceId],
+      );
+      const oldGeneration = current.rows[0]?.generation_id;
+
+      const target = await tx.query<{
+        status: IndexGenerationStatus["status"];
+        source_revision: string | null;
+        pending_revision: string | null;
+      }>(
+        `SELECT status, source_revision, pending_revision
+         FROM ce_workspace_generations
+         WHERE id = $1
+         FOR UPDATE`,
+        [this.generationId],
+      );
+      const targetRow = target.rows[0];
+      if (!targetRow) {
+        throw new Error(`Index generation not found: ${this.generationId}`);
+      }
+      if (targetRow.status === "active" && oldGeneration === this.generationId) {
+        return;
+      }
+      if (targetRow.status !== "building") {
+        throw new Error(
+          `Index generation ${this.generationId} cannot be promoted from ${targetRow.status}`,
+        );
+      }
+
+      const active = oldGeneration
+        ? await tx.query<{
+            indexed_revision: string | null;
+            source_revision: string | null;
+          }>(
+            `SELECT indexed_revision, source_revision
+             FROM ce_workspace_generations
+             WHERE id = $1`,
+            [oldGeneration],
+          )
+        : { rows: [] };
+      const workspace = await tx.query<{ revision: string | number }>(
+        `SELECT revision
+         FROM ce_workspaces
+         WHERE id = $1
+         FOR SHARE`,
+        [this.logicalWorkspaceId],
+      );
+      const targetRevision = comparableRevision(
+        targetRow.pending_revision ?? targetRow.source_revision,
+      );
+      const activeRevision = comparableRevision(
+        active.rows[0]?.indexed_revision ?? active.rows[0]?.source_revision,
+      );
+      const workspaceRevision = comparableRevision(
+        workspace.rows[0] ? String(workspace.rows[0].revision) : null,
+      );
+      const currentRevision =
+        activeRevision !== null && workspaceRevision !== null
+          ? activeRevision > workspaceRevision
+            ? activeRevision
+            : workspaceRevision
+          : activeRevision ?? workspaceRevision;
+      if (
+        targetRevision !== null &&
+        currentRevision !== null &&
+        targetRevision < currentRevision
+      ) {
+        throw new StaleGenerationError(
+          targetRow.pending_revision ?? targetRow.source_revision ?? "unknown",
+          currentRevision.toString(),
+        );
+      }
+
+      if (oldGeneration && oldGeneration !== this.generationId) {
+        await tx.query(
+          `UPDATE ce_workspace_generations
+           SET status = 'retired', updated_at = now()
+           WHERE id = $1 AND status = 'active'`,
+          [oldGeneration],
+        );
+      }
+      const promoted = await tx.query(
+        `UPDATE ce_workspace_generations
+         SET status = 'active', indexed_revision = pending_revision,
+             pending_revision = NULL, promoted_at = now(), updated_at = now()
+         WHERE id = $1 AND status = 'building'
+         RETURNING id`,
+        [this.generationId],
+      );
+      if (!promoted.rows.length) {
+        throw new Error(`Index generation ${this.generationId} was changed before promotion`);
+      }
+      await tx.query(
+        `INSERT INTO ce_workspace_aliases(logical_workspace_id, generation_id, updated_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT(logical_workspace_id) DO UPDATE SET
+           generation_id = excluded.generation_id, updated_at = now()`,
+        [this.logicalWorkspaceId, this.generationId],
+      );
+      await tx.query(
+        `INSERT INTO ce_meta(workspace_id, key, value)
+         VALUES ($1, 'indexed_revision', COALESCE($2, ''))
+         ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value`,
+        [this.workspaceId, targetRow.pending_revision ?? targetRow.source_revision],
+      );
+    });
+  }
+
+  /** Mark a failed staging generation and remove its searchable rows. */
+  async discardGeneration(): Promise<void> {
+    if (this.generationId === "legacy") return;
+    try {
+      await this.clearWorkspace();
+    } finally {
+      await this.query(
+        `UPDATE ce_workspace_generations
+         SET status = 'failed', pending_revision = NULL, updated_at = now()
+         WHERE id = $1`,
+        [this.generationId],
+      );
+    }
+  }
+
+  /** Return false when this reader is pinned to a retired generation. */
+  async isCurrentGeneration(): Promise<boolean> {
+    if (!this.logicalWorkspaceId) return true;
+    const result = await this.query<{ generation_id: string }>(
+      `SELECT generation_id
+       FROM ce_workspace_aliases
+       WHERE logical_workspace_id = $1`,
+      [this.logicalWorkspaceId],
+    );
+    return result.rows[0]?.generation_id === this.generationId;
+  }
+
+  /**
+   * Remove old staging namespaces after a grace period. Retention is required
+   * because another process may still be serving a reader pinned to the old
+   * alias while it refreshes.
+   */
+  async gcGenerations(
+    retentionMs = generationRetentionMs(),
+    limit = GENERATION_GC_BATCH,
+  ): Promise<number> {
+    if (!this.logicalWorkspaceId) return 0;
+    const boundedLimit = Math.max(1, Math.min(GENERATION_GC_BATCH, Math.floor(limit)));
+    return this.transaction(async (tx) => {
+      const candidates = await tx.query<{
+        id: string;
+        storage_workspace_id: string;
+      }>(
+        `SELECT g.id, g.storage_workspace_id
+         FROM ce_workspace_generations g
+         WHERE g.logical_workspace_id = $1
+           AND g.status IN ('retired', 'failed')
+           AND g.updated_at < now() - ($2::bigint * interval '1 millisecond')
+           AND NOT EXISTS (
+             SELECT 1 FROM ce_workspace_aliases a
+             WHERE a.generation_id = g.id
+           )
+         ORDER BY g.updated_at
+         LIMIT $3
+         FOR UPDATE SKIP LOCKED`,
+        [this.logicalWorkspaceId, Math.max(60_000, Math.floor(retentionMs)), boundedLimit],
+      );
+      for (const candidate of candidates.rows) {
+        // Chunk foreign keys cascade embeddings and symbols; the remaining
+        // tables have no generation FK and must be removed explicitly.
+        await tx.query(`DELETE FROM ce_chunks WHERE workspace_id = $1`, [
+          candidate.storage_workspace_id,
+        ]);
+        await tx.query(`DELETE FROM ce_imports WHERE workspace_id = $1`, [
+          candidate.storage_workspace_id,
+        ]);
+        await tx.query(`DELETE FROM ce_files WHERE workspace_id = $1`, [
+          candidate.storage_workspace_id,
+        ]);
+        await tx.query(`DELETE FROM ce_meta WHERE workspace_id = $1`, [
+          candidate.storage_workspace_id,
+        ]);
+        await tx.query(
+          `DELETE FROM ce_workspace_generations
+           WHERE id = $1 AND status IN ('retired', 'failed')`,
+          [candidate.id],
+        );
+      }
+      return candidates.rows.length;
+    });
+  }
+
+  async generationStatus(): Promise<IndexGenerationStatus> {
+    if (!this.logicalWorkspaceId) {
+      return {
+        generationId: null,
+        sourceRevision: null,
+        indexedRevision: null,
+        pendingRevision: null,
+        status: null,
+        updatedAt: null,
+      };
+    }
+    const result = await this.query<{
+      generation_id: string;
+      source_revision: string | null;
+      indexed_revision: string | null;
+      status: IndexGenerationStatus["status"];
+      updated_at: string;
+      pending_revision: string | null;
+    }>(
+      `SELECT serving.id AS generation_id,
+              serving.source_revision,
+              serving.indexed_revision,
+              serving.status,
+              serving.updated_at,
+              pending.pending_revision
+       FROM ce_workspace_generations serving
+       LEFT JOIN LATERAL (
+         SELECT pending_revision
+         FROM ce_workspace_generations
+         WHERE logical_workspace_id = $1 AND status = 'building'
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) pending ON true
+       WHERE serving.logical_workspace_id = $1 AND serving.id = $2`,
+      [this.logicalWorkspaceId, this.generationId],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return {
+        generationId: this.generationId === "legacy" ? null : this.generationId,
+        sourceRevision: null,
+        indexedRevision: null,
+        pendingRevision: null,
+        status: null,
+        updatedAt: null,
+      };
+    }
+    return {
+      generationId: row.generation_id,
+      sourceRevision: row.source_revision,
+      indexedRevision: row.indexed_revision,
+      pendingRevision: row.pending_revision,
+      status: row.status,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private async resolveActiveGeneration(logicalWorkspaceId: string): Promise<ResolvedGeneration> {
+    const legacyId = `legacy:${logicalWorkspaceId}`;
+    await this.query(
+      `INSERT INTO ce_workspace_generations(
+         id, logical_workspace_id, storage_workspace_id, indexed_revision, status
+       ) VALUES ($1, $2, $2, NULL, 'active')
+       ON CONFLICT (id) DO NOTHING`,
+      [legacyId, logicalWorkspaceId],
+    );
+    await this.query(
+      `INSERT INTO ce_workspace_aliases(logical_workspace_id, generation_id, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (logical_workspace_id) DO NOTHING`,
+      [logicalWorkspaceId, legacyId],
+    );
+    const result = await this.query<ResolvedGeneration>(
+      `SELECT g.id AS "generationId", g.storage_workspace_id AS "storageWorkspaceId"
+       FROM ce_workspace_aliases a
+       JOIN ce_workspace_generations g ON g.id = a.generation_id
+       WHERE a.logical_workspace_id = $1`,
+      [logicalWorkspaceId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error(`Unable to resolve active index generation for ${logicalWorkspaceId}`);
+    return row;
   }
 
   async getMeta(key: string): Promise<string | null> {
@@ -264,15 +794,12 @@ export class PostgresStore {
 
   async deleteFile(relPath: string): Promise<void> {
     await this.query(
-      `DELETE FROM ce_imports WHERE workspace_id = $1 AND source_path = $2`,
-      [this.workspaceId, relPath],
-    );
-    await this.query(
-      `DELETE FROM ce_chunks WHERE workspace_id = $1 AND path = $2`,
-      [this.workspaceId, relPath],
-    );
-    await this.query(
-      `DELETE FROM ce_files WHERE workspace_id = $1 AND path = $2`,
+      `WITH deleted_imports AS (
+         DELETE FROM ce_imports WHERE workspace_id = $1 AND source_path = $2
+       ), deleted_chunks AS (
+         DELETE FROM ce_chunks WHERE workspace_id = $1 AND path = $2
+       )
+       DELETE FROM ce_files WHERE workspace_id = $1 AND path = $2`,
       [this.workspaceId, relPath],
     );
   }
@@ -291,50 +818,74 @@ export class PostgresStore {
       [this.workspaceId, relPath],
     );
 
-    for (const chunk of chunks) {
+    if (chunks.length) {
+      const chunkRows = chunks.map((chunk) => ({
+        id: chunk.id,
+        path: chunk.path,
+        language: chunk.language,
+        start_line: chunk.startLine,
+        end_line: chunk.endLine,
+        content: chunk.content,
+        symbol: chunk.symbol ?? null,
+        hash: chunk.hash,
+        root_alias: rootAlias,
+        search_text: searchText(chunk),
+      }));
       await this.query(
         `INSERT INTO ce_chunks(
            workspace_id, id, path, language, start_line, end_line,
            content, symbol, hash, root_alias, search_vector
          )
-         VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-           to_tsvector('simple', $11)
+         SELECT $1, input.id, input.path, input.language, input.start_line,
+                input.end_line, input.content, input.symbol, input.hash,
+                input.root_alias, to_tsvector('simple', input.search_text)
+         FROM jsonb_to_recordset($2::jsonb) AS input(
+           id TEXT, path TEXT, language TEXT, start_line INTEGER,
+           end_line INTEGER, content TEXT, symbol TEXT, hash TEXT,
+           root_alias TEXT, search_text TEXT
          )`,
-        [
-          this.workspaceId,
-          chunk.id,
-          chunk.path,
-          chunk.language,
-          chunk.startLine,
-          chunk.endLine,
-          chunk.content,
-          chunk.symbol ?? null,
-          chunk.hash,
-          rootAlias,
-          searchText(chunk),
-        ],
+        [this.workspaceId, JSON.stringify(chunkRows)],
       );
 
-      const symbols = new Set<string>([
-        ...(chunk.symbol ? [chunk.symbol] : []),
-        ...extractDefNames(chunk.content, chunk.language),
-      ]);
-      for (const name of symbols) {
+      const symbolRows = new Map<
+        string,
+        {
+          name: string;
+          name_lower: string;
+          path: string;
+          chunk_id: string;
+          start_line: number;
+        }
+      >();
+      for (const chunk of chunks) {
+        const symbols = new Set<string>([
+          ...(chunk.symbol ? [chunk.symbol] : []),
+          ...extractDefNames(chunk.content, chunk.language),
+        ]);
+        for (const name of symbols) {
+          const nameLower = name.toLowerCase();
+          symbolRows.set(`${nameLower}\0${chunk.path}\0${chunk.id}`, {
+            name,
+            name_lower: nameLower,
+            path: chunk.path,
+            chunk_id: chunk.id,
+            start_line: chunk.startLine,
+          });
+        }
+      }
+      if (symbolRows.size) {
         await this.query(
           `INSERT INTO ce_symbols(
              workspace_id, name, name_lower, path, chunk_id, start_line, kind
            )
-           VALUES ($1, $2, $3, $4, $5, $6, 'def')
+           SELECT $1, input.name, input.name_lower, input.path,
+                  input.chunk_id, input.start_line, 'def'
+           FROM jsonb_to_recordset($2::jsonb) AS input(
+             name TEXT, name_lower TEXT, path TEXT, chunk_id TEXT,
+             start_line INTEGER
+           )
            ON CONFLICT(workspace_id, name_lower, path, chunk_id) DO NOTHING`,
-          [
-            this.workspaceId,
-            name,
-            name.toLowerCase(),
-            chunk.path,
-            chunk.id,
-            chunk.startLine,
-          ],
+          [this.workspaceId, JSON.stringify([...symbolRows.values()])],
         );
       }
     }
@@ -345,12 +896,13 @@ export class PostgresStore {
         chunks.map((chunk) => chunk.content).join("\n"),
         chunks[0].language,
       ).slice(0, 256);
-      for (const targetSpec of imports) {
+      if (imports.length) {
         await this.query(
           `INSERT INTO ce_imports(workspace_id, source_path, target_spec)
-           VALUES ($1, $2, $3)
+           SELECT $1, $2, target_spec
+           FROM unnest($3::text[]) AS input(target_spec)
            ON CONFLICT(workspace_id, source_path, target_spec) DO NOTHING`,
-          [this.workspaceId, relPath, targetSpec],
+          [this.workspaceId, relPath, imports],
         );
       }
     }
@@ -657,6 +1209,30 @@ export class PostgresStore {
     );
   }
 
+  async upsertEmbeddings(
+    model: string,
+    items: Array<{ chunkId: string; vector: ArrayLike<number> }>,
+  ): Promise<void> {
+    if (!items.length) return;
+    const rows = items.map(({ chunkId, vector }) => ({
+      chunk_id: chunkId,
+      dim: vector.length,
+      embedding: pgvector.toSql(Array.from(vector)),
+    }));
+    await this.query(
+      `INSERT INTO ce_embeddings(workspace_id, chunk_id, model, dim, embedding)
+       SELECT $1, input.chunk_id, $2, input.dim, input.embedding::vector
+       FROM jsonb_to_recordset($3::jsonb) AS input(
+         chunk_id TEXT, dim INTEGER, embedding TEXT
+       )
+       ON CONFLICT(workspace_id, chunk_id) DO UPDATE SET
+         model = excluded.model,
+         dim = excluded.dim,
+         embedding = excluded.embedding`,
+      [this.workspaceId, model, JSON.stringify(rows)],
+    );
+  }
+
   async embeddingCount(model?: string): Promise<number> {
     const result = await this.query<{ n: string }>(
       model
@@ -708,6 +1284,7 @@ export class PostgresStore {
   async chunksMissingEmbeddings(
     model: string,
     limit = 32,
+    afterId?: string,
   ): Promise<CodeChunk[]> {
     const boundedLimit = Math.max(1, Math.min(Math.floor(limit), 512));
     const result = await this.query<{
@@ -727,10 +1304,12 @@ export class PostgresStore {
          ON e.workspace_id = c.workspace_id
         AND e.chunk_id = c.id
         AND e.model = $2
-       WHERE c.workspace_id = $1 AND e.chunk_id IS NULL
+       WHERE c.workspace_id = $1
+         AND e.chunk_id IS NULL
+         AND ($3::text IS NULL OR c.id > $3)
        ORDER BY c.id
-       LIMIT $3`,
-      [this.workspaceId, model, boundedLimit],
+       LIMIT $4`,
+      [this.workspaceId, model, afterId ?? null, boundedLimit],
     );
     return result.rows.map(rowToChunk);
   }
@@ -760,7 +1339,7 @@ export class PostgresStore {
   }
 
   async stats(root: string): Promise<IndexStats> {
-    const [chunks, files, embeddings, indexedAt, version] = await Promise.all([
+    const [chunks, files, embeddings, indexedAt, version, generation] = await Promise.all([
       this.chunkCount(),
       this.query<{ n: string }>(
         `SELECT COUNT(*)::text AS n FROM ce_files WHERE workspace_id = $1`,
@@ -777,6 +1356,7 @@ export class PostgresStore {
       ),
       this.getMeta("last_indexed_at"),
       this.getMeta("index_version"),
+      this.generationStatus(),
     ]);
     return {
       root,
@@ -788,6 +1368,10 @@ export class PostgresStore {
       lastIndexedAt: indexedAt,
       indexVersion: Number(version ?? INDEX_VERSION),
       hasFts: true,
+      generationId: generation.generationId,
+      sourceRevision: generation.sourceRevision,
+      indexedRevision: generation.indexedRevision,
+      pendingRevision: generation.pendingRevision,
     };
   }
 
@@ -798,8 +1382,40 @@ export class PostgresStore {
       // Extension creation is not race-safe across independent CLI/MCP processes.
       await client.query(`SELECT pg_advisory_lock(${SCHEMA_LOCK_ID})`);
       try {
-        await client.query(`CREATE EXTENSION IF NOT EXISTS vector`);
-        await client.query(`
+        // The schema objects below are unqualified, so only a marker in the
+        // selected schema can prove their DDL has already been applied.
+        const marker = await client.query<{ table_name: string | null }>(
+          `SELECT to_regclass(
+             format('%I.ce_schema_version', current_schema())
+           )::text AS table_name`,
+        );
+        let schemaVersion = 0;
+        if (marker.rows[0]?.table_name) {
+          const version = await client.query<{ version: number | string }>(
+            `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
+          );
+          const parsedVersion = Number(version.rows[0]?.version ?? 0);
+          if (!Number.isInteger(parsedVersion) || parsedVersion < 0) {
+            throw new Error("ContextEngine database schema marker is invalid.");
+          }
+          schemaVersion = parsedVersion;
+        }
+
+        if (schemaVersion > SCHEMA_VERSION) {
+          throw new Error(
+            `ContextEngine database schema version ${schemaVersion} is newer than this build (${SCHEMA_VERSION}). Upgrade ContextEngine or use a compatible database.`,
+          );
+        }
+
+        if (schemaVersion < 1) {
+          await client.query(`CREATE EXTENSION IF NOT EXISTS vector`);
+          await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_schema_version (
+        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+        version INTEGER NOT NULL CHECK (version > 0),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
       CREATE TABLE IF NOT EXISTS ce_meta (
         workspace_id TEXT NOT NULL,
         key TEXT NOT NULL,
@@ -882,6 +1498,30 @@ export class PostgresStore {
       CREATE INDEX IF NOT EXISTS ce_imports_target_idx
         ON ce_imports(workspace_id, target_spec);
 
+      -- A logical workspace points at one immutable searchable generation.
+      -- Staging generations are copied and populated before promotion, so a
+      -- failed or in-flight rebuild never exposes a partial index.
+      CREATE TABLE IF NOT EXISTS ce_workspace_generations (
+        id TEXT PRIMARY KEY,
+        logical_workspace_id TEXT NOT NULL,
+        storage_workspace_id TEXT NOT NULL UNIQUE,
+        source_revision TEXT,
+        indexed_revision TEXT,
+        pending_revision TEXT,
+        status TEXT NOT NULL CHECK (status IN ('active', 'building', 'retired', 'failed')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        promoted_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS ce_workspace_generations_logical_idx
+        ON ce_workspace_generations(logical_workspace_id, status, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS ce_workspace_aliases (
+        logical_workspace_id TEXT PRIMARY KEY,
+        generation_id TEXT NOT NULL REFERENCES ce_workspace_generations(id),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
       CREATE TABLE IF NOT EXISTS ce_workspaces (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -957,6 +1597,166 @@ export class PostgresStore {
       CREATE INDEX IF NOT EXISTS ce_index_jobs_workspace_idx
         ON ce_index_jobs(workspace_id, created_at DESC);
         `);
+          await client.query(
+            `INSERT INTO ce_schema_version(singleton, version)
+             VALUES (TRUE, $1)
+             ON CONFLICT(singleton) DO UPDATE
+             SET version = excluded.version, updated_at = now()`,
+            [1],
+          );
+        }
+        if (schemaVersion < 2) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_workspace_acl (
+        workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+        principal_id TEXT NOT NULL,
+        permission TEXT NOT NULL CHECK (permission IN ('reader', 'writer', 'owner')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (workspace_id, principal_id)
+      );
+      CREATE INDEX IF NOT EXISTS ce_workspace_acl_principal_idx
+        ON ce_workspace_acl(principal_id, workspace_id);
+
+      -- Blob bytes remain globally deduplicated, but possession is scoped to a
+      -- workspace. A hash from another tenant is never sufficient proof that a
+      -- caller may attach or read that Blob.
+      CREATE TABLE IF NOT EXISTS ce_workspace_blob_grants (
+        workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+        blob_hash TEXT NOT NULL REFERENCES ce_source_blobs(hash) ON DELETE CASCADE,
+        granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (workspace_id, blob_hash)
+      );
+      INSERT INTO ce_workspace_blob_grants(workspace_id, blob_hash)
+      SELECT DISTINCT workspace_id, blob_hash
+      FROM ce_workspace_sources
+      ON CONFLICT DO NOTHING;
+
+      CREATE TABLE IF NOT EXISTS ce_connector_sources (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL UNIQUE REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL CHECK (provider IN ('github')),
+        external_id TEXT NOT NULL,
+        config JSONB NOT NULL DEFAULT '{}'::jsonb,
+        cursor JSONB,
+        cursor_version BIGINT NOT NULL DEFAULT 0,
+        sync_attempt_id TEXT,
+        lease_expires_at TIMESTAMPTZ,
+        upstream_revision TEXT,
+        status TEXT NOT NULL DEFAULT 'idle'
+          CHECK (status IN ('idle', 'syncing', 'ready', 'error')),
+        last_error TEXT,
+        last_synced_at TIMESTAMPTZ,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS ce_connector_sources_provider_idx
+        ON ce_connector_sources(provider, external_id);
+
+      CREATE TABLE IF NOT EXISTS ce_connector_files (
+        source_id TEXT NOT NULL REFERENCES ce_connector_sources(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        remote_revision TEXT NOT NULL,
+        content_hash TEXT,
+        bytes BIGINT NOT NULL,
+        PRIMARY KEY (source_id, path)
+      );
+          `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [2],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 3) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      ALTER TABLE ce_connector_sources
+        ADD COLUMN IF NOT EXISTS sync_attempt_id TEXT,
+        ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [3],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 4) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      -- Block terminal writes from already-running v3 workers until the guard
+      -- below is committed. This lock is deliberately acquired before any
+      -- ce_sync_sessions DDL that may wait on a large or busy table.
+      LOCK TABLE ce_connector_sources IN SHARE ROW EXCLUSIVE MODE;
+      CREATE OR REPLACE FUNCTION ce_guard_connector_sync_transition()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $function$
+      BEGIN
+        IF OLD.status = 'syncing'
+           AND NEW.status IN ('ready', 'error')
+           AND OLD.sync_attempt_id IS NOT NULL
+           AND NEW.sync_attempt_id IS NOT NULL THEN
+          RAISE EXCEPTION
+            'Connector synchronization completion must clear the active attempt token'
+            USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+      END;
+      $function$;
+
+      DROP TRIGGER IF EXISTS ce_connector_sync_transition_guard
+        ON ce_connector_sources;
+      CREATE TRIGGER ce_connector_sync_transition_guard
+        BEFORE UPDATE ON ce_connector_sources
+        FOR EACH ROW
+        EXECUTE FUNCTION ce_guard_connector_sync_transition();
+
+      ALTER TABLE ce_sync_sessions
+        ADD COLUMN IF NOT EXISTS connector_source_id TEXT,
+        ADD COLUMN IF NOT EXISTS connector_attempt_id TEXT;
+      ALTER TABLE ce_sync_sessions
+        ADD CONSTRAINT ce_sync_sessions_connector_source_fk
+          FOREIGN KEY (connector_source_id)
+          REFERENCES ce_connector_sources(id) ON DELETE CASCADE,
+        ADD CONSTRAINT ce_sync_sessions_connector_attempt_pair_check
+          CHECK ((connector_source_id IS NULL) = (connector_attempt_id IS NULL));
+      CREATE INDEX IF NOT EXISTS ce_sync_sessions_connector_attempt_idx
+        ON ce_sync_sessions(connector_source_id, connector_attempt_id)
+        WHERE connector_source_id IS NOT NULL;
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [4],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
         if (setIndexVersion && this.workspaceId) {
           await client.query(
             `INSERT INTO ce_meta(workspace_id, key, value)

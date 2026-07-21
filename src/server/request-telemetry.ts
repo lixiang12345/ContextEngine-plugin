@@ -49,12 +49,55 @@ function percentile(values: number[], ratio: number): number {
   return rounded(sorted[index]);
 }
 
+const STATIC_ROUTES = new Set([
+  "/",
+  "/dashboard",
+  "/favicon.ico",
+  "/health",
+  "/openapi.json",
+  "/docs",
+  "/v1/capabilities",
+  "/v1/observability/overview",
+  "/v1/observability/configuration",
+  "/v1/observability/configuration/test",
+  "/v1/workspaces",
+  "/v1/blobs:batch",
+]);
+
+const OBSERVABLE_METHODS = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+]);
+
 export function observableRoute(pathname: string): string {
   if (/^\/v1\/workspaces\/[^/]+\/sync\/plan$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/sync/plan";
   }
   if (/^\/v1\/workspaces\/[^/]+\/sync\/commit$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/sync/commit";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/acl$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/acl";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/acl\/[^/]+$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/acl/{principalId}";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/sources$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/sources";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/sources\/github$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/sources/github";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/sources\/[^/]+\/sync$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/sources/{sourceId}/sync";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/sources\/[^/]+$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/sources/{sourceId}";
   }
   if (/^\/v1\/workspaces\/[^/]+\/index-jobs$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/index-jobs";
@@ -74,7 +117,8 @@ export function observableRoute(pathname: string): string {
   if (/^\/v1\/blobs\/[0-9a-fA-F]{64}$/.test(pathname)) {
     return "/v1/blobs/{sha256}";
   }
-  return pathname;
+  if (STATIC_ROUTES.has(pathname)) return pathname;
+  return "/{unmatched}";
 }
 
 export class RequestTelemetry {
@@ -106,7 +150,10 @@ export class RequestTelemetry {
   ): void {
     this.active = Math.max(0, this.active - 1);
     const durationMs = Math.max(0, Date.now() - timing.startedAtMs);
-    const normalizedMethod = method?.toUpperCase() || "GET";
+    const requestedMethod = method?.toUpperCase() || "GET";
+    const normalizedMethod = OBSERVABLE_METHODS.has(requestedMethod)
+      ? requestedMethod
+      : "OTHER";
     const route = observableRoute(pathname);
     const observation: RequestObservation = {
       id: ++this.sequence,

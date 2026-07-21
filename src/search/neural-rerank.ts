@@ -32,6 +32,7 @@ export interface NeuralDoc {
 }
 
 export interface NeuralRerankRequestOptions {
+  signal?: AbortSignal;
   timeoutMs?: number;
   retries?: number;
   requireScores?: boolean;
@@ -147,6 +148,7 @@ export async function neuralRerankScores(
     label: "Rerank API",
     apiKey: config.apiKey,
     body,
+    signal: options.signal,
     timeoutMs: options.timeoutMs,
     retries: options.retries,
   });

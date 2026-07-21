@@ -83,7 +83,8 @@ claude mcp add contextengine -- node /absolute/path/to/ContextEngine-plugin/dist
       "args": ["/absolute/path/to/ContextEngine-plugin/dist/mcp-server.js"],
       "env": {
         "CONTEXTENGINE_ROOT": "/absolute/path/to/your/repo",
-        "CONTEXTENGINE_AUTO_INDEX": "1"
+        "CONTEXTENGINE_AUTO_INDEX": "1",
+        "CONTEXTENGINE_MCP_WATCH": "1"
       }
     }
   }
@@ -186,13 +187,19 @@ contextengine search "how does authentication work" --mode auto
 
 | Tool | When to use |
 |------|-------------|
-| `get_task_context` / `codebase_retrieval` | First call for a coding task (packed hits under token budget) |
+| `codebase-retrieval` / `codebase_retrieval` / `get_task_context` | Augment-compatible first call for a coding task (packed hits under token budget) |
 | `codebase_search` | Follow-up / narrower queries |
 | `get_file_context` | Read a known path / line range |
 | `index_status` | Stats |
 | `reindex_workspace` | After large refactors if auto-index is off |
 
 Tip: **retrieve → edit**, not grep-loop.
+
+The MCP watcher is enabled by default and monitors the workspace plus any
+`CONTEXTENGINE_EXTRA_ROOTS` (`name:path,name:path`) entries. It debounces file
+changes and refreshes the search index. Set `CONTEXTENGINE_MCP_WATCH=0` to
+disable it; when disabled, `CONTEXTENGINE_AUTO_INDEX=1` controls first-use
+index creation if no index exists.
 
 Templates:
 
@@ -207,10 +214,14 @@ Templates:
 | Variable | Purpose |
 |----------|---------|
 | `CONTEXTENGINE_ROOT` | Workspace root for MCP |
+| `CONTEXTENGINE_EXTRA_ROOTS` | Optional comma-separated `name:path` roots to index and watch |
 | `CONTEXTENGINE_DATABASE_URL` / `DATABASE_URL` | Required PostgreSQL connection URL |
 | `CONTEXTENGINE_DATA_DIR` | Legacy SQLite directory used only by `migrate-sqlite` |
 | `CONTEXTENGINE_AUTO_INDEX` | `1` = index on first MCP use if missing |
+| `CONTEXTENGINE_MCP_WATCH` | MCP watcher; enabled by default, `0`/`false` disables |
 | `CONTEXTENGINE_COMMIT_LIMIT` | Recent commits to index (default `80`, `0` = off) |
+| `CONTEXTENGINE_SEARCH_SEMANTIC_TIMEOUT_MS` / `_RERANK_TIMEOUT_MS` | Per-query model timeout budgets (default `2000` ms) |
+| `CONTEXTENGINE_SEARCH_BREAKER_FAILURE_THRESHOLD` / `_COOLDOWN_MS` | Model circuit threshold/cooldown (default `3` / `30000` ms) |
 | `CONTEXTENGINE_EXCLUDE` | Extra ignore globs |
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | Enable embeddings |
 | `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API origin or `/v1` base; both forms are accepted |

@@ -86,7 +86,27 @@ export function login(user: string, password: string) {
       (await store.chunksMissingEmbeddings(missingModel, 2)).length,
       Math.min(2, missingCount),
     );
-    await store.close();
+
+    const activeGeneration = await store.generationStatus();
+    assert.ok(activeGeneration.generationId);
+    assert.ok(activeGeneration.indexedRevision);
+    const failedStaging = await store.beginGeneration("failed-test-revision");
+    await failedStaging.clearWorkspace();
+    await failedStaging.discardGeneration();
+    // The staging store shares the indexing pool; close it once after the
+    // simulated failure and reopen through the logical workspace alias.
+    await failedStaging.close();
+
+    const retainedStore = await PostgresStore.open({
+      databaseUrl,
+      workspaceId: root,
+    });
+    assert.equal(await retainedStore.chunkCount(), stats.chunkCount);
+    assert.equal(
+      (await retainedStore.generationStatus()).generationId,
+      activeGeneration.generationId,
+    );
+    await retainedStore.close();
 
     const hits = await engine.search({
       query: "stripe payment charge",

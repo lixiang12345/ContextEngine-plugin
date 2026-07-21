@@ -45,6 +45,7 @@ export {
 } from "./indexer/indexer.js";
 export { watchAndIndex } from "./indexer/watch.js";
 export { PostgresStore } from "./store/postgres-store.js";
+export type { IndexGenerationStatus } from "./store/postgres-store.js";
 export {
   WorkspaceRepository,
   WorkspaceNotFoundError,
@@ -60,6 +61,13 @@ export { buildSymbolGraph, expandViaGraph } from "./graph/symbol-graph.js";
 export { harvestCommits, commitsToChunks, isGitRepo } from "./lineage/commits.js";
 export { runEval, defaultSelfEvalCases } from "./eval/harness.js";
 export {
+  formatPrEvalReportMarkdown,
+  loadPrEvalSuite,
+  parsePrEvalSuite,
+  runPrEvalCommand,
+  runPrEvalSuite,
+} from "./eval/pr-harness.js";
+export {
   loadProfiles,
   saveProfiles,
   upsertProfile,
@@ -71,6 +79,28 @@ export type {
   EvalCaseResult,
   EvalReport,
 } from "./eval/harness.js";
+export type {
+  PreparedPrContext,
+  PrEvalAgentConfig,
+  PrEvalAgentUsage,
+  PrEvalCase,
+  PrEvalCommandResult,
+  PrEvalComparison,
+  PrEvalContextConfig,
+  PrEvalContextMode,
+  PrEvalContextProvider,
+  PrEvalContextProviderInput,
+  PrEvalIsolationMode,
+  PrEvalPatchStats,
+  PrEvalProgress,
+  PrEvalReport,
+  PrEvalRunResult,
+  PrEvalRunStatus,
+  PrEvalSuite,
+  PrEvalVariant,
+  PrEvalVariantSummary,
+  RunPrEvalOptions,
+} from "./eval/pr-harness.js";
 export type { RepoProfile, MultiRepoConfig } from "./config/profiles.js";
 export type { AnalyzedQuery, QueryIntent } from "./search/query-analyzer.js";
 
@@ -90,6 +120,7 @@ export type {
   VirtualIndexOptions,
   VirtualSourceDocument,
 } from "./indexer/indexer.js";
+export type { WatchHandle, WatchOptions } from "./indexer/watch.js";
 export type {
   HttpServerHandle,
   HttpServerOptions,
@@ -97,10 +128,17 @@ export type {
 export type {
   IndexJobMode,
   IndexJobStatus,
+  ConnectorProvider,
+  ConnectorSyncAttempt,
+  ConnectorSyncCommit,
+  ConnectorSyncLease,
   StoredIndexJob,
+  StoredConnectorFile,
+  StoredConnectorSource,
   StoredSourceDocument,
   StoredWorkspace,
   SyncChange,
   SyncOperation,
+  WorkspacePermission,
   WorkspaceSourceMode,
 } from "./server/workspace-repository.js";

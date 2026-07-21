@@ -48,9 +48,9 @@ Most coding agents explore large repos with repeated `grep` / `find` tool calls.
 | Multi-root | Code + docs/extra repos in one index |
 | Commit lineage | Recent git history chunks |
 | Watch mode | Debounced incremental re-index |
-| MCP | `codebase_retrieval` (primary) + search/file/index tools |
+| MCP | `codebase-retrieval` (Augment-compatible; `codebase_retrieval` legacy alias) + search/file/index tools |
 | HTTP | Authenticated workspace sync, index jobs, retrieval, and SSE progress |
-| Eval | Recall@k, **MRR**, **nDCG@k** |
+| Eval | Recall/MRR/nDCG plus repeated paired PR runs and a fixed historical corpus |
 
 **Honest comparison with Augment:** [COMPARISON.md](./COMPARISON.md) · **Design:** [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -206,6 +206,10 @@ Environment (optional):
 ```bash
 export CONTEXTENGINE_ROOT=/path/to/repo
 export CONTEXTENGINE_AUTO_INDEX=1
+# MCP watcher is enabled by default; set to 0 to disable it.
+export CONTEXTENGINE_MCP_WATCH=1
+# Optional: comma-separated alias:path roots, e.g. docs:/path/to/docs
+export CONTEXTENGINE_EXTRA_ROOTS=docs:/path/to/docs
 export OPENAI_API_KEY=...
 ```
 
@@ -224,6 +228,7 @@ Set `cwd` to the workspace you want indexed (or set `CONTEXTENGINE_ROOT`).
 
 | Tool | Purpose |
 |------|---------|
+| `codebase-retrieval` / `codebase_retrieval` | Augment-compatible packed retrieval (call first) |
 | `codebase_search` | Hybrid search → path, lines, symbol, content |
 | `get_task_context` | Pack ranked chunks under a token budget |
 | `get_file_context` | Read a file / line range |
@@ -231,6 +236,12 @@ Set `cwd` to the workspace you want indexed (or set `CONTEXTENGINE_ROOT`).
 | `reindex_workspace` | Incremental re-index |
 
 **Agent tip:** call `get_task_context` first, then edit. Use `codebase_search` for follow-up queries.
+
+The MCP server watches the workspace root and configured `CONTEXTENGINE_EXTRA_ROOTS`
+by default, then incrementally refreshes retrieval after debounced file changes.
+Set `CONTEXTENGINE_MCP_WATCH=0` (also accepts `false`, `off`, or `no`) to disable
+the watcher. With the watcher disabled, `CONTEXTENGINE_AUTO_INDEX=1` controls
+whether a missing index is built on the first MCP request.
 
 ---
 
@@ -251,6 +262,13 @@ contextengine-http
 # all /v1 routes use Authorization: Bearer <key>
 ```
 
+MCP-capable remote clients can use the Streamable HTTP endpoint
+`/v1/workspaces/{workspaceId}/mcp` with the same Bearer key. The first request is
+`initialize`, which returns an `mcp-session-id`; subsequent requests expose the
+canonical `codebase-retrieval` tool for that workspace. See
+[docs/HTTP_API.md](./docs/HTTP_API.md#remote-mcp-over-streamable-http) for the
+wire example and deployment constraints.
+
 ### Docker Compose
 
 The repository includes a multi-stage production image and a complete Compose
@@ -262,9 +280,10 @@ docker compose up -d --build
 docker compose ps
 ```
 
-The dashboard is published at `http://127.0.0.1:8790/dashboard` by default.
-Embedding and rerank variables from `.env` are passed into the application
-container. PostgreSQL and the HTTP runtime use named volumes, so a normal
+The dashboard is published at `http://127.0.0.1:8790/dashboard` by default and
+the host binding is loopback-only. Set `CONTEXTENGINE_DOCKER_HTTP_BIND_HOST=0.0.0.0`
+only for a trusted remote deployment. Embedding and rerank variables from `.env`
+are passed into the application container. PostgreSQL and the HTTP runtime use named volumes, so a normal
 `docker compose down` preserves indexed data. Use `docker compose down -v` only
 when the database and runtime data should be deleted.
 
@@ -286,6 +305,12 @@ no separate frontend build or deployment.
 
 Core endpoints are workspace create/list, `/sync/plan`, `PUT /blobs/{sha256}`,
 `/sync/commit`, `/index-jobs`, `/search`, `/context`, and `/file`.
+
+Multi-principal Bearer keys can enforce `reader`, `writer`, and `owner`
+permissions per workspace. A read-only GitHub connector can attach one
+repository to an empty Blob workspace, synchronize it incrementally, and expose
+source status in the dashboard. See `CONTEXTENGINE_HTTP_API_KEYS`,
+`CONTEXTENGINE_GITHUB_TOKEN`, and the connector/ACL routes in the HTTP API guide.
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).
@@ -323,13 +348,20 @@ explicitly need a smaller packed payload; omitting it returns all selected hits.
 |-----|---------|
 | `CONTEXTENGINE_DATABASE_URL` / `DATABASE_URL` | **Required** PostgreSQL connection URL; pgvector is enabled automatically |
 | `CONTEXTENGINE_ROOT` | Workspace root for MCP |
+| `CONTEXTENGINE_EXTRA_ROOTS` | Optional comma-separated `name:path` roots indexed and watched with the workspace |
 | `CONTEXTENGINE_DATA_DIR` | Legacy SQLite directory used only by `migrate-sqlite` |
 | `CONTEXTENGINE_AUTO_INDEX` | `1` = index on first MCP use if missing |
+| `CONTEXTENGINE_MCP_WATCH` | MCP file watcher; enabled by default, `0`/`false` disables |
 | `CONTEXTENGINE_HTTP_API_KEY` | Required Bearer key for HTTP service |
 | `CONTEXTENGINE_HTTP_HOST` / `_PORT` | HTTP bind address and port |
 | `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES` | Max bytes per synced source Blob (default 2 MiB) |
+| `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` | Remote MCP idle session lifetime (default 30 minutes) |
+| `CONTEXTENGINE_MCP_MAX_SESSIONS` | Remote MCP session cap per HTTP process (default 128) |
 | `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | Allow server-local workspace roots (default off) |
+| `CONTEXTENGINE_HTTP_ALLOW_PRIVATE_MODEL_URLS` | Permit runtime model URLs on private/local networks in trusted deployments (default off) |
 | `CONTEXTENGINE_COMMIT_LIMIT` | How many recent commits to index (default `80`, `0` = off) |
+| `CONTEXTENGINE_SEARCH_SEMANTIC_TIMEOUT_MS` / `_RERANK_TIMEOUT_MS` | Per-query model budgets (default `2000` ms); lexical fallback remains available |
+| `CONTEXTENGINE_SEARCH_BREAKER_FAILURE_THRESHOLD` / `_COOLDOWN_MS` | Model circuit-breaker threshold/cooldown (default `3` / `30000` ms) |
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | Enable embeddings |
 | `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API base |
 | `OPENAI_EMBEDDING_MODEL` / `CONTEXTENGINE_EMBEDDING_MODEL` | Model name |
@@ -406,11 +438,43 @@ contextengine eval --cases examples/eval.sample.json --root /path/to/repo
 # Mid-size practice (Express 4.x layout) — IR metrics + incremental timing
 # git clone --depth 1 --branch 4.21.2 https://github.com/expressjs/express.git /tmp/express4
 node scripts/practice-eval.mjs --root /tmp/express4 --cases examples/eval.express.json
+
+# Paired agent PR evaluation (manifest commands require explicit approval)
+contextengine eval-pr \
+  --manifest /path/to/pr-suite.json \
+  --allow-exec \
+  --out eval-results/pr-suite.json \
+  --markdown eval-results/pr-suite.md
+
+# Fixed-corpus CI oracle gate: apply each test patch, then base must fail and gold must pass.
+# This does not invoke an agent. Run from a full source Git clone.
+npm run eval:pr:corpus:validate
+
+# Full fixed-corpus run: requires PostgreSQL and a real agent-wrapper.
+# The package script deliberately includes --allow-exec; review its manifest first.
+docker compose up -d postgres
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine
+npm run eval:pr:corpus
 ```
 
-Practice report (methodology + multi-repo suite + watch): **[EVALUATION.md](./EVALUATION.md)**.  
-Code embedding model choices: **[docs/EMBEDDINGS.md](./docs/EMBEDDINGS.md)**.  
-GPU embed + rerank deploy: **[docs/DEPLOY_EMBED_RERANK.md](./docs/DEPLOY_EMBED_RERANK.md)**.  
+Practice report (methodology + multi-repo suite + watch): **[EVALUATION.md](./EVALUATION.md)**.
+
+PR-level harness, manifest, isolation, and agent metrics: **[docs/PR_EVAL.md](./docs/PR_EVAL.md)**.
+
+The V1 runner supplies repetition-aware orchestration, deterministic test/report
+plumbing, and a three-case fixed historical corpus. It records raw task,
+exact-agent-prompt, and context hashes; reports resolved base/gold commits; and
+compares every `none x packed` variant pair. Baseline oracle setup uses a
+separate sanitized workspace, so ignored artifacts cannot cross into the agent
+workspace. The corpus must run from a full Git clone and needs both PostgreSQL
+and an `agent-wrapper`. Broad public corpus results, controlled real-model runs,
+and Augment-comparable quality results have not been published yet. Its
+`testPatch` visibility rules are repository-level safeguards, not an OS security
+boundary.
+
+Code embedding model choices: **[docs/EMBEDDINGS.md](./docs/EMBEDDINGS.md)**.
+
+GPU embed + rerank deploy: **[docs/DEPLOY_EMBED_RERANK.md](./docs/DEPLOY_EMBED_RERANK.md)**.
 Multi-language IR metrics: **[docs/MULTILANG_BENCH.md](./docs/MULTILANG_BENCH.md)**.
 
 ```bash
@@ -468,7 +532,7 @@ npm run mcp
 - PostgreSQL FTS + symbol + path multi-signal retrieval
 - Query analyzer, feature rerank, MMR pack
 - Multi-root / docs roots
-- `codebase_retrieval` MCP tool
+- `codebase-retrieval` MCP tool (`codebase_retrieval` legacy alias)
 - MRR + nDCG metrics
 
 ---
@@ -482,10 +546,12 @@ We are an **open portable component**, not a full commercial context platform.
 | Custom code retrieval models | ❌ BYO embeddings | ✅ |
 | Multi-source (docs/wikis/org) | ❌ | ✅ |
 | Monorepo / enterprise scale | ⚠️ medium | ✅ |
+| Published agent PR benchmark | ⚠️ fixed internal corpus, no real-model result | ✅ |
 | Open source / offline | ✅ | ❌ product |
 | MCP + hybrid search | ✅ | ✅ |
 
-Details: **[COMPARISON.md](./COMPARISON.md)**.
+Details: **[COMPARISON.md](./COMPARISON.md)** ·
+**[2026 Augment alignment audit](./docs/AUGMENT_ALIGNMENT.md)**.
 
 ## Design notes
 

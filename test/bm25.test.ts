@@ -11,6 +11,18 @@ describe("tokenize", () => {
     assert.ok(tokens.includes("api"));
     assert.ok(tokens.includes("payments"));
   });
+
+  it("keeps Unicode words and segments CJK text", () => {
+    assert.deepEqual(tokenize("用户权限校验"), [
+      "用户",
+      "户权",
+      "权限",
+      "限校",
+      "校验",
+    ]);
+    assert.deepEqual(tokenize("поиск обработчика"), ["поиск", "обработчика"]);
+    assert.deepEqual(tokenize("détecter erreur"), ["detecter", "erreur"]);
+  });
 });
 
 describe("Bm25Index", () => {

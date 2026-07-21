@@ -104,6 +104,31 @@ describe("remote model providers", () => {
     }
   });
 
+  it("does not follow model endpoint redirects", async () => {
+    let redirectedRequests = 0;
+    const origin = await listen((req, res) => {
+      if (req.url === "/v1/embeddings") {
+        res.statusCode = 307;
+        res.setHeader("location", "/private-target");
+        res.end();
+        return;
+      }
+      redirectedRequests++;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }));
+    });
+    const provider = new OpenAICompatibleEmbeddings(
+      {
+        baseUrl: origin,
+        model: "test-embedding",
+      },
+      { retries: 0 },
+    );
+
+    await assert.rejects(() => provider.embed(["redirect"]), /fetch failed/i);
+    assert.equal(redirectedRequests, 0);
+  });
+
   it("reranks through an origin URL", async () => {
     const origin = await listen((req, res) => {
       assert.equal(req.url, "/v1/rerank");

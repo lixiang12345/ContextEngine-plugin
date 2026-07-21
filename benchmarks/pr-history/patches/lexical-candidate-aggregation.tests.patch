@@ -1,0 +1,116 @@
+diff --git a/test/pr-history-lexical-candidate-aggregation.test.ts b/test/pr-history-lexical-candidate-aggregation.test.ts
+new file mode 100644
+--- /dev/null
++++ b/test/pr-history-lexical-candidate-aggregation.test.ts
+@@ -0,0 +1,111 @@
++import { describe, it } from "node:test";
++import assert from "node:assert/strict";
++import { HybridSearcher } from "../src/search/hybrid.js";
++import { mmrSelect } from "../src/search/rerank.js";
++import type { SqliteStore } from "../src/store/sqlite-store.js";
++import type { CodeChunk } from "../src/types.js";
++
++function chunk(
++  id: string,
++  filePath: string,
++  content: string,
++  symbol?: string,
++): CodeChunk {
++  return {
++    id,
++    path: filePath,
++    language: "kotlin",
++    startLine: 1,
++    endLine: 20,
++    content,
++    symbol,
++    hash: id,
++  };
++}
++
++describe("historical lexical candidate aggregation regression", () => {
++  it("keeps cross-chunk file evidence in the lexical candidate pool", async () => {
++    const distractors = Array.from({ length: 70 }, (_, index) =>
++      chunk(
++        `distractor-${index}`,
++        `src/Distractor${index}.kt`,
++        "consume backend event handler",
++        `Distractor${index}`,
++      ),
++    );
++    const clientChunks = [
++      chunk(
++        "remote-client-events",
++        "src/RemoteAgentClient.kt",
++        "consume backend SSE agent events from the response stream",
++        "readEvents",
++      ),
++      chunk(
++        "remote-client-tools",
++        "src/RemoteAgentClient.kt",
++        "submit tool results for continuation of the remote run",
++        "submitToolResult",
++      ),
++    ];
++    const chunks = [...distractors, ...clientChunks];
++    const orderedHits = chunks.map((item, index) => ({
++      id: item.id,
++      score: chunks.length - index,
++    }));
++    const store = {
++      hasFts: true,
++      ftsSearch: (_query: string, limit: number) => orderedHits.slice(0, limit),
++      searchSymbols: () => [],
++      searchByPathHints: () => [],
++    } as unknown as SqliteStore;
++
++    const searcher = new HybridSearcher();
++    searcher.load({ chunks, store });
++    const hits = await searcher.search({
++      query: "consume backend SSE agent events and submit tool results for continuation",
++      mode: "bm25",
++      topK: 8,
++      diversify: false,
++      expandGraph: false,
++    });
++
++    assert.ok(
++      hits.some((hit) => hit.chunk.path === "src/RemoteAgentClient.kt"),
++      "the target file should survive retrieval and file-level aggregation",
++    );
++    assert.equal(new Set(hits.map((hit) => hit.chunk.path)).size, hits.length);
++  });
++
++  it("does not over-penalize files in the same deep package", () => {
++    const candidate = (id: string, filePath: string, final: number) => ({
++      id,
++      chunk: {
++        id,
++        path: filePath,
++        language: "kotlin",
++        startLine: 1,
++        endLine: 2,
++        content: "x",
++        hash: id,
++      },
++      channels: {},
++      rrf: final,
++      features: final,
++      final,
++    });
++    const ranked = [
++      candidate("orchestrator", "src/main/kotlin/com/example/agent/AgentOrchestrator.kt", 1),
++      candidate("client", "src/main/kotlin/com/example/agent/RemoteAgentClient.kt", 0.9),
++      candidate("frontend", "frontend/src/App.svelte", 0.8),
++    ];
++
++    const selected = mmrSelect(ranked, 2, 0.8);
++    assert.deepEqual(
++      selected.map((item) => item.chunk.path),
++      [
++        "src/main/kotlin/com/example/agent/AgentOrchestrator.kt",
++        "src/main/kotlin/com/example/agent/RemoteAgentClient.kt",
++      ],
++    );
++  });
++});

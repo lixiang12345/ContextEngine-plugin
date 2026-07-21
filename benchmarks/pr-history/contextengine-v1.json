@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "name": "contextengine-historical-pr-v1",
+  "repository": "../..",
+  "isolation": "sanitized",
+  "agent": {
+    "command": [
+      "agent-wrapper",
+      "--workspace",
+      "{workspace}",
+      "--prompt-file",
+      "{prompt_file}",
+      "--metrics-file",
+      "{metrics_file}"
+    ],
+    "timeoutMs": 900000
+  },
+  "setupCommand": [
+    "npm",
+    "ci",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund"
+  ],
+  "verifyBaseline": true,
+  "requireChanges": true,
+  "repetitions": 3,
+  "variants": [
+    {
+      "id": "baseline",
+      "context": "none"
+    },
+    {
+      "id": "contextengine",
+      "context": {
+        "mode": "packed",
+        "topK": 20,
+        "maxTokens": 12000
+      }
+    }
+  ],
+  "cases": [
+    {
+      "id": "kotlin-constructor-lambda-chunking",
+      "baseRef": "772d2f8bca0e12ead21cb4b6d9c338769ebe86a8",
+      "goldRef": "2490d91cfc36b0f0e76a409ff164aecd62caad6a",
+      "prompt": "Fix code chunking for Kotlin classes whose primary-constructor default value is a lambda. The lambda braces must not close the surrounding class, and methods declared after the constructor must remain indexed without regressing other languages.",
+      "testPatch": "patches/constructor-lambda.tests.patch",
+      "testCommand": [
+        "node",
+        "--import",
+        "tsx",
+        "--test",
+        "test/pr-history-kotlin-constructor-lambda.test.ts"
+      ],
+      "expectedChangedPaths": [
+        "src/chunker/code-chunker.ts"
+      ]
+    },
+    {
+      "id": "file-level-rerank",
+      "baseRef": "ce361c499131dfcc2421fd066753da86b8f87f47",
+      "goldRef": "6fb1e75a0cd148ab999f6111ea9d67a50097d405",
+      "prompt": "Improve retrieval for natural-language tasks whose evidence is split across several chunks in one implementation file. Ordinary prose must not be classified as symbol identifiers, structured identifiers and acronyms must remain searchable, and file-level aggregation should reward combined implementation evidence before final ranking.",
+      "testPatch": "patches/file-level-rerank.tests.patch",
+      "testCommand": [
+        "node",
+        "--import",
+        "tsx",
+        "--test",
+        "test/pr-history-file-level-rerank.test.ts"
+      ],
+      "expectedChangedPaths": [
+        "src/engine.ts",
+        "src/search/hybrid.ts",
+        "src/search/query-analyzer.ts",
+        "src/search/rerank.ts"
+      ]
+    },
+    {
+      "id": "lexical-candidate-aggregation",
+      "baseRef": "6fb1e75a0cd148ab999f6111ea9d67a50097d405",
+      "goldRef": "772d2f8bca0e12ead21cb4b6d9c338769ebe86a8",
+      "prompt": "Keep enough lexical candidates for tasks whose evidence is split across chunks in the same file, return distinct files in the final top K, and avoid over-penalizing relevant implementation files that share a deep package path.",
+      "testPatch": "patches/lexical-candidate-aggregation.tests.patch",
+      "testCommand": [
+        "node",
+        "--import",
+        "tsx",
+        "--test",
+        "test/pr-history-lexical-candidate-aggregation.test.ts"
+      ],
+      "expectedChangedPaths": [
+        "src/search/hybrid.ts",
+        "src/search/rerank.ts"
+      ]
+    }
+  ]
+}

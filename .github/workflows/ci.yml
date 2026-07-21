@@ -9,11 +9,30 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: contextengine
+          POSTGRES_PASSWORD: contextengine
+          POSTGRES_DB: contextengine_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U contextengine -d contextengine_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CONTEXTENGINE_DATABASE_URL: postgresql://contextengine:contextengine@127.0.0.1:5432/contextengine_test
+      CONTEXTENGINE_TEST_DATABASE_URL: postgresql://contextengine:contextengine@127.0.0.1:5432/contextengine_test
     strategy:
       matrix:
         node-version: [22.x]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
@@ -21,6 +40,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm run eval:pr:corpus:validate
       - run: npm test
       - name: Self-eval retrieval
         run: node dist/cli.js eval --self --reindex

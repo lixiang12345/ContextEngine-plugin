@@ -10,7 +10,13 @@ import { z } from "zod";
 import path from "node:path";
 import { loadDotEnv, resolveEngineConfig } from "./config.js";
 import { ContextEngine } from "./engine.js";
-import { parseExtraRootsFromEnv } from "./indexer/indexer.js";
+import { registerCodebaseRetrievalTools } from "./mcp-tools.js";
+import {
+  indexWorkspace,
+  parseExtraRootsFromEnv,
+  type IndexResult,
+} from "./indexer/indexer.js";
+import { watchAndIndex, type WatchHandle } from "./indexer/watch.js";
 
 loadDotEnv();
 
@@ -18,9 +24,25 @@ export interface McpServerOptions {
   root?: string;
   dataDir?: string;
   autoIndex?: boolean;
+  /** Override CONTEXTENGINE_MCP_WATCH (enabled by default). */
+  watch?: boolean;
+  watchDebounceMs?: number;
 }
 
-export async function startMcpServer(opts: McpServerOptions = {}): Promise<void> {
+export interface McpServerHandle {
+  close: () => Promise<void>;
+}
+
+export { CONTEXT_RETRIEVAL_TOOL_NAMES } from "./mcp-tools.js";
+
+export function isMcpWatchEnabled(value = process.env.CONTEXTENGINE_MCP_WATCH): boolean {
+  if (value === undefined) return true;
+  return !["0", "false", "off", "no"].includes(value.trim().toLowerCase());
+}
+
+export async function startMcpServer(
+  opts: McpServerOptions = {},
+): Promise<McpServerHandle> {
   const root = path.resolve(
     opts.root || process.env.CONTEXTENGINE_ROOT || process.cwd(),
   );
@@ -30,12 +52,36 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     extraRoots: parseExtraRootsFromEnv(),
   });
 
-  let engine = new ContextEngine(config);
+  const engine = new ContextEngine(config);
+
+  // The watcher and MCP requests share this single-flight index operation. It
+  // prevents the initial watcher pass and the first tool call from rebuilding
+  // the same workspace concurrently, while refreshing the live searcher after
+  // every completed incremental index.
+  let indexing: Promise<IndexResult> | null = null;
+  const runIndex = (): Promise<IndexResult> => {
+    if (!indexing) {
+      indexing = (async () => {
+        const result = await indexWorkspace(config);
+        await engine.refresh();
+        return result;
+      })().finally(() => {
+        indexing = null;
+      });
+    }
+    return indexing;
+  };
+
+  const watchEnabled = opts.watch ?? isMcpWatchEnabled();
+  let watcher: WatchHandle | null = null;
 
   const ensureReady = async (): Promise<ContextEngine> => {
+    // When the embedded watcher is enabled, its initial pass owns startup
+    // indexing. Awaiting ready here avoids a second concurrent build.
+    if (watcher) await watcher.ready;
     if (!(await engine.hasIndex())) {
       if (opts.autoIndex || process.env.CONTEXTENGINE_AUTO_INDEX === "1") {
-        await engine.index();
+        await runIndex();
       } else {
         throw new Error(
           `No index for ${config.root}. Run \`contextengine index\` or set CONTEXTENGINE_AUTO_INDEX=1.`,
@@ -50,46 +96,11 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     version: "0.4.0",
   });
 
-  // Primary Augment-style tool
-  server.tool(
-    "codebase_retrieval",
-    "PRIMARY tool: retrieve the most relevant code/docs for an information request. Call this BEFORE grepping. Returns the reranked path+line+content evidence pack; max_tokens is an optional caller-controlled output cap.",
-    {
-      information_request: z
-        .string()
-        .describe(
-          "What you need to know — be specific (APIs, symbols, behaviors, files).",
-        ),
-      top_k: z.number().int().min(1).max(40).optional(),
-      max_tokens: z.number().int().min(1).optional(),
-    },
-    async ({ information_request, top_k, max_tokens }) => {
-      try {
-        const eng = await ensureReady();
-        const packed = await eng.codebaseRetrieval(information_request, {
-          topK: top_k ?? 14,
-          maxTokens: max_tokens,
-        });
-        return {
-          content: [{ type: "text" as const, text: packed.packedText }],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
+  registerCodebaseRetrievalTools(server, { ensureReady });
 
   server.tool(
     "codebase_search",
-    "Structured hybrid search returning ranked JSON hits (path, lines, symbol, scores, channels). Prefer codebase_retrieval for agent editing workflows.",
+    "Structured hybrid search returning ranked JSON hits (path, lines, symbol, scores, channels). Prefer codebase-retrieval for agent editing workflows.",
     {
       query: z.string().describe("Natural language or keyword query"),
       top_k: z.number().int().min(1).max(40).optional(),
@@ -119,6 +130,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
           source: h.source,
           intent: h.intent,
           channels: h.channels,
+          degradedChannels: h.degradedChannels,
           preview: h.preview,
           content: h.chunk.content,
         }));
@@ -126,7 +138,17 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ count: payload.length, results: payload }, null, 2),
+              text: JSON.stringify(
+                {
+                  count: payload.length,
+                  degraded_channels: [
+                    ...new Set(payload.flatMap((item) => item.degradedChannels ?? [])),
+                  ],
+                  results: payload,
+                },
+                null,
+                2,
+              ),
             },
           ],
         };
@@ -146,7 +168,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
 
   server.tool(
     "get_task_context",
-    "Pack task-oriented context (alias of codebase_retrieval with task wording).",
+    "Pack task-oriented context (task-oriented companion to codebase-retrieval).",
     {
       task: z.string(),
       top_k: z.number().int().min(1).max(40).optional(),
@@ -278,9 +300,8 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     {},
     async () => {
       try {
-        await engine.close();
-        engine = new ContextEngine(config);
-        const result = await engine.index();
+        const result = watcher ? await watcher.reindex() : await runIndex();
+        if (!result) throw new Error("Indexing was cancelled before completion");
         return {
           content: [
             {
@@ -303,8 +324,83 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
     },
   );
 
+  if (watchEnabled) {
+    watcher = watchAndIndex(config, {
+      debounceMs: opts.watchDebounceMs,
+      runIndex: async () => runIndex(),
+      onError: (error) => {
+        console.error(
+          "[mcp watch error]",
+          error instanceof Error ? error.message : String(error),
+        );
+      },
+    });
+  }
+
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  try {
+    await server.connect(transport);
+  } catch (error) {
+    await watcher?.close();
+    await engine.close();
+    throw error;
+  }
+
+  let closePromise: Promise<void> | null = null;
+  let cleanupPromise: Promise<void> | null = null;
+  const cleanupOnce = (): Promise<void> => {
+    if (!cleanupPromise) {
+      cleanupPromise = (async () => {
+        await watcher?.close();
+        if (indexing) {
+          try {
+            await indexing;
+          } catch {
+            // The original index error has already been reported to the caller.
+          }
+        }
+        await engine.close();
+      })();
+    }
+    return cleanupPromise;
+  };
+  const close = (): Promise<void> => {
+    if (!closePromise) {
+      closePromise = (async () => {
+        try {
+          await server.close();
+        } finally {
+          await cleanupOnce();
+        }
+      })();
+    }
+    return closePromise;
+  };
+
+  const removeLifecycleListeners = (): void => {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    process.stdin.off("end", onInputEnd);
+    process.stdin.off("close", onInputEnd);
+  };
+  const onSignal = (): void => {
+    void close().finally(() => {
+      removeLifecycleListeners();
+      process.exitCode = 0;
+    });
+  };
+  const onInputEnd = (): void => {
+    void close().finally(removeLifecycleListeners);
+  };
+  server.server.onclose = () => {
+    void cleanupOnce();
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  process.stdin.once("end", onInputEnd);
+  process.stdin.once("close", onInputEnd);
+
+  return { close };
 }
 
 const isDirect =

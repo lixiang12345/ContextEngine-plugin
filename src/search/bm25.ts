@@ -5,14 +5,39 @@ export interface Bm25Doc {
   tokens: string[];
 }
 
+// Bump when the persisted PostgreSQL search-text representation changes.
+export const SEARCH_TOKENIZER_VERSION = 2;
+
+const CJK_RUN_RE =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
+const CJK_CHAR_RE =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+function cjkBigrams(value: string): string[] {
+  const characters = Array.from(value);
+  if (characters.length <= 1) return characters;
+  const out: string[] = [];
+  for (let index = 0; index < characters.length - 1; index++) {
+    out.push(characters[index] + characters[index + 1]);
+  }
+  return out;
+}
+
 export function tokenize(text: string): string[] {
-  return text
+  const normalized = text
+    .normalize("NFKC")
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .toLowerCase()
     .replace(/[_\-./\\]+/g, " ")
-    .split(/[^a-z0-9]+/g)
-    .filter((t) => t.length >= 2);
+    .replace(CJK_RUN_RE, " $& ");
+
+  const words = normalized.match(/[\p{L}\p{N}]+/gu) ?? [];
+  return words.flatMap((word) => {
+    if (CJK_CHAR_RE.test(word)) return cjkBigrams(word);
+    const folded = word.normalize("NFKD").replace(/\p{M}/gu, "");
+    return folded.length >= 2 ? [folded] : [];
+  });
 }
 
 export class Bm25Index {

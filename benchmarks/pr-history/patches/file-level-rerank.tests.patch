@@ -1,0 +1,69 @@
+diff --git a/test/pr-history-file-level-rerank.test.ts b/test/pr-history-file-level-rerank.test.ts
+new file mode 100644
+--- /dev/null
++++ b/test/pr-history-file-level-rerank.test.ts
+@@ -0,0 +1,64 @@
++import { describe, it } from "node:test";
++import assert from "node:assert/strict";
++import { analyzeQuery } from "../src/search/query-analyzer.js";
++import { collapseByPath } from "../src/search/rerank.js";
++
++describe("historical file-level rerank regression", () => {
++  it("does not treat ordinary prose as symbol identifiers", () => {
++    const query = analyzeQuery(
++      "pause an agent tool call for user approval and resume after the decision",
++    );
++    assert.deepEqual(query.identifiers, []);
++    assert.equal(query.intent, "concept");
++    assert.equal(query.tokens.includes("and"), false);
++    assert.equal(query.tokens.includes("the"), false);
++  });
++
++  it("keeps structured and acronym identifiers", () => {
++    const query = analyzeQuery(
++      "start ContextEngine and consume SSE JSON events with analyzeQuery",
++    );
++    assert.ok(query.identifiers.includes("ContextEngine"));
++    assert.ok(query.identifiers.includes("SSE"));
++    assert.ok(query.identifiers.includes("JSON"));
++    assert.ok(query.identifiers.includes("analyzeQuery"));
++  });
++
++  it("rewards implementation evidence spread across one file", () => {
++    const query = analyzeQuery(
++      "consume backend SSE events submit tool results continuation",
++    );
++    const candidate = (
++      id: string,
++      filePath: string,
++      content: string,
++      final: number,
++      language = "kotlin",
++    ) => ({
++      id,
++      chunk: {
++        id,
++        path: filePath,
++        language,
++        startLine: 1,
++        endLine: 20,
++        content,
++        hash: id,
++      },
++      channels: {},
++      rrf: final,
++      features: final,
++      final,
++    });
++    const ranked = [
++      candidate("doc", "docs/CONTRACT.md", "SSE events and tool results", 0.82, "markdown"),
++      candidate("client-1", "src/RemoteAgentClient.kt", "consume backend SSE events", 0.74),
++      candidate("client-2", "src/RemoteAgentClient.kt", "submit tool results for continuation", 0.72),
++      candidate("other", "src/Other.kt", "backend events", 0.76),
++    ];
++
++    const collapsed = collapseByPath(ranked, query);
++    assert.equal(collapsed.length, 3);
++    assert.equal(collapsed[0].chunk.path, "src/RemoteAgentClient.kt");
++  });
++});

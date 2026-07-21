@@ -4,9 +4,21 @@ import { requestJson } from "../util/http-json.js";
 
 export interface EmbeddingProvider {
   readonly model: string;
-  embed(texts: string[]): Promise<number[][]>;
+  embed(
+    texts: string[],
+    options?: EmbeddingRequestOptions,
+  ): Promise<number[][]>;
   /** Query-time embedding with retrieval instruction (Qwen3 / Jina-style). */
-  embedQuery?(texts: string[]): Promise<number[][]>;
+  embedQuery?(
+    texts: string[],
+    options?: EmbeddingRequestOptions,
+  ): Promise<number[][]>;
+}
+
+export interface EmbeddingRequestOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  retries?: number;
 }
 
 export interface OpenAICompatibleEmbeddingsOptions {
@@ -59,11 +71,17 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
     this.retries = options.retries;
   }
 
-  async embed(texts: string[]): Promise<number[][]> {
-    return this.embedRaw(texts, "document");
+  async embed(
+    texts: string[],
+    options: EmbeddingRequestOptions = {},
+  ): Promise<number[][]> {
+    return this.embedRaw(texts, "document", options);
   }
 
-  async embedQuery(texts: string[]): Promise<number[][]> {
+  async embedQuery(
+    texts: string[],
+    options: EmbeddingRequestOptions = {},
+  ): Promise<number[][]> {
     // Document vectors are stored without instruct; only queries get the prefix.
     const prefixed = texts.map((t) => {
       const body = t.trim();
@@ -73,12 +91,13 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
         ? `${this.queryInstruct}${body}`
         : `${this.queryInstruct}\n${body}`;
     });
-    return this.embedRaw(prefixed, "query");
+    return this.embedRaw(prefixed, "query", options);
   }
 
   private async embedRaw(
     texts: string[],
     inputType: "document" | "query",
+    requestOptions: EmbeddingRequestOptions,
   ): Promise<number[][]> {
     if (texts.length === 0) return [];
     // Smaller batches avoid OOM on 12GB GPUs when embedding long code chunks.
@@ -100,7 +119,11 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
         .slice(i, i + batchSize)
         .map((t) => t.slice(0, maxChars));
       try {
-        const vectors = await this.embedBatchOnce(batch, inputType);
+        const vectors = await this.embedBatchOnce(
+          batch,
+          inputType,
+          requestOptions,
+        );
         all.push(...vectors);
         i += batchSize;
       } catch (err) {
@@ -119,6 +142,7 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
   private async embedBatchOnce(
     batch: string[],
     inputType: "document" | "query",
+    requestOptions: EmbeddingRequestOptions,
   ): Promise<number[][]> {
     const body: Record<string, unknown> = {
       model: this.model,
@@ -133,8 +157,9 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
       label: "Embedding API",
       apiKey: this.apiKey,
       body,
-      timeoutMs: this.timeoutMs,
-      retries: this.retries,
+      signal: requestOptions.signal,
+      timeoutMs: requestOptions.timeoutMs ?? this.timeoutMs,
+      retries: requestOptions.retries ?? this.retries,
     });
     if (!Array.isArray(json.data) || json.data.length !== batch.length) {
       throw new Error(

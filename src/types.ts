@@ -29,6 +29,8 @@ export interface SearchHit {
     neural?: number;
   };
   intent?: string;
+  /** Optional channels that were unavailable and forced a degraded result. */
+  degradedChannels?: string[];
 }
 
 export interface IndexStats {
@@ -41,6 +43,14 @@ export interface IndexStats {
   lastIndexedAt: string | null;
   indexVersion: number;
   hasFts?: boolean;
+  /** Immutable index generation currently serving queries. */
+  generationId?: string | null;
+  /** Revision observed from the source workspace when indexing started. */
+  sourceRevision?: string | null;
+  /** Revision of the generation currently serving queries. */
+  indexedRevision?: string | null;
+  /** Revision being built by an in-flight generation, if any. */
+  pendingRevision?: string | null;
 }
 
 export interface EmbeddingsConfig {
@@ -135,6 +145,7 @@ export interface PackedContext {
   packedText: string;
   estimatedTokens: number;
   truncated: boolean;
+  degradedChannels?: string[];
 }
 
 export interface IndexProgress {

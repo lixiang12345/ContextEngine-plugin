@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { ContextEngine } from "../engine.js";
 import { indexVirtualWorkspace } from "../indexer/indexer.js";
+import { SEARCH_TOKENIZER_VERSION } from "../search/bm25.js";
 import type { IndexProgress } from "../types.js";
 import {
   type StoredIndexJob,
@@ -73,6 +74,14 @@ export class IndexJobRunner {
   }
 
   private async run(jobId: string): Promise<void> {
+    const queued = await this.repository.getIndexJob(jobId);
+    if (!queued || queued.status !== "queued") return;
+    await this.repository.withIndexJobLock(queued.workspaceId, () =>
+      this.runLocked(jobId),
+    );
+  }
+
+  private async runLocked(jobId: string): Promise<void> {
     const job = await this.repository.markIndexJobRunning(jobId);
     if (!job) return;
     this.publish(job);
@@ -111,7 +120,10 @@ export class IndexJobRunner {
           ? await engine.index(onProgress)
           : await this.indexBlobWorkspace(job, workspace, engine, onProgress);
       await pendingProgress;
-      await engine.refresh();
+      // ContextEngine.index() reloads its searcher after local indexing. Blob
+      // indexing runs through the repository-backed helper, so refresh only
+      // that path after its generation is promoted.
+      if (workspace.sourceMode !== "local") await engine.refresh();
       const completed = await this.repository.completeIndexJob(jobId, result);
       if (completed) this.publish(completed);
     } catch (error) {
@@ -127,8 +139,22 @@ export class IndexJobRunner {
     engine: ContextEngine,
     onProgress: (progress: IndexProgress) => void,
   ): Promise<object> {
-    const selectedPaths =
-      job.mode === "rebuild" ? null : job.changedPaths;
+    const tokenizerChanged =
+      (await this.repository.getMeta(
+        workspace.id,
+        "search_tokenizer_version",
+      )) !== String(SEARCH_TOKENIZER_VERSION);
+    // Incremental jobs are only composable when they are based on the
+    // immediately preceding source revision. If another instance completed a
+    // newer revision first, rebuild from the authoritative Blob snapshot
+    // rather than promoting a generation that omits intervening changes.
+    const indexedRevision = (await engine.indexStatus()).indexedRevision;
+    const indexedNumber = indexedRevision === null ? null : Number(indexedRevision);
+    const contiguous =
+      Number.isSafeInteger(indexedNumber) && indexedNumber === job.revision - 1;
+    const rebuild =
+      job.mode === "rebuild" || tokenizerChanged || !contiguous;
+    const selectedPaths = rebuild ? null : job.changedPaths;
     const filesTotal = await this.repository.countSourceFiles(
       workspace.id,
       selectedPaths,
@@ -139,7 +165,9 @@ export class IndexJobRunner {
       {
         filesTotal,
         deletedPaths: job.deletedPaths,
-        rebuild: job.mode === "rebuild",
+        rebuild,
+        fullScan: selectedPaths === null,
+        sourceRevision: job.revision,
         rootLabel: `workspace://${workspace.id}`,
         onProgress,
       },

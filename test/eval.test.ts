@@ -50,6 +50,12 @@ describePostgres("eval harness", () => {
     await engine.close();
     assert.equal(report.total, 1);
     assert.ok(report.meanRecallAtK >= 0);
+    assert.ok(report.meanLatencyMs >= 0);
+    assert.ok(report.p95LatencyMs >= report.meanLatencyMs);
+    assert.ok(report.top1Accuracy >= 0 && report.top1Accuracy <= 1);
+    assert.ok(report.top3Accuracy >= report.top1Accuracy);
+    assert.ok(report.top5Accuracy >= report.top3Accuracy);
     assert.ok(report.cases[0].hitPaths.length >= 0);
+    assert.ok(report.cases[0].latencyMs >= 0);
   });
 });

@@ -1,0 +1,43 @@
+diff --git a/test/pr-history-kotlin-constructor-lambda.test.ts b/test/pr-history-kotlin-constructor-lambda.test.ts
+new file mode 100644
+--- /dev/null
++++ b/test/pr-history-kotlin-constructor-lambda.test.ts
+@@ -0,0 +1,38 @@
++import { describe, it } from "node:test";
++import assert from "node:assert/strict";
++import { chunkFile } from "../src/chunker/code-chunker.js";
++
++describe("historical Kotlin constructor lambda regression", () => {
++  it("keeps methods after a constructor default lambda in the class chunk", () => {
++    const src = `
++class ContextEngineClient(
++    private val runtimeSettings: () -> RuntimeSettings = {
++        RuntimeSettings("node")
++    },
++  ) {
++    fun restart() {
++      stopProcess()
++    }
++
++    private fun ensureStarted() {
++      println("started")
++    }
++  }
++
++  data class RuntimeSettings(val nodePath: String)
++  `.trim();
++
++    const chunks = chunkFile("src/ContextEngineClient.kt", src, 2400);
++    const indexed = chunks.map((chunk) => chunk.content).join("\n");
++
++    assert.match(indexed, /fun restart/);
++    assert.match(indexed, /private fun ensureStarted/);
++    assert.ok(
++      chunks.some(
++        (chunk) =>
++          chunk.symbol === "ContextEngineClient" &&
++          chunk.content.includes("ensureStarted"),
++      ),
++    );
++  });
++});

@@ -4,7 +4,7 @@ export function observabilityDashboardHtml(): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>ContextEngine Observability</title>
   <style>
     :root {
@@ -118,12 +118,38 @@ export function observabilityDashboardHtml(): string {
     .button.primary:hover { background: #115a40; }
     .button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
     .button:disabled { opacity: 0.55; cursor: wait; }
+    .button-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
     .icon-button { width: 34px; padding: 0; display: grid; place-items: center; font-weight: 700; }
     .top-link { color: var(--muted); text-decoration: none; padding: 7px 3px; }
     .top-link:hover { color: var(--text); }
     .auto-refresh { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
     .auto-refresh input { accent-color: var(--accent); }
     main { width: min(1480px, 100%); margin: 0 auto; padding: 22px; }
+    main:focus { outline: none; }
+    .skip-link {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      z-index: 100;
+      border-radius: 7px;
+      background: var(--text);
+      color: var(--surface);
+      padding: 8px 11px;
+      text-decoration: none;
+      transform: translateY(-150%);
+    }
+    .skip-link:focus { transform: translateY(0); }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
     .notice {
       display: none;
       margin-bottom: 16px;
@@ -242,10 +268,169 @@ export function observabilityDashboardHtml(): string {
     .result-head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; }
     .result-path { min-width: 0; font-weight: 680; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .result-score { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .revision-cell { max-width: 150px; white-space: nowrap; }
     .result-preview { margin-top: 7px; color: #3c4850; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.5; }
     .skeleton { color: transparent; background: #e8ebed; border-radius: 3px; animation: pulse 1.4s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: 0.55; } }
     @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
+    /* Operational polish: restrained hierarchy, dark mode, and clear feedback. */
+    html { scroll-behavior: smooth; }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #0b1117;
+      --surface: #121a22;
+      --surface-muted: #19232d;
+      --text: #e6edf3;
+      --muted: #91a0ad;
+      --line: #273440;
+      --line-strong: #3b4b58;
+      --accent: #45c08a;
+      --accent-soft: #17382c;
+      --warning: #e1a84b;
+      --warning-soft: #382b18;
+      --danger: #ef7c73;
+      --danger-soft: #3a211f;
+      --info: #67b7ec;
+      --info-soft: #183247;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
+    }
+    html[data-theme="dark"] .topbar { background: rgba(11, 17, 23, 0.9); }
+    html[data-theme="dark"] tbody tr:hover td { background: #17212a; }
+    html[data-theme="dark"] .result-preview { color: #b8c5cf; }
+    html[data-theme="dark"] .latency-track,
+    html[data-theme="dark"] .skeleton { background: #263440; }
+    html[data-theme="dark"] .badge.good,
+    html[data-theme="dark"] .config-status.good,
+    html[data-theme="dark"] .model-test-status.good { color: #83ddb5; }
+    html[data-theme="dark"] .badge.warn,
+    html[data-theme="dark"] .config-status.warn,
+    html[data-theme="dark"] .model-test-status.warn { color: #f3c572; }
+    html[data-theme="dark"] .badge.bad,
+    html[data-theme="dark"] .config-status.bad,
+    html[data-theme="dark"] .model-test-status.bad { color: #ffaaa3; }
+    html[data-theme="dark"] .badge.info { color: #a1d8f8; }
+    .loading-bar {
+      position: fixed;
+      inset: 0 0 auto 0;
+      z-index: 40;
+      height: 3px;
+      pointer-events: none;
+      opacity: 0;
+      overflow: hidden;
+      transition: opacity 160ms ease;
+    }
+    .loading-bar::after {
+      content: "";
+      display: block;
+      width: 38%;
+      height: 100%;
+      background: var(--accent);
+      transform: translateX(-110%);
+    }
+    .loading-bar.active { opacity: 1; }
+    .loading-bar.active::after { animation: loading-slide 1.1s ease-in-out infinite; }
+    @keyframes loading-slide { to { transform: translateX(365%); } }
+    .brand { align-items: center; }
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      color: #fff;
+      background: var(--accent);
+      box-shadow: var(--shadow);
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .brand-copy { display: grid; gap: 0; }
+    .brand-copy strong { line-height: 1.1; }
+    .brand-copy span { line-height: 1.1; }
+    .topbar-inner { min-height: 64px; }
+    .control, .button {
+      border-radius: 6px;
+      transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+    }
+    .control:focus { border-color: var(--info); box-shadow: 0 0 0 3px var(--info-soft); }
+    .button:hover:not(:disabled) { transform: translateY(-1px); }
+    .button.primary { box-shadow: var(--shadow); }
+    .button.compact { min-height: 30px; padding: 4px 9px; font-size: 11px; }
+    .icon-button.spinning { animation: spin 700ms linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .page-heading {
+      align-items: center;
+      margin: 0;
+      padding: 12px 0 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .eyebrow { margin-bottom: 7px; color: var(--accent); font-size: 11px; font-weight: 750; letter-spacing: 0; text-transform: uppercase; }
+    h1 { font-size: 26px; letter-spacing: 0; }
+    .section-nav { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
+    .section-nav a {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: var(--surface);
+      color: var(--muted);
+      padding: 5px 10px;
+      text-decoration: none;
+      font-size: 11px;
+    }
+    .section-nav a:hover { border-color: var(--accent); color: var(--accent); }
+    .metric-grid { gap: 12px; }
+    .metric {
+      position: relative;
+      overflow: hidden;
+      border-radius: 7px;
+      box-shadow: var(--shadow);
+      transition: border-color 180ms ease, box-shadow 180ms ease;
+    }
+    .metric::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 3px;
+      background: var(--info);
+      opacity: 0.7;
+    }
+    .metric:nth-child(2n)::before { background: var(--accent); }
+    .metric:nth-child(3n)::before { background: var(--warning); }
+    .metric:hover { border-color: var(--line-strong); }
+    .metric-value { letter-spacing: 0; }
+    .section {
+      margin-bottom: 0;
+      padding: 22px 0 26px;
+      border: 0;
+      border-top: 1px solid var(--line);
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+      scroll-margin-top: 82px;
+    }
+    .section-header h2 { font-size: 16px; letter-spacing: 0; }
+    .table-wrap, .runtime-list, .config-grid, .result-list, .empty {
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .table-wrap { box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); }
+    th { position: sticky; top: 0; z-index: 1; }
+    .config-panel { background: var(--surface); }
+    .result { transition: background 140ms ease; }
+    .result:hover { background: var(--surface-muted); }
+    .result-actions { display: flex; align-items: center; gap: 7px; }
+    .toast-stack { position: fixed; right: 18px; bottom: 18px; z-index: 50; display: grid; gap: 8px; width: min(360px, calc(100vw - 36px)); }
+    .toast {
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--text);
+      padding: 11px 13px;
+      box-shadow: 0 16px 38px rgba(0,0,0,0.2);
+      animation: toast-in 180ms ease-out;
+    }
+    .toast.good { border-color: var(--accent); }
+    .toast.bad { border-color: var(--danger); }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
     @media (max-width: 1180px) {
       .metric-grid { grid-template-columns: repeat(4, minmax(130px, 1fr)); }
       .split { grid-template-columns: 1fr; }
@@ -257,8 +442,8 @@ export function observabilityDashboardHtml(): string {
     }
     @media (max-width: 760px) {
       .topbar-inner { align-items: flex-start; flex-wrap: wrap; padding: 10px 14px; }
-      .auth-form { order: 3; width: 100%; margin-left: 0; }
-      .auth-form input { flex: 1; width: auto; min-width: 120px; }
+      .auth-form { order: 3; width: 100%; margin-left: 0; flex-wrap: wrap; }
+      .auth-form input { flex: 1 1 160px; width: auto; min-width: 120px; }
       .auto-refresh { margin-left: auto; }
       main { padding: 17px 14px; }
       .page-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
@@ -275,30 +460,47 @@ export function observabilityDashboardHtml(): string {
       .probe-form { grid-template-columns: 1fr; }
       .probe-form .button { grid-column: auto; width: 100%; }
       .top-link { display: none; }
+      .page-heading { padding: 8px 0 18px; }
+      .section { padding: 18px 0 22px; }
+      .section-nav { display: none; }
+      .result-head { align-items: flex-start; flex-direction: column; }
+      .result-actions { width: 100%; justify-content: space-between; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .skeleton, .loading-bar.active::after, .icon-button.spinning, .toast { animation: none; }
+      .control, .button, .metric, .result, .loading-bar { transition: none; }
+      .button:hover:not(:disabled) { transform: none; }
     }
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#mainContent">Skip to main content</a>
+  <div id="loadingBar" class="loading-bar" aria-hidden="true"></div>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand"><strong>ContextEngine</strong><span>Observability</span></div>
-      <div class="connection"><span id="connectionDot" class="status-dot"></span><span id="connectionText">Connecting</span></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true">CE</span><span class="brand-copy"><strong>ContextEngine</strong><span>Observability</span></span></div>
+      <div class="connection" role="status" aria-live="polite" aria-atomic="true"><span id="connectionDot" class="status-dot" aria-hidden="true"></span><span id="connectionText">Connecting</span></div>
       <label class="auto-refresh"><input id="autoRefresh" type="checkbox" checked> Auto refresh</label>
       <a class="top-link" href="/openapi.json" target="_blank" rel="noreferrer">API schema</a>
       <form id="authForm" class="auth-form">
-        <input id="apiKey" class="control" type="password" autocomplete="current-password" placeholder="Bearer API key" aria-label="Bearer API key">
+        <input id="apiKey" class="control" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Bearer API key" aria-label="Bearer API key">
+        <button id="toggleKey" class="button ghost compact" type="button" aria-label="Show API key">Show</button>
         <button class="button primary" type="submit">Connect</button>
         <button id="clearKey" class="button ghost" type="button">Clear</button>
-        <button id="refresh" class="button icon-button" type="button" title="Refresh dashboard" aria-label="Refresh dashboard">R</button>
+        <button id="themeToggle" class="button icon-button" type="button" title="Use dark theme" aria-label="Use dark theme" aria-pressed="false">◐</button>
+        <button id="refresh" class="button icon-button" type="button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button>
       </form>
     </div>
   </header>
-  <main>
+  <main id="mainContent" tabindex="-1">
     <div id="notice" class="notice" role="alert"></div>
     <div class="page-heading">
       <div>
+        <div class="eyebrow">Live operations console</div>
         <h1>Service overview</h1>
         <p class="subtitle">Index health, retrieval traffic, and runtime state.</p>
+        <nav class="section-nav" aria-label="Dashboard sections"><a href="#health">Health</a><a href="#configuration">Configuration</a><a href="#workspaces">Workspaces</a><a href="#activity">Activity</a><a href="#probe">Retrieval probe</a></nav>
       </div>
       <div id="updatedAt" class="updated">Waiting for data</div>
     </div>
@@ -312,7 +514,7 @@ export function observabilityDashboardHtml(): string {
       <div class="metric"><div class="metric-label">P95 latency</div><div id="latencyMetric" class="metric-value">--</div><div id="latencyDetail" class="metric-detail">All observed routes</div></div>
       <div class="metric"><div class="metric-label">Index jobs</div><div id="jobMetric" class="metric-value">--</div><div id="jobDetail" class="metric-detail">Queued or running</div></div>
     </section>
-    <section class="section split">
+    <section id="health" class="section split">
       <div>
         <div class="section-header"><h2>Route health</h2><span class="section-note">In-memory process window</span></div>
         <div id="routeTable" class="empty">No request observations yet.</div>
@@ -327,17 +529,17 @@ export function observabilityDashboardHtml(): string {
         </div>
       </div>
     </section>
-    <section class="section">
+    <section id="configuration" class="section">
       <div class="section-header"><h2>Model &amp; runtime configuration</h2><span class="section-note">Applied to this process</span></div>
       <form id="modelConfigForm">
         <div class="config-grid">
           <div class="config-panel">
             <h3><span>Embedding</span><span id="embeddingState" class="badge neutral">--</span></h3>
-            <label class="config-check"><input id="embeddingEnabled" type="checkbox"> Enabled</label>
-            <div class="field"><label for="embeddingBaseUrl">Base URL</label><input id="embeddingBaseUrl" class="control" type="url" spellcheck="false"></div>
-            <div class="field"><label for="embeddingModel">Model</label><input id="embeddingModel" class="control" type="text" spellcheck="false"></div>
-            <div class="field"><label for="embeddingAuth">Authentication</label><select id="embeddingAuth" class="control"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
-            <div class="field"><label for="embeddingApiKey">API key</label><input id="embeddingApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false"></div>
+            <label class="config-check"><input id="embeddingEnabled" type="checkbox" aria-label="Enable embedding"> Enabled</label>
+            <div class="field"><label for="embeddingBaseUrl">Base URL</label><input id="embeddingBaseUrl" class="control" type="url" spellcheck="false" aria-label="Embedding base URL"></div>
+            <div class="field"><label for="embeddingModel">Model</label><input id="embeddingModel" class="control" type="text" spellcheck="false" aria-label="Embedding model"></div>
+            <div class="field"><label for="embeddingAuth">Authentication</label><select id="embeddingAuth" class="control" aria-label="Embedding authentication"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
+            <div class="field"><label for="embeddingApiKey">API key</label><input id="embeddingApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false" aria-label="Embedding API key"></div>
             <div id="embeddingKeyHelp" class="config-help">Leave blank to keep the current key.</div>
             <div class="config-field-grid">
               <div class="field"><label for="embeddingDimensions">Dimensions</label><input id="embeddingDimensions" class="control" type="number" min="1"></div>
@@ -349,16 +551,16 @@ export function observabilityDashboardHtml(): string {
             </div>
             <div class="model-test">
               <span id="embeddingTestStatus" class="model-test-status" aria-live="polite">Not tested</span>
-              <button id="testEmbedding" class="button" type="button">Test connection</button>
+              <button id="testEmbedding" class="button" type="button" aria-label="Test embedding connection">Test connection</button>
             </div>
           </div>
           <div class="config-panel">
             <h3><span>Reranker</span><span id="rerankerState" class="badge neutral">--</span></h3>
-            <label class="config-check"><input id="rerankerEnabled" type="checkbox"> Enabled</label>
-            <div class="field"><label for="rerankerBaseUrl">Base URL</label><input id="rerankerBaseUrl" class="control" type="url" spellcheck="false"></div>
-            <div class="field"><label for="rerankerModel">Model</label><input id="rerankerModel" class="control" type="text" spellcheck="false"></div>
-            <div class="field"><label for="rerankerAuth">Authentication</label><select id="rerankerAuth" class="control"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
-            <div class="field"><label for="rerankerApiKey">API key</label><input id="rerankerApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false"></div>
+            <label class="config-check"><input id="rerankerEnabled" type="checkbox" aria-label="Enable reranker"> Enabled</label>
+            <div class="field"><label for="rerankerBaseUrl">Base URL</label><input id="rerankerBaseUrl" class="control" type="url" spellcheck="false" aria-label="Reranker base URL"></div>
+            <div class="field"><label for="rerankerModel">Model</label><input id="rerankerModel" class="control" type="text" spellcheck="false" aria-label="Reranker model"></div>
+            <div class="field"><label for="rerankerAuth">Authentication</label><select id="rerankerAuth" class="control" aria-label="Reranker authentication"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
+            <div class="field"><label for="rerankerApiKey">API key</label><input id="rerankerApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false" aria-label="Reranker API key"></div>
             <div id="rerankerKeyHelp" class="config-help">Leave blank to keep the current key.</div>
             <div class="config-field-grid">
               <div class="field"><label for="rerankerTopN">Top N</label><input id="rerankerTopN" class="control" type="number" min="2" max="64"></div>
@@ -368,7 +570,7 @@ export function observabilityDashboardHtml(): string {
             <div class="field"><label for="rerankerInstruction">Instruction</label><textarea id="rerankerInstruction" class="control" rows="3"></textarea></div>
             <div class="model-test">
               <span id="rerankerTestStatus" class="model-test-status" aria-live="polite">Not tested</span>
-              <button id="testReranker" class="button" type="button">Test connection</button>
+              <button id="testReranker" class="button" type="button" aria-label="Test reranker connection">Test connection</button>
             </div>
           </div>
           <div class="config-panel">
@@ -381,16 +583,16 @@ export function observabilityDashboardHtml(): string {
           </div>
         </div>
         <div class="config-actions">
-          <span id="configStatus" class="config-status">Waiting for configuration.</span>
+          <span id="configStatus" class="config-status" role="status" aria-live="polite" aria-atomic="true">Waiting for configuration.</span>
           <button id="saveConfiguration" class="button primary" type="submit">Apply configuration</button>
         </div>
       </form>
     </section>
-    <section class="section">
+    <section id="workspaces" class="section">
       <div class="section-header"><h2>Workspaces</h2><span id="workspaceNote" class="section-note">No workspaces loaded</span></div>
       <div id="workspaceTable" class="empty">Connect to load workspaces.</div>
     </section>
-    <section class="section split">
+    <section id="activity" class="section split">
       <div>
         <div class="section-header"><h2>Recent index jobs</h2><span class="section-note">Latest 25</span></div>
         <div id="jobTable" class="empty">No index jobs loaded.</div>
@@ -409,18 +611,57 @@ export function observabilityDashboardHtml(): string {
         <div class="field"><label for="probeMode">Mode</label><select id="probeMode" class="control"><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="bm25">BM25</option><option value="semantic">Semantic</option></select></div>
         <button id="probeSubmit" class="button primary" type="submit">Run search</button>
       </form>
-      <div id="probeMeta" class="probe-meta"></div>
-      <div id="probeResults" class="empty">No probe results yet.</div>
+      <div id="probeMeta" class="probe-meta" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="probeResults" class="empty" aria-busy="false">No probe results yet.</div>
     </section>
   </main>
+  <div id="toastStack" class="toast-stack" aria-label="Notifications" aria-live="polite" aria-atomic="false"></div>
   <script>
 (function () {
   "use strict";
   var storageKey = "contextengine.dashboard.apiKey";
-  var state = { token: sessionStorage.getItem(storageKey) || "", data: null, loading: false, timer: null, configDirty: false };
+  var themeStorageKey = "contextengine.dashboard.theme";
+
+  function readSessionToken() {
+    try { return sessionStorage.getItem(storageKey) || ""; } catch (_) { return ""; }
+  }
+
+  function storeSessionToken(value) {
+    try {
+      if (value) sessionStorage.setItem(storageKey, value); else sessionStorage.removeItem(storageKey);
+    } catch (_) { /* storage can be unavailable */ }
+  }
+
+  var state = { token: readSessionToken(), data: null, loading: false, refreshQueued: false, timer: null, configDirty: false };
   var byId = function (id) { return document.getElementById(id); };
+  var numberFormatter = new Intl.NumberFormat();
   var apiKey = byId("apiKey");
   apiKey.value = state.token;
+
+  function storedTheme() {
+    try { return localStorage.getItem(themeStorageKey); } catch (_) { return null; }
+  }
+
+  function applyTheme(theme, persist) {
+    var resolved = theme === "dark" ? "dark" : "light";
+    var toggle = byId("themeToggle");
+    document.documentElement.dataset.theme = resolved;
+    toggle.textContent = resolved === "dark" ? "☀" : "◐";
+    toggle.title = resolved === "dark" ? "Use light theme" : "Use dark theme";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-pressed", String(resolved === "dark"));
+    if (persist) {
+      try { localStorage.setItem(themeStorageKey, resolved); } catch (_) { /* storage can be unavailable */ }
+    }
+  }
+
+  var colorScheme = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  applyTheme(storedTheme() || (colorScheme && colorScheme.matches ? "dark" : "light"), false);
+  if (colorScheme && colorScheme.addEventListener) {
+    colorScheme.addEventListener("change", function (event) {
+      if (!storedTheme()) applyTheme(event.matches ? "dark" : "light", false);
+    });
+  }
 
   function escapeHtml(value) {
     return String(value == null ? "" : value)
@@ -432,7 +673,7 @@ export function observabilityDashboardHtml(): string {
   }
 
   function number(value) {
-    return new Intl.NumberFormat().format(Number(value || 0));
+    return numberFormatter.format(Number(value || 0));
   }
 
   function bytes(value) {
@@ -472,8 +713,8 @@ export function observabilityDashboardHtml(): string {
   function badge(value) {
     var text = String(value || "unknown");
     var tone = "neutral";
-    if (["online", "indexed", "succeeded", "200", "enabled", "bearer"].indexOf(text) >= 0) tone = "good";
-    else if (["queued", "running", "partial"].indexOf(text) >= 0) tone = "warn";
+    if (["online", "indexed", "current", "succeeded", "200", "enabled", "bearer"].indexOf(text) >= 0) tone = "good";
+    else if (["queued", "running", "partial", "indexing", "stale"].indexOf(text) >= 0) tone = "warn";
     else if (["failed", "offline", "error", "unavailable"].indexOf(text) >= 0) tone = "bad";
     else if (["blob", "local", "incremental", "rebuild", "none", "effective"].indexOf(text) >= 0) tone = "info";
     else if (["disabled_by_server"].indexOf(text) >= 0) tone = "warn";
@@ -481,14 +722,48 @@ export function observabilityDashboardHtml(): string {
   }
 
   function setConnection(kind, text) {
-    byId("connectionDot").className = "status-dot" + (kind ? " " + kind : "");
-    byId("connectionText").textContent = text;
+    var className = "status-dot" + (kind ? " " + kind : "");
+    if (byId("connectionDot").className !== className) byId("connectionDot").className = className;
+    if (byId("connectionText").textContent !== text) byId("connectionText").textContent = text;
   }
 
   function showNotice(message) {
     var notice = byId("notice");
-    notice.textContent = message || "";
-    notice.classList.toggle("visible", Boolean(message));
+    var next = message || "";
+    if (notice.textContent !== next) notice.textContent = next;
+    notice.classList.toggle("visible", Boolean(next));
+  }
+
+  function toast(message, tone) {
+    var node = document.createElement("div");
+    node.className = "toast" + (tone ? " " + tone : "");
+    node.textContent = message;
+    byId("toastStack").appendChild(node);
+    window.setTimeout(function () { node.remove(); }, 3200);
+  }
+
+  async function copyText(value) {
+    var copied = false;
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(value);
+      copied = true;
+    } catch (_) {
+      var input = document.createElement("textarea");
+      var previousFocus = document.activeElement;
+      input.value = value;
+      input.setAttribute("readonly", "");
+      input.setAttribute("aria-hidden", "true");
+      input.setAttribute("tabindex", "-1");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      try { copied = document.execCommand("copy"); } catch (_) { copied = false; }
+      input.remove();
+      if (previousFocus && previousFocus.focus) previousFocus.focus();
+    }
+    toast(copied ? "Location copied" : "Could not copy location", copied ? "good" : "bad");
   }
 
   async function api(path, options) {
@@ -510,13 +785,14 @@ export function observabilityDashboardHtml(): string {
   function renderMetrics(data) {
     var workspaces = data.workspaces || [];
     var indexed = workspaces.filter(function (item) { return item.indexed; }).length;
+    var indexing = workspaces.filter(function (item) { return item.stats && item.stats.pendingRevision; }).length;
     var files = workspaces.reduce(function (sum, item) { return sum + Number(item.stats && item.stats.fileCount || 0); }, 0);
     var chunks = workspaces.reduce(function (sum, item) { return sum + Number(item.stats && item.stats.chunkCount || 0); }, 0);
     var activeJobs = (data.jobs || []).filter(function (job) { return job.status === "queued" || job.status === "running"; }).length;
     byId("serviceMetric").textContent = "Online";
     byId("serviceDetail").textContent = uptime(data.service.uptime_seconds) + " uptime";
     byId("workspaceMetric").textContent = number(workspaces.length);
-    byId("workspaceDetail").textContent = indexed + " indexed";
+    byId("workspaceDetail").textContent = indexed + " indexed" + (indexing ? " · " + indexing + " indexing" : "");
     byId("fileMetric").textContent = number(files);
     byId("chunkMetric").textContent = number(chunks);
     byId("requestMetric").textContent = number(data.requests.total);
@@ -653,6 +929,8 @@ export function observabilityDashboardHtml(): string {
     byId("serverConfigList").innerHTML = configRows([
       ["HTTP auth", String(http.authentication || "--")],
       ["Max Blob", bytes(http.max_blob_bytes)],
+      ["MCP idle TTL", http.mcp_session_idle_ttl_ms == null ? "--" : duration(http.mcp_session_idle_ttl_ms)],
+      ["MCP sessions", http.mcp_max_sessions == null ? "--" : number(http.mcp_max_sessions) + " max"],
       ["Local workspaces", http.local_workspaces ? "enabled" : "disabled"],
       ["Allowlist entries", number(http.local_root_allowlist_count)],
       ["Database", storage.host ? storage.host + (storage.port ? ":" + storage.port : "") + " / " + (storage.database || "configured") : "--"],
@@ -670,7 +948,7 @@ export function observabilityDashboardHtml(): string {
       return "<tr><td>" + escapeHtml(route.method) + "</td><td class=\"mono truncate\" title=\"" + escapeHtml(route.route) + "\">" + escapeHtml(route.route) + "</td><td class=\"number\">" + number(route.requests) + "</td><td>" + "<span class=\"badge " + errorTone + "\">" + number(route.errors) + " errors</span></td><td class=\"latency-cell\"><span>" + duration(route.p95_ms) + "</span><div class=\"latency-track\"><div class=\"latency-fill\" style=\"width:" + width + "%\"></div></div></td></tr>";
     }).join("");
     byId("routeTable").className = "table-wrap";
-    byId("routeTable").innerHTML = "<table><thead><tr><th>Method</th><th>Route</th><th class=\"number\">Requests</th><th>Errors</th><th>P95</th></tr></thead><tbody>" + body + "</tbody></table>";
+    byId("routeTable").innerHTML = "<table><caption class=\"sr-only\">Route health</caption><thead><tr><th scope=\"col\">Method</th><th scope=\"col\">Route</th><th scope=\"col\" class=\"number\">Requests</th><th scope=\"col\">Errors</th><th scope=\"col\">P95</th></tr></thead><tbody>" + body + "</tbody></table>";
   }
 
   function renderWorkspaces(data) {
@@ -683,15 +961,49 @@ export function observabilityDashboardHtml(): string {
     }).join("");
     if (previous && workspaces.some(function (item) { return item.workspace.id === previous && item.indexed; })) select.value = previous;
     if (!workspaces.length) { byId("workspaceTable").className = "empty"; byId("workspaceTable").textContent = "No workspaces configured."; return; }
+    var shortRevision = function (value) {
+      if (value == null || value === "") return "--";
+      var text = String(value);
+      return text.length > 18 ? text.slice(0, 10) + "…" + text.slice(-6) : text;
+    };
+    var freshness = function (item, stats) {
+      if (item.error) return "unavailable";
+      if (!item.indexed) return "empty";
+      if (stats.pendingRevision) return "indexing";
+      if (item.workspace.source_mode === "blob" && stats.indexedRevision == null) return "unknown";
+      if (item.workspace.source_mode === "blob" && String(stats.indexedRevision) !== String(item.workspace.revision)) return "stale";
+      return "current";
+    };
     var rows = workspaces.map(function (item) {
       var stats = item.stats || {};
-      var status = item.indexed ? "indexed" : "empty";
-      return "<tr><td><strong>" + escapeHtml(item.workspace.name) + "</strong><div class=\"mono truncate section-note\">" + escapeHtml(item.workspace.id) + "</div></td><td>" + badge(item.workspace.source_mode) + "</td><td>" + badge(status) + "</td><td class=\"number\">" + number(item.workspace.revision) + "</td><td class=\"number\">" + number(stats.fileCount) + "</td><td class=\"number\">" + number(stats.chunkCount) + "</td><td>" + timeAgo(stats.lastIndexedAt || item.workspace.updated_at) + "</td><td><button class=\"button probe-workspace\" type=\"button\" data-workspace=\"" + escapeHtml(item.workspace.id) + "\" " + (item.indexed ? "" : "disabled") + ">Probe</button></td></tr>";
+      var status = freshness(item, stats);
+      var source = item.sources && item.sources[0];
+      var sourceCell = source
+        ? badge(source.provider) + "<div class=\"truncate section-note\" title=\"" + escapeHtml(source.external_id) + "\">" + escapeHtml(source.external_id) + "</div><div class=\"section-note\">" + badge(source.status) + " · " + timeAgo(source.last_synced_at || source.updated_at) + "</div>"
+        : badge(item.workspace.source_mode);
+      var generation = stats.generationId ? "<div class=\"mono truncate section-note\" title=\"" + escapeHtml(stats.generationId) + "\">gen " + escapeHtml(shortRevision(stats.generationId)) + "</div>" : "";
+      var syncButton = source ? "<button class=\"button sync-source\" type=\"button\" data-workspace=\"" + escapeHtml(item.workspace.id) + "\" data-source=\"" + escapeHtml(source.id) + "\" " + (source.status === "syncing" ? "disabled" : "") + ">Sync</button>" : "";
+      return "<tr><td><strong>" + escapeHtml(item.workspace.name) + "</strong><div class=\"mono truncate section-note\">" + escapeHtml(item.workspace.id) + "</div></td><td>" + sourceCell + "</td><td>" + badge(status) + generation + "</td><td class=\"mono revision-cell\" title=\"" + escapeHtml(String(item.workspace.revision)) + "\">" + escapeHtml(shortRevision(item.workspace.revision)) + "</td><td class=\"mono revision-cell\" title=\"" + escapeHtml(String(stats.indexedRevision || "--")) + "\">" + escapeHtml(shortRevision(stats.indexedRevision)) + "</td><td class=\"number\">" + number(stats.fileCount) + "</td><td class=\"number\">" + number(stats.chunkCount) + "</td><td>" + timeAgo(stats.lastIndexedAt || source && source.last_synced_at || item.workspace.updated_at) + "</td><td><div class=\"button-row\">" + syncButton + "<button class=\"button probe-workspace\" type=\"button\" data-workspace=\"" + escapeHtml(item.workspace.id) + "\" aria-label=\"Probe " + escapeHtml(item.workspace.name) + "\" " + (item.indexed ? "" : "disabled") + ">Probe</button></div></td></tr>";
     }).join("");
     byId("workspaceTable").className = "table-wrap";
-    byId("workspaceTable").innerHTML = "<table><thead><tr><th>Workspace</th><th>Source</th><th>Status</th><th class=\"number\">Revision</th><th class=\"number\">Files</th><th class=\"number\">Chunks</th><th>Updated</th><th></th></tr></thead><tbody>" + rows + "</tbody></table>";
+    byId("workspaceTable").innerHTML = "<table><caption class=\"sr-only\">Configured workspaces</caption><thead><tr><th scope=\"col\">Workspace</th><th scope=\"col\">Source</th><th scope=\"col\">Freshness</th><th scope=\"col\">Source rev</th><th scope=\"col\">Indexed rev</th><th scope=\"col\" class=\"number\">Files</th><th scope=\"col\" class=\"number\">Chunks</th><th scope=\"col\">Updated</th><th scope=\"col\"><span class=\"sr-only\">Actions</span></th></tr></thead><tbody>" + rows + "</tbody></table>";
     Array.prototype.forEach.call(document.querySelectorAll(".probe-workspace"), function (button) {
-      button.addEventListener("click", function () { byId("probeWorkspace").value = button.dataset.workspace || ""; byId("probe").scrollIntoView({ behavior: "smooth", block: "start" }); byId("probeQuery").focus(); });
+      button.addEventListener("click", function () { byId("probeWorkspace").value = button.dataset.workspace || ""; byId("probe").scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" }); byId("probeQuery").focus(); });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".sync-source"), function (button) {
+      button.addEventListener("click", async function () {
+        button.disabled = true;
+        button.textContent = "Syncing";
+        try {
+          var result = await api("/v1/workspaces/" + encodeURIComponent(button.dataset.workspace || "") + "/sources/" + encodeURIComponent(button.dataset.source || "") + "/sync", { method: "POST" });
+          toast(result.noop ? "Source is already current" : "Source sync queued", "good");
+          await refresh(true);
+        } catch (error) {
+          toast(error.message, "bad");
+          button.disabled = false;
+          button.textContent = "Sync";
+        }
+      });
     });
   }
 
@@ -705,7 +1017,7 @@ export function observabilityDashboardHtml(): string {
       return "<tr><td>" + badge(job.status) + "</td><td class=\"truncate\" title=\"" + escapeHtml(names[job.workspace_id] || job.workspace_id) + "\">" + escapeHtml(names[job.workspace_id] || job.workspace_id) + "</td><td>" + badge(job.mode) + "</td><td>" + escapeHtml(progress) + "</td><td>" + timeAgo(job.created_at) + "</td></tr>";
     }).join("");
     byId("jobTable").className = "table-wrap";
-    byId("jobTable").innerHTML = "<table><thead><tr><th>Status</th><th>Workspace</th><th>Mode</th><th>Phase</th><th>Created</th></tr></thead><tbody>" + rows + "</tbody></table>";
+    byId("jobTable").innerHTML = "<table><caption class=\"sr-only\">Recent index jobs</caption><thead><tr><th scope=\"col\">Status</th><th scope=\"col\">Workspace</th><th scope=\"col\">Mode</th><th scope=\"col\">Phase</th><th scope=\"col\">Created</th></tr></thead><tbody>" + rows + "</tbody></table>";
   }
 
   function renderRequests(data) {
@@ -713,10 +1025,10 @@ export function observabilityDashboardHtml(): string {
     if (!requests.length) { byId("requestTable").className = "empty"; byId("requestTable").textContent = "No requests observed."; return; }
     var rows = requests.slice(0, 18).map(function (request) {
       var tone = request.status >= 500 ? "bad" : request.status >= 400 ? "warn" : "good";
-      return "<tr><td>" + escapeHtml(request.method) + "</td><td class=\"mono truncate\" title=\"" + escapeHtml(request.route) + "\">" + escapeHtml(request.route) + "</td><td><span class=\"badge " + tone + "\">" + request.status + "</span></td><td class=\"number\">" + duration(request.duration_ms) + "</td><td>" + timeAgo(request.started_at) + "</td></tr>";
+      return "<tr><td>" + escapeHtml(request.method) + "</td><td class=\"mono truncate\" title=\"" + escapeHtml(request.route) + "\">" + escapeHtml(request.route) + "</td><td><span class=\"badge " + tone + "\">" + escapeHtml(request.status) + "</span></td><td class=\"number\">" + duration(request.duration_ms) + "</td><td>" + timeAgo(request.started_at) + "</td></tr>";
     }).join("");
     byId("requestTable").className = "table-wrap";
-    byId("requestTable").innerHTML = "<table><thead><tr><th>Method</th><th>Route</th><th>Status</th><th class=\"number\">Time</th><th>When</th></tr></thead><tbody>" + rows + "</tbody></table>";
+    byId("requestTable").innerHTML = "<table><caption class=\"sr-only\">Recent requests</caption><thead><tr><th scope=\"col\">Method</th><th scope=\"col\">Route</th><th scope=\"col\">Status</th><th scope=\"col\" class=\"number\">Time</th><th scope=\"col\">When</th></tr></thead><tbody>" + rows + "</tbody></table>";
   }
 
   function render(data) {
@@ -731,10 +1043,23 @@ export function observabilityDashboardHtml(): string {
     byId("updatedAt").textContent = "Updated " + new Date(data.generated_at).toLocaleTimeString();
   }
 
-  async function refresh() {
-    if (state.loading) return;
+  function setRefreshState(loading) {
+    var button = byId("refresh");
+    button.disabled = loading;
+    button.classList.toggle("spinning", loading);
+    button.setAttribute("aria-busy", String(loading));
+    button.setAttribute("aria-label", loading ? "Refreshing dashboard" : "Refresh dashboard");
+    button.title = loading ? "Refreshing dashboard" : "Refresh dashboard";
+    byId("loadingBar").classList.toggle("active", loading);
+  }
+
+  async function refresh(queueIfBusy) {
+    if (state.loading) {
+      if (queueIfBusy === true) state.refreshQueued = true;
+      return;
+    }
     state.loading = true;
-    byId("refresh").disabled = true;
+    setRefreshState(true);
     try {
       var data = await api("/v1/observability/overview?request_limit=60&job_limit=25");
       render(data);
@@ -745,24 +1070,37 @@ export function observabilityDashboardHtml(): string {
       showNotice(error.message);
     } finally {
       state.loading = false;
-      byId("refresh").disabled = false;
+      setRefreshState(false);
+      if (state.refreshQueued) {
+        state.refreshQueued = false;
+        void refresh();
+      }
     }
   }
 
   function schedule() {
     if (state.timer) clearInterval(state.timer);
     state.timer = null;
-    if (byId("autoRefresh").checked) state.timer = setInterval(refresh, 5000);
+    if (byId("autoRefresh").checked && !document.hidden) state.timer = setInterval(refresh, 5000);
   }
 
   byId("authForm").addEventListener("submit", function (event) {
     event.preventDefault();
     state.token = apiKey.value.trim();
-    if (state.token) sessionStorage.setItem(storageKey, state.token); else sessionStorage.removeItem(storageKey);
-    refresh();
+    storeSessionToken(state.token);
+    refresh(true);
   });
-  byId("clearKey").addEventListener("click", function () { state.token = ""; apiKey.value = ""; sessionStorage.removeItem(storageKey); refresh(); });
-  byId("refresh").addEventListener("click", refresh);
+  byId("clearKey").addEventListener("click", function () { state.token = ""; apiKey.value = ""; apiKey.type = "password"; storeSessionToken(""); byId("toggleKey").textContent = "Show"; byId("toggleKey").setAttribute("aria-label", "Show API key"); toast("API key cleared"); refresh(true); });
+  byId("toggleKey").addEventListener("click", function () {
+    var reveal = apiKey.type === "password";
+    apiKey.type = reveal ? "text" : "password";
+    byId("toggleKey").textContent = reveal ? "Hide" : "Show";
+    byId("toggleKey").setAttribute("aria-label", reveal ? "Hide API key" : "Show API key");
+  });
+  byId("themeToggle").addEventListener("click", function () {
+    applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
+  });
+  byId("refresh").addEventListener("click", function () { refresh(true); });
   byId("autoRefresh").addEventListener("change", schedule);
 
   Array.prototype.forEach.call(document.querySelectorAll("#modelConfigForm input, #modelConfigForm select, #modelConfigForm textarea"), function (control) {
@@ -808,6 +1146,7 @@ export function observabilityDashboardHtml(): string {
         ? number(result.details && result.details.dimensions) + " dimensions"
         : number(result.details && result.details.scored_documents) + " scores";
       setModelTestStatus(prefix, "good", "Available - " + duration(result.latency_ms) + " - " + detail);
+      toast((isEmbedding ? "Embedding" : "Reranker") + " connection is healthy", "good");
     } catch (error) {
       setModelTestStatus(prefix, "bad", error.message);
     } finally {
@@ -836,6 +1175,7 @@ export function observabilityDashboardHtml(): string {
       renderConfiguration({ configuration: result.configuration });
       byId("configStatus").className = "config-status " + (result.reindex_required ? "warn" : "good");
       byId("configStatus").textContent = result.reindex_required ? "Applied; reindex required for the current embedding index." : "Applied to the running process.";
+      toast(result.reindex_required ? "Configuration applied — reindex required" : "Configuration applied", result.reindex_required ? "" : "good");
       setTimeout(refresh, 150);
     } catch (error) {
       byId("configStatus").className = "config-status bad";
@@ -867,8 +1207,11 @@ export function observabilityDashboardHtml(): string {
         byId("probeResults").className = "result-list";
         byId("probeResults").innerHTML = payload.results.map(function (result) {
           var label = result.path + ":" + result.start_line + "-" + result.end_line;
-          return "<article class=\"result\"><div class=\"result-head\"><div class=\"result-path mono\" title=\"" + escapeHtml(label) + "\">" + escapeHtml(label) + "</div><div class=\"result-score\">" + escapeHtml(result.source) + " / " + Number(result.score || 0).toFixed(4) + "</div></div><div class=\"result-preview\">" + escapeHtml(result.preview || result.content || "") + "</div></article>";
+          return "<article class=\"result\"><div class=\"result-head\"><div class=\"result-path mono\" title=\"" + escapeHtml(label) + "\">" + escapeHtml(label) + "</div><div class=\"result-actions\"><div class=\"result-score\">" + escapeHtml(result.source) + " / " + Number(result.score || 0).toFixed(4) + "</div><button class=\"button ghost compact copy-result\" type=\"button\" data-copy=\"" + escapeHtml(label) + "\" aria-label=\"Copy location " + escapeHtml(label) + "\">Copy</button></div></div><div class=\"result-preview\">" + escapeHtml(result.preview || result.content || "") + "</div></article>";
         }).join("");
+        Array.prototype.forEach.call(document.querySelectorAll(".copy-result"), function (button) {
+          button.addEventListener("click", function () { void copyText(button.dataset.copy || ""); });
+        });
       }
       setTimeout(refresh, 150);
     } catch (error) {
@@ -876,6 +1219,24 @@ export function observabilityDashboardHtml(): string {
       byId("probeResults").className = "empty";
       byId("probeResults").textContent = error.message;
     } finally { button.disabled = false; }
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      if (state.timer) clearInterval(state.timer);
+      state.timer = null;
+      return;
+    }
+    schedule();
+    refresh();
+  });
+  document.addEventListener("keydown", function (event) {
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (event.key === "/" && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") {
+      event.preventDefault();
+      byId("probeQuery").focus();
+      byId("probe").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   });
 
   schedule();

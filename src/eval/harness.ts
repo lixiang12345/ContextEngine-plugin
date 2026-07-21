@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import type { ContextEngine } from "../engine.js";
 
 export interface EvalCase {
@@ -20,6 +21,10 @@ export interface EvalCaseResult {
   pathHits: number;
   expected: number;
   symbolHits: number;
+  latencyMs: number;
+  top1Hit: boolean;
+  top3Hit: boolean;
+  top5Hit: boolean;
   passed: boolean;
 }
 
@@ -30,6 +35,11 @@ export interface EvalReport {
   meanRecallAtK: number;
   meanMrr: number;
   meanNdcgAtK: number;
+  meanLatencyMs: number;
+  p95LatencyMs: number;
+  top1Accuracy: number;
+  top3Accuracy: number;
+  top5Accuracy: number;
   cases: EvalCaseResult[];
 }
 
@@ -63,6 +73,16 @@ function mrrOf(hitPaths: string[], expectPaths: string[]): number {
   return 0;
 }
 
+function percentile(values: number[], percentileValue: number): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(sorted.length * percentileValue) - 1),
+  );
+  return sorted[rank];
+}
+
 export async function runEval(
   engine: ContextEngine,
   cases: EvalCase[],
@@ -71,6 +91,7 @@ export async function runEval(
 
   for (const c of cases) {
     const topK = c.topK ?? 8;
+    const started = performance.now();
     const hits = await engine.search({
       query: c.query,
       topK,
@@ -78,6 +99,7 @@ export async function runEval(
       expandGraph: true,
       diversify: true,
     });
+    const latencyMs = Math.max(0, performance.now() - started);
     const hitPaths = hits.map((h) => h.chunk.path);
     const hitSymbols = hits
       .map((h) => h.chunk.symbol?.toLowerCase())
@@ -91,6 +113,11 @@ export async function runEval(
     const recallAtK = pathHits / expected;
     const mrr = mrrOf(hitPaths, c.expectPaths);
     const ndcgAtKScore = ndcgAtK(hitPaths, c.expectPaths, topK);
+    const isRelevant = (path: string): boolean =>
+      c.expectPaths.some((expectedPath) => path.includes(expectedPath));
+    const top1Hit = hitPaths.slice(0, 1).some(isRelevant);
+    const top3Hit = hitPaths.slice(0, 3).some(isRelevant);
+    const top5Hit = hitPaths.slice(0, 5).some(isRelevant);
 
     let symbolHits = 0;
     for (const sym of c.expectSymbols ?? []) {
@@ -114,12 +141,17 @@ export async function runEval(
       pathHits,
       expected,
       symbolHits,
+      latencyMs: Number(latencyMs.toFixed(3)),
+      top1Hit,
+      top3Hit,
+      top5Hit,
       passed,
     });
   }
 
   const passed = results.filter((r) => r.passed).length;
   const n = results.length || 1;
+  const latencies = results.map((result) => result.latencyMs);
 
   return {
     total: results.length,
@@ -128,6 +160,11 @@ export async function runEval(
     meanRecallAtK: results.reduce((s, r) => s + r.recallAtK, 0) / n,
     meanMrr: results.reduce((s, r) => s + r.mrr, 0) / n,
     meanNdcgAtK: results.reduce((s, r) => s + r.ndcgAtK, 0) / n,
+    meanLatencyMs: latencies.reduce((sum, value) => sum + value, 0) / n,
+    p95LatencyMs: percentile(latencies, 0.95),
+    top1Accuracy: results.filter((result) => result.top1Hit).length / n,
+    top3Accuracy: results.filter((result) => result.top3Hit).length / n,
+    top5Accuracy: results.filter((result) => result.top5Hit).length / n,
     cases: results,
   };
 }

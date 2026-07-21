@@ -1,10 +1,13 @@
 import { resolveEmbeddingsConfig, resolveEngineConfig } from "../config.js";
 import type { EmbeddingsConfig } from "../types.js";
-import { normalizeOpenAIBaseUrl } from "../util/api-url.js";
 import {
   resolveNeuralRerankConfig,
   type NeuralRerankConfig,
 } from "../search/neural-rerank.js";
+import {
+  PRIVATE_MODEL_URL_OPT_IN,
+  validateRuntimeModelBaseUrl,
+} from "./model-endpoint-policy.js";
 
 export interface EmbeddingConfigurationUpdate {
   enabled: boolean;
@@ -42,6 +45,8 @@ export interface RuntimeConfigurationOptions {
   allowLocalWorkspaces: boolean;
   localRootAllowlistCount: number;
   maxBlobBytes: number;
+  mcpSessionIdleTtlMs?: number;
+  mcpMaxSessions?: number;
   disableEmbeddings: boolean;
 }
 
@@ -137,9 +142,18 @@ function sameEmbeddingIndex(
 }
 
 export class RuntimeModelConfiguration {
-  private embedding: EmbeddingsConfig | undefined = resolveEmbeddingsConfig();
-  private reranker: NeuralRerankConfig | undefined =
-    resolveNeuralRerankConfig();
+  private embedding: EmbeddingsConfig | undefined;
+  private reranker: NeuralRerankConfig | undefined;
+  private readonly startupModelBaseUrls: string[];
+
+  constructor() {
+    this.embedding = resolveEmbeddingsConfig();
+    this.reranker = resolveNeuralRerankConfig();
+    this.startupModelBaseUrls = [
+      this.embedding?.baseUrl,
+      this.reranker?.baseUrl,
+    ].filter((value): value is string => Boolean(value));
+  }
 
   embeddingCandidate(
     update: EmbeddingConfigurationUpdate,
@@ -184,24 +198,27 @@ export class RuntimeModelConfiguration {
       4_000,
       100,
     );
-    let changed = false;
+    // Validate every section before mutating process state. A combined form
+    // submission must be all-or-nothing when one section fails validation.
+    const nextEmbedding = input.embedding
+      ? this.resolveEmbedding(input.embedding)
+      : this.embedding;
+    const nextReranker = input.reranker
+      ? this.resolveReranker(input.reranker, nextEmbedding)
+      : this.reranker;
+    const changed = Boolean(input.embedding || input.reranker);
 
     if (input.embedding) {
-      const update = input.embedding;
-      this.embedding = this.resolveEmbedding(update);
-      process.env.CONTEXTENGINE_EMBED_BATCH = String(update.batchSize);
-      process.env.CONTEXTENGINE_EMBED_MAX_CHARS = String(update.maxInputChars);
-      process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE = update.inputType
+      this.embedding = nextEmbedding;
+      process.env.CONTEXTENGINE_EMBED_BATCH = String(input.embedding.batchSize);
+      process.env.CONTEXTENGINE_EMBED_MAX_CHARS = String(
+        input.embedding.maxInputChars,
+      );
+      process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE = input.embedding.inputType
         ? "1"
         : "0";
-      changed = true;
     }
-
-    if (input.reranker) {
-      const update = input.reranker;
-      this.reranker = this.resolveReranker(update);
-      changed = true;
-    }
+    if (input.reranker) this.reranker = nextReranker;
 
     const currentInputType = truthy(
       process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE,
@@ -247,7 +264,7 @@ export class RuntimeModelConfiguration {
     }
     return {
       apiKey,
-      baseUrl: normalizeOpenAIBaseUrl(rawBaseUrl),
+      baseUrl: this.validateBaseUrl(rawBaseUrl),
       model:
         update.model?.trim() ||
         current?.model ||
@@ -258,6 +275,7 @@ export class RuntimeModelConfiguration {
 
   private resolveReranker(
     update: RerankerConfigurationUpdate,
+    embedding = this.embedding,
   ): NeuralRerankConfig | undefined {
     if (!update.enabled) return undefined;
     const current = this.reranker;
@@ -266,14 +284,14 @@ export class RuntimeModelConfiguration {
         ? undefined
         : update.apiKey?.trim() ||
           current?.apiKey ||
-          this.embedding?.apiKey;
+          embedding?.apiKey;
     if (update.authentication === "bearer" && !apiKey) {
       throw new Error("Reranker API key is required for Bearer authentication");
     }
     const rawBaseUrl =
       update.baseUrl?.trim() ||
       current?.baseUrl ||
-      this.embedding?.baseUrl ||
+      embedding?.baseUrl ||
       (apiKey ? "https://api.openai.com/v1" : "");
     if (!rawBaseUrl) {
       throw new Error(
@@ -282,7 +300,7 @@ export class RuntimeModelConfiguration {
     }
     return {
       apiKey,
-      baseUrl: normalizeOpenAIBaseUrl(rawBaseUrl),
+      baseUrl: this.validateBaseUrl(rawBaseUrl),
       model:
         update.model?.trim() ||
         current?.model ||
@@ -366,6 +384,16 @@ export class RuntimeModelConfiguration {
           0,
           5,
         ),
+        runtime_base_url_policy: {
+          protocols: ["http", "https"],
+          url_credentials: "blocked",
+          private_network_targets: truthy(
+            process.env[PRIVATE_MODEL_URL_OPT_IN],
+          )
+            ? "allowed_by_server_opt_in"
+            : "blocked_except_startup_configuration",
+          private_network_opt_in_env: PRIVATE_MODEL_URL_OPT_IN,
+        },
       },
       indexing: {
         max_file_bytes: engineConfig.maxFileBytes,
@@ -378,10 +406,19 @@ export class RuntimeModelConfiguration {
             ? "bearer"
             : "unavailable",
         max_blob_bytes: options.maxBlobBytes,
+        mcp_session_idle_ttl_ms: options.mcpSessionIdleTtlMs ?? null,
+        mcp_max_sessions: options.mcpMaxSessions ?? null,
         local_workspaces: options.allowLocalWorkspaces,
         local_root_allowlist_count: options.localRootAllowlistCount,
       },
       storage: databaseTarget(options.databaseUrl),
     };
+  }
+
+  private validateBaseUrl(rawBaseUrl: string): string {
+    return validateRuntimeModelBaseUrl(rawBaseUrl, {
+      allowPrivateNetwork: truthy(process.env[PRIVATE_MODEL_URL_OPT_IN]),
+      trustedBaseUrls: this.startupModelBaseUrls,
+    });
   }
 }

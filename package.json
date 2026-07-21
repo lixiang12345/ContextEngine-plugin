@@ -25,10 +25,12 @@
     "COMPARISON.md",
     "EVALUATION.md",
     "docs",
-    "examples"
+    "examples",
+    "benchmarks"
   ],
   "scripts": {
-    "build": "tsc && node scripts/ensure-bins.mjs",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc && node scripts/ensure-bins.mjs",
     "dev": "tsc --watch",
     "cli": "node --import tsx src/cli.ts",
     "mcp": "node --import tsx src/mcp-server.ts",
@@ -38,6 +40,9 @@
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f postgres",
     "eval:self": "npm run build && node dist/cli.js eval --self --reindex",
+    "eval:pr": "npm run build && node dist/cli.js eval-pr",
+    "eval:pr:corpus": "npm run build && node dist/cli.js eval-pr --manifest benchmarks/pr-history/contextengine-v1.json --allow-exec",
+    "eval:pr:corpus:validate": "node scripts/validate-pr-corpus.mjs",
     "eval:express": "npm run build && node scripts/practice-eval.mjs --root ${EXPRESS_ROOT:-/tmp/ce-bench/express} --cases examples/eval.express.json",
     "bench:suite": "node scripts/bench-suite.mjs",
     "bench:api": "npm run build && node scripts/bench-api.mjs",

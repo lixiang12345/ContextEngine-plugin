@@ -3,6 +3,7 @@ interface JsonRequestOptions {
   apiKey?: string;
   method?: "GET" | "POST";
   body?: unknown;
+  signal?: AbortSignal;
   timeoutMs?: number;
   retries?: number;
 }
@@ -64,8 +65,13 @@ export async function requestJson<T>(
   for (let attempt = 0; attempt <= retries; attempt++) {
     let response: Response | undefined;
     try {
+      options.signal?.throwIfAborted();
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
       response = await fetch(url, {
         method: options.method ?? (options.body === undefined ? "GET" : "POST"),
+        // Model endpoints are configured explicitly. Following redirects could
+        // turn an approved public URL into a request to a private destination.
+        redirect: "error",
         headers: {
           Accept: "application/json",
           ...(options.body === undefined
@@ -77,7 +83,9 @@ export async function requestJson<T>(
         },
         body:
           options.body === undefined ? undefined : JSON.stringify(options.body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: options.signal
+          ? AbortSignal.any([options.signal, timeoutSignal])
+          : timeoutSignal,
       });
       const text = await response.text();
       if (!response.ok) {
@@ -99,6 +107,7 @@ export async function requestJson<T>(
       }
     } catch (error) {
       lastError = describeError(error);
+      if (options.signal?.aborted) throw lastError;
       if (
         attempt < retries &&
         (!response || retryableStatus(response.status))
