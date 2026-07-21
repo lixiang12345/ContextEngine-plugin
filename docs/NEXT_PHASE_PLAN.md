@@ -1,0 +1,193 @@
+# 下一阶段计划：跨实例 Remote MCP 会话
+
+更新时间：2026-07-21
+
+起始基线：`3420ddf` (`main`)
+
+当前数据库：PostgreSQL schema v4
+
+当前验证：`npm run build` 与 PostgreSQL 全量测试 `144/144` 通过
+
+## 1. 目标
+
+下一阶段优先解决 Remote MCP 会话只能驻留单个 Node.js 进程的问题，使服务可以在
+多实例、滚动升级和实例重启场景下继续处理已有 `mcp-session-id`，同时保持当前的
+workspace/principal 绑定、Bearer 认证、空闲 TTL、容量限制和删除语义。
+
+完成后应支持：
+
+- 同一 MCP session 的后续请求可以命中任意健康实例，不依赖负载均衡器粘性会话。
+- 创建会话的实例退出后，其他实例可以在有界时间内接管。
+- session 不能跨 workspace、principal 或认证凭据复用。
+- TTL、lease、容量与接管判断统一使用 PostgreSQL `clock_timestamp()`。
+- schema 迁移、旧实例并存和失败回滚都有确定性集成测试。
+
+## 2. 先验证的技术约束
+
+当前 `src/http-server.ts` 把 `StreamableHTTPServerTransport`、MCP server 和
+`lastSeenAt` 保存在进程内 `Map`。SDK transport 对象不是可直接序列化的 durable
+state，因此“把 session id 写入数据库”并不等于跨实例会话。
+
+实现前必须完成一个小型协议 spike，回答：
+
+1. 对当前只读、JSON-response 的工具调用，能否根据持久化的 initialize metadata
+   在每个请求上安全重建 server/transport。
+2. `POST`、`GET`、`DELETE` 与 MCP notification 是否依赖 transport 内未公开状态。
+3. 重建后是否仍满足 SDK 的协议版本、capability negotiation 和 session header 校验。
+4. 同一请求重试是否可能造成重复副作用；当前 retrieval 是只读，但生命周期操作仍需
+   幂等。
+
+决策门：
+
+- **路径 A，优先：可重建的无状态请求处理。** PostgreSQL 保存 session metadata，
+  任意实例按请求重建轻量 server/transport，不保存 SDK 对象。
+- **路径 B，兜底：owner lease。** PostgreSQL 保存 owner instance 与 attempt token；
+  非 owner 请求必须通过明确的内部转发或可验证的 owner 路由处理。不能只返回一个
+  无法被负载均衡器消费的 owner id。
+
+如果路径 A 不满足协议，必须在文档中明确部署需要 sticky routing 或实现内部代理；
+不得把仅有数据库记录的方案标记为“durable session 已完成”。
+
+## 3. Phase 1 实施范围
+
+### Step 0：协议 spike 与决策记录
+
+- 为 SDK transport 编写最小双实例实验，不先修改生产表。
+- 覆盖 initialize 后由另一实例执行 `tools/list`、`codebase-retrieval` 和 `DELETE`。
+- 记录必须持久化的最小字段、不可重建状态和所选路径。
+- 输出 `docs/MCP_SESSION_ARCHITECTURE.md`，包含时序图、失败模型和放弃方案。
+
+验收：有自动化测试或可重复脚本证明所选路径，不以人工 curl 结果代替。
+
+### Step 1：schema v5 与 repository 契约
+
+新增 `ce_mcp_sessions`，建议字段：
+
+| 字段 | 用途 |
+|---|---|
+| `session_id_hash` | session id 的 SHA-256；日志和数据库不保存可直接使用的 header 值 |
+| `workspace_id` | FK 到 workspace，删除 workspace 时级联清理 |
+| `principal_id` | 强制绑定认证主体 |
+| `protocol_version` | initialize 协商结果 |
+| `status` | `active`、`closing`、`closed` |
+| `owner_instance_id` | 仅路径 B 使用 |
+| `owner_attempt_id` | 防止超时 owner 在接管后继续写入 |
+| `lease_expires_at` | owner lease，仅路径 B 使用 |
+| `last_seen_at` | 数据库时钟维护的空闲 TTL 基准 |
+| `created_at` / `updated_at` | 审计与运维 |
+
+repository API 至少包含：
+
+- `createMcpSession(...)`
+- `getAuthorizedMcpSession(...)`
+- `touchMcpSession(...)`
+- `closeMcpSession(...)`
+- `acquireMcpSessionLease(...)` / `renewMcpSessionLease(...)`（路径 B）
+- `pruneExpiredMcpSessions(...)`
+- `countActiveMcpSessions(...)`
+
+约束：所有授权、TTL、状态转换和 attempt fencing 必须在单个 SQL 事务或条件
+`UPDATE ... RETURNING` 中完成，不能先读后写依赖 Node.js 时钟。
+
+### Step 2：HTTP 生命周期改造
+
+- 把进程内 session `Map` 抽象成 `McpSessionStore`。
+- 保留 `memory` 实现用于单进程兼容，新增 `postgres` 实现。
+- PostgreSQL HTTP 部署默认使用 durable store；提供显式配置用于回滚。
+- 每次请求都重新校验 Bearer principal、workspace ACL 和 session hash。
+- 初始化容量限制升级为跨实例全局限制，避免每实例各自放大上限。
+- `DELETE` 必须幂等，并使其他实例立即观察到 closed 状态。
+- 错误响应区分 unknown、expired、closed、principal mismatch 和 capacity exhausted，
+  但不能泄露其他 principal 的 session 是否存在。
+
+### Step 3：租约、清理与滚动升级
+
+- 路径 B 使用 attempt token 与有界 lease，模式复用 connector sync fencing。
+- 实例关闭时尽力释放 owner，但正确性不能依赖 graceful shutdown。
+- 后台清理使用数据库时钟，批量删除 expired/closed session，并设置上限。
+- schema v5 迁移先安装必要 guard/lock，再执行可能阻塞的 DDL。
+- v4 旧进程完全不知道 durable session 表，数据库 trigger 无法让它遵守 v5 的全局
+  容量和 ownership。发布流程必须 drain v4 Remote MCP 流量，或通过版本路由保留旧
+  session；在 v4 实例退出前不得宣称无粘性跨实例语义已经生效。
+- 旧二进制重启应继续拒绝较新 schema；升级文档必须给出 drain、切流和回滚步骤。
+
+### Step 4：可观测性与配置
+
+增加无敏感标识的指标：
+
+- active/expired/closed session 数量
+- initialize、resume、takeover、close 计数
+- lease conflict、principal mismatch、capacity rejection 计数
+- session lookup 与 takeover 延迟
+
+dashboard 只展示聚合统计，不显示 session id、Bearer token 或 principal 的原始值。
+
+建议配置：
+
+- `CONTEXTENGINE_MCP_SESSION_STORE=postgres|memory`
+- `CONTEXTENGINE_INSTANCE_ID`（路径 B；未设置时生成进程级随机值）
+- 沿用 `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS`
+- 沿用 `CONTEXTENGINE_MCP_MAX_SESSIONS`，语义改为全局上限
+
+### Step 5：测试矩阵
+
+必须使用两个独立 HTTP server/repository 实例连接同一测试 schema：
+
+1. 实例 A initialize，实例 B 执行 tools/list 与 retrieval。
+2. A 退出后 B 恢复或接管同一 session。
+3. 路径 B 下，两实例并发接管时只有一个 attempt 成功。
+4. 路径 B 下，旧 owner 在接管后无法 touch、close 或返回有效结果。
+5. Alice session 被 Bob、其他 workspace 或错误 token 使用时拒绝。
+6. TTL 在长事务中途到期时最终写入回滚。
+7. 全局容量在并发 initialize 下不超限。
+8. DELETE 重试幂等，关闭后所有实例立即拒绝调用。
+9. v4→v5 迁移在锁竞争、滚动升级和重复启动下安全。
+10. 服务重启后 session 行为符合所选路径的承诺。
+
+完成后运行：
+
+```bash
+npx tsc --noEmit
+CONTEXTENGINE_DATABASE_URL=... CONTEXTENGINE_TEST_DATABASE_URL=... npm test
+npm run build
+git diff --check
+```
+
+并用 Docker Compose 启动至少两个 HTTP 实例做 round-robin 冒烟测试。
+
+## 4. Phase 1 验收标准
+
+- 不使用 sticky session 时，双实例连续 100 次 MCP 请求无 session 丢失。
+- 路径 A 下实例退出不影响下一请求；路径 B 下 kill -9 owner 后在一个 lease 窗口内
+  恢复，且没有两个 owner 同时成功。
+- 所有 principal/workspace 越权测试通过，错误不泄露 session 存在性。
+- 数据库和日志中没有原始 Bearer token 或可直接重放的 session id。
+- 完整测试、构建、Docker 双实例探针通过。
+- README、HTTP API、Compose 示例、CHANGELOG 和 alignment 文档同步更新。
+- 不宣称跨实例 durable，直到真实双实例与重启测试通过。
+
+## 5. 后续阶段顺序
+
+Phase 1 完成后按以下顺序继续，避免在身份与隔离基础不稳时扩展数据面：
+
+1. **OAuth/OIDC**：issuer/audience/JWKS 校验、key rotation、subject/group 映射，兼容
+   现有 API key；禁止从未验证的 token claim 直接授予 operator。
+2. **source-level ACL**：repo/path/document 权限在 retrieval、file read、MCP 三层强制
+   执行，并保存 connector permission snapshot 与 provenance。
+3. **connector SDK + webhook**：抽象 `listChanges/readBlob/commitCursor/watch`，增加
+   GitLab、静态网站和签名 webhook；事件 idempotency 与 cursor commit 必须原子化。
+4. **PR 评测扩容**：公共多仓库 corpus、受控真实模型重复实验、token/tool-call/P95 与
+   测试结果的可复现报告。
+5. **检索质量**：SCIP/语言服务符号提供器、multi-hop query rewrite、可插拔
+   extractive/model-summary packing。
+
+## 6. 新对话启动指令
+
+新对话直接使用：
+
+```text
+读取 docs/NEXT_PHASE_PLAN.md 和当前代码，从 Phase 1 Step 0 开始执行。
+先验证 StreamableHTTPServerTransport 是否能跨实例重建，不要先假设数据库记录等于
+durable session。完成架构决策、实现、双实例竞态测试、全量验证和 Docker 冒烟；
+保留现有未提交改动，除非我明确要求，不要创建 Git commit。
+```

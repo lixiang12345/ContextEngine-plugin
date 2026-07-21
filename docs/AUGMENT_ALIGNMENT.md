@@ -48,7 +48,7 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 ## 本机可复现实测
 
 截至 2026-07-21，本仓库 `npm run build` 通过，带 PostgreSQL 的完整测试为
-**111/111**；`contextengine eval --self` 在当前索引上为 8/8，Recall/MRR/nDCG
+**144/144**；`contextengine eval --self` 在当前索引上为 8/8，Recall/MRR/nDCG
 和 Top-1/3/5 均为 1.0，平均延迟 2.14 秒、P95 4.17 秒。Docker Compose 的
 HTTP 与 PostgreSQL 容器均为 healthy，Remote MCP 已实测 initialize、tools/list、
 `codebase-retrieval`、DELETE 会话链路。当前配置的 embedding/reranker 探测均返回
