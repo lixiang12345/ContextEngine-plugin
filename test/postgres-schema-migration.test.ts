@@ -221,7 +221,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            ORDER BY workspace_id, blob_hash`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 4 }]);
+        assert.deepEqual(marker.rows, [{ version: 6 }]);
         assert.deepEqual(grants.rows, [
           { workspace_id: workspaceId, blob_hash: referencedHash },
         ]);
@@ -253,7 +253,29 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await admin.query<{ version: number }>(
           `SELECT version FROM ${quotedSchema}.ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 4 }]);
+        assert.deepEqual(marker.rows, [{ version: 6 }]);
+
+        const mcpSessionColumns = await admin.query<{ column_name: string }>(
+          `SELECT column_name
+           FROM information_schema.columns
+           WHERE table_schema = $1
+             AND table_name = 'ce_mcp_sessions'
+           ORDER BY ordinal_position`,
+          [schema],
+        );
+        assert.deepEqual(
+          mcpSessionColumns.rows.map((row) => row.column_name),
+          [
+            "session_id_hash",
+            "workspace_id",
+            "principal_id",
+            "protocol_version",
+            "status",
+            "last_seen_at",
+            "created_at",
+            "updated_at",
+          ],
+        );
 
         const leaseColumns = await admin.query<{ column_name: string }>(
           `SELECT column_name
@@ -435,7 +457,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v2'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 4 }]);
+        assert.deepEqual(marker.rows, [{ version: 6 }]);
         assert.deepEqual(source.rows, [
           {
             id: "source-v2",
@@ -593,7 +615,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v3'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 4 }]);
+        assert.deepEqual(marker.rows, [{ version: 6 }]);
         assert.deepEqual(source.rows, [
           {
             status: "syncing",
@@ -618,6 +640,132 @@ describePostgres("PostgreSQL schema migration coordination", () => {
       }
     },
   );
+
+  it(
+    "adds durable MCP sessions and plugin providers when migrating v4 to v6",
+    { timeout: 15_000 },
+    async () => {
+      const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
+      const quotedSchema = quoteIdentifier(schema);
+      const schemaUrl = databaseUrlForSchema(databaseUrl!, schema);
+      const admin = new Pool({ connectionString: databaseUrl! });
+      let schemaPool: Pool | undefined;
+
+      try {
+        await admin.query(`CREATE SCHEMA ${quotedSchema}`);
+        schemaPool = new Pool({ connectionString: schemaUrl });
+        await schemaPool.query(`
+          CREATE TABLE ce_schema_version (
+            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+            version INTEGER NOT NULL CHECK (version > 0),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+          );
+          INSERT INTO ce_schema_version(singleton, version) VALUES (TRUE, 4);
+          CREATE TABLE ce_workspaces (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            source_mode TEXT NOT NULL CHECK (source_mode IN ('blob', 'local')),
+            local_root TEXT,
+            revision BIGINT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+          );
+          INSERT INTO ce_workspaces(id, name, source_mode)
+          VALUES ('workspace-v4', 'V4 workspace', 'blob');
+          CREATE TABLE ce_connector_sources (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL UNIQUE REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL CHECK (provider IN ('github')),
+            external_id TEXT NOT NULL,
+            config JSONB NOT NULL DEFAULT '{}'::jsonb,
+            cursor JSONB,
+            cursor_version BIGINT NOT NULL DEFAULT 0,
+            sync_attempt_id TEXT,
+            lease_expires_at TIMESTAMPTZ,
+            upstream_revision TEXT,
+            status TEXT NOT NULL DEFAULT 'idle'
+              CHECK (status IN ('idle', 'syncing', 'ready', 'error')),
+            last_error TEXT,
+            last_synced_at TIMESTAMPTZ,
+            created_by TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+          );
+        `);
+        await schemaPool.end();
+        schemaPool = undefined;
+
+        await runEnsureSchemaInFreshProcess(schemaUrl);
+        schemaPool = new Pool({ connectionString: schemaUrl });
+        const marker = await schemaPool.query<{ version: number }>(
+          `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
+        );
+        assert.deepEqual(marker.rows, [{ version: 6 }]);
+        await schemaPool.query(
+          `INSERT INTO ce_connector_sources(
+             id, workspace_id, provider, external_id, created_by
+           ) VALUES (
+             'memory-source', 'workspace-v4', 'memory_docs',
+             'docs/example', 'migration-test'
+           )`,
+        );
+        await schemaPool.query(
+          `INSERT INTO ce_mcp_sessions(
+             session_id_hash, workspace_id, principal_id, protocol_version
+           ) VALUES ($1, 'workspace-v4', 'alice', '2025-03-26')`,
+          ["a".repeat(64)],
+        );
+        await assert.rejects(
+          schemaPool.query(
+            `INSERT INTO ce_mcp_sessions(
+               session_id_hash, workspace_id, principal_id, protocol_version
+             ) VALUES ('raw-replayable-id', 'workspace-v4', 'alice', '2025-03-26')`,
+          ),
+          (error: unknown) =>
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "23514",
+        );
+      } finally {
+        if (schemaPool) await schemaPool.end();
+        try {
+          await admin.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+        } finally {
+          await admin.end();
+        }
+      }
+    },
+  );
+
+  it("rejects a database schema newer than this build", async () => {
+    const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
+    const quotedSchema = quoteIdentifier(schema);
+    const schemaUrl = databaseUrlForSchema(databaseUrl!, schema);
+    const admin = new Pool({ connectionString: databaseUrl! });
+    try {
+      await admin.query(`CREATE SCHEMA ${quotedSchema}`);
+      await admin.query(`
+        CREATE TABLE ${quotedSchema}.ce_schema_version (
+          singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+          version INTEGER NOT NULL CHECK (version > 0),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO ${quotedSchema}.ce_schema_version(singleton, version)
+        VALUES (TRUE, 7);
+      `);
+      await assert.rejects(
+        runEnsureSchemaInFreshProcess(schemaUrl),
+        /schema version 7 is newer than this build \(6\)/,
+      );
+    } finally {
+      try {
+        await admin.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      } finally {
+        await admin.end();
+      }
+    }
+  });
 
   it(
     "blocks legacy connector completion until the v3-to-v4 guard is committed",

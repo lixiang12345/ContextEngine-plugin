@@ -1,3 +1,5 @@
+import { SourceConnectorError } from "./types.js";
+
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_FILES = 20_000;
@@ -33,7 +35,7 @@ interface GitHubBlobResponse {
   size?: unknown;
 }
 
-export class GitHubConnectorError extends Error {
+export class GitHubConnectorError extends SourceConnectorError {
   constructor(message: string) {
     super(message);
     this.name = "GitHubConnectorError";

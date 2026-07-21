@@ -1,4 +1,7 @@
-import { GitHubConnectorClient } from "../connectors/github.js";
+import {
+  SourceConnectorRegistry,
+  type ConnectorSnapshot,
+} from "../connectors/types.js";
 import type { IndexJobRunner } from "./index-job-runner.js";
 import {
   type ConnectorSyncAttempt,
@@ -13,7 +16,7 @@ import { sha256 } from "../util/hash.js";
 export interface ConnectorSyncCoordinatorOptions {
   repository: WorkspaceRepository;
   runner: Pick<IndexJobRunner, "enqueue">;
-  github: GitHubConnectorClient;
+  connectors: SourceConnectorRegistry;
   maxBlobBytes: number;
   downloadConcurrency?: number;
   secrets?: readonly string[];
@@ -34,26 +37,6 @@ export class ConnectorSyncConflictError extends Error {
     super(message);
     this.name = "ConnectorSyncConflictError";
   }
-}
-
-interface GitHubSourceConfig {
-  owner: string;
-  repository: string;
-  ref: string;
-}
-
-function sourceConfig(source: StoredConnectorSource): GitHubSourceConfig {
-  const owner = source.config.owner;
-  const repository = source.config.repository;
-  const ref = source.config.ref;
-  if (
-    typeof owner !== "string" ||
-    typeof repository !== "string" ||
-    typeof ref !== "string"
-  ) {
-    throw new Error("GitHub source configuration is invalid");
-  }
-  return { owner, repository, ref };
 }
 
 function boundedConcurrency(input: number | undefined): number {
@@ -91,10 +74,59 @@ function redactedMessage(error: unknown, secrets: readonly string[]): string {
   return message.slice(0, 1000);
 }
 
+function connectorSecrets(
+  connector: { secrets?: (config: Readonly<Record<string, unknown>>) => readonly string[] },
+  config: Readonly<Record<string, unknown>>,
+): readonly string[] {
+  try {
+    return connector.secrets?.(config) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function validatedSnapshot(snapshot: ConnectorSnapshot): ConnectorSnapshot {
+  if (!snapshot || typeof snapshot.revision !== "string" || !snapshot.revision) {
+    throw new Error("Connector snapshot revision is missing or invalid");
+  }
+  if (!Array.isArray(snapshot.files) || snapshot.files.length > 20_000) {
+    throw new Error("Connector snapshot exceeds the 20,000 file limit");
+  }
+  if (!snapshot.cursor || Array.isArray(snapshot.cursor) || typeof snapshot.cursor !== "object") {
+    throw new Error("Connector snapshot cursor is missing or invalid");
+  }
+  const paths = new Set<string>();
+  const files = snapshot.files.map((file) => {
+    const path = typeof file.path === "string"
+      ? file.path.replaceAll("\\", "/").replace(/^\.\//, "")
+      : "";
+    const segments = path.split("/");
+    if (
+      !path ||
+      path.length > 4096 ||
+      path.startsWith("/") ||
+      segments.some((segment) => !segment || segment === "." || segment === "..") ||
+      paths.has(path)
+    ) {
+      throw new Error("Connector snapshot contains an unsafe or duplicate file path");
+    }
+    if (typeof file.revision !== "string" || !file.revision) {
+      throw new Error(`Connector file revision is invalid for ${path}`);
+    }
+    if (!Number.isSafeInteger(file.bytes) || file.bytes < 0) {
+      throw new Error(`Connector file size is invalid for ${path}`);
+    }
+    paths.add(path);
+    return { path, revision: file.revision, bytes: file.bytes };
+  });
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  return { revision: snapshot.revision, cursor: snapshot.cursor, files };
+}
+
 export class ConnectorSyncCoordinator {
   private readonly repository: WorkspaceRepository;
   private readonly runner: Pick<IndexJobRunner, "enqueue">;
-  private readonly github: GitHubConnectorClient;
+  private readonly connectors: SourceConnectorRegistry;
   private readonly maxBlobBytes: number;
   private readonly downloadConcurrency: number;
   private readonly secrets: readonly string[];
@@ -102,21 +134,19 @@ export class ConnectorSyncCoordinator {
   constructor(options: ConnectorSyncCoordinatorOptions) {
     this.repository = options.repository;
     this.runner = options.runner;
-    this.github = options.github;
+    this.connectors = options.connectors;
     this.maxBlobBytes = options.maxBlobBytes;
     this.downloadConcurrency = boundedConcurrency(options.downloadConcurrency);
     this.secrets = options.secrets ?? [];
   }
 
-  async syncGitHub(
+  async sync(
     workspaceId: string,
     sourceId: string,
   ): Promise<ConnectorSyncResult> {
     const source = await this.repository.getConnectorSource(workspaceId, sourceId);
     if (!source) throw new Error("Connector source was not found");
-    if (source.provider !== "github") {
-      throw new Error(`Unsupported connector provider: ${source.provider}`);
-    }
+    const connector = this.connectors.require(source.provider);
     const started = await this.repository.beginConnectorSync(
       workspaceId,
       sourceId,
@@ -156,14 +186,19 @@ export class ConnectorSyncCoordinator {
 
     let committed = false;
     try {
-      const config = sourceConfig(started);
-      const [workspace, previousFiles, tree] = await Promise.all([
+      const config = started.config;
+      const [workspace, previousFiles, rawSnapshot] = await Promise.all([
         this.repository.requireWorkspace(workspaceId),
         this.repository.listConnectorFiles(sourceId),
-        this.github.getTree(config.owner, config.repository, config.ref),
+        connector.listFiles(config, started.cursor),
       ]);
+      const snapshot = validatedSnapshot(rawSnapshot);
+      const rootAlias = connector.rootAlias(config).trim();
+      if (!rootAlias || rootAlias.length > 100 || /[\u0000-\u001f\u007f]/.test(rootAlias)) {
+        throw new Error("Connector root alias is invalid");
+      }
       const previous = new Map(previousFiles.map((file) => [file.path, file]));
-      const candidates = tree.files.filter((file) => {
+      const candidates = snapshot.files.filter((file) => {
         const prior = previous.get(file.path);
         return (
           file.bytes <= this.maxBlobBytes &&
@@ -174,13 +209,9 @@ export class ConnectorSyncCoordinator {
         candidates,
         this.downloadConcurrency,
         async (file) => {
-          const content = await this.github.getBlob(
-            config.owner,
-            config.repository,
-            file.revision,
-          );
+          const content = await connector.readFile(config, file);
           if (content.length !== file.bytes) {
-            throw new Error(`GitHub tree and Blob sizes differ for ${file.path}`);
+            throw new Error(`Connector snapshot and file sizes differ for ${file.path}`);
           }
           return { file, content, contentHash: sha256(content) };
         },
@@ -193,7 +224,7 @@ export class ConnectorSyncCoordinator {
       const changes: SyncChange[] = [];
       let skippedOversized = 0;
 
-      for (const file of tree.files) {
+      for (const file of snapshot.files) {
         const prior = previous.get(file.path);
         if (file.bytes > this.maxBlobBytes) {
           skippedOversized += 1;
@@ -226,11 +257,11 @@ export class ConnectorSyncCoordinator {
             blobHash: contentHash,
             size: file.bytes,
             mtimeMs: 0,
-            rootAlias: `github:${config.owner}/${config.repository}`.slice(0, 100),
+            rootAlias,
           });
         }
       }
-      const currentPaths = new Set(tree.files.map((file) => file.path));
+      const currentPaths = new Set(snapshot.files.map((file) => file.path));
       for (const prior of previousFiles) {
         if (!currentPaths.has(prior.path) && prior.contentHash) {
           changes.push({ op: "delete", path: prior.path });
@@ -241,14 +272,14 @@ export class ConnectorSyncCoordinator {
         throw new Error("Connector sync exceeds the 20,000 change limit");
       }
 
-      const cursor = { ref: config.ref, tree_sha: tree.revision };
+      const cursor = snapshot.cursor;
       if (changes.length === 0) {
         await requireLease();
         const completed = await this.repository.completeConnectorNoop(
           workspaceId,
           attempt,
           cursor,
-          tree.revision,
+          snapshot.revision,
           currentFiles,
         );
         if (!completed) throw new ConnectorSyncConflictError();
@@ -291,7 +322,7 @@ export class ConnectorSyncCoordinator {
           expectedCursorVersion: started.cursorVersion,
           syncAttemptId: started.syncAttemptId,
           cursor,
-          upstreamRevision: tree.revision,
+          upstreamRevision: snapshot.revision,
           files: currentFiles,
         },
       });
@@ -313,12 +344,20 @@ export class ConnectorSyncCoordinator {
         await this.repository.failConnectorSync(
           workspaceId,
           attempt,
-          redactedMessage(error, this.secrets),
+          redactedMessage(error, [
+            ...this.secrets,
+            ...connectorSecrets(connector, started.config),
+          ]),
         );
       }
       throw error;
     } finally {
       clearInterval(heartbeat);
     }
+  }
+
+  /** Backwards-compatible alias for callers introduced before provider plugins. */
+  syncGitHub(workspaceId: string, sourceId: string): Promise<ConnectorSyncResult> {
+    return this.sync(workspaceId, sourceId);
   }
 }

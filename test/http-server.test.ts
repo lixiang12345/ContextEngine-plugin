@@ -50,6 +50,8 @@ describePostgres("ContextEngine HTTP service", () => {
       localRootAllowlist: [allowedLocalRoot],
       mcpSessionIdleTtlMs: 1_000,
       mcpMaxSessions: 1,
+      mcpSessionStore: "memory",
+      corsOrigins: ["https://client.example"],
     });
   });
 
@@ -172,6 +174,27 @@ describePostgres("ContextEngine HTTP service", () => {
 
     const health = await fetch(`${handle.url}/health`);
     assert.equal(health.status, 200);
+    const preflight = await fetch(`${handle.url}/v1/capabilities`, {
+      method: "OPTIONS",
+      headers: { origin: "https://client.example" },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(
+      preflight.headers.get("access-control-allow-origin"),
+      "https://client.example",
+    );
+    const corsHealth = await fetch(`${handle.url}/health`, {
+      headers: { origin: "https://client.example" },
+    });
+    assert.equal(corsHealth.status, 200);
+    assert.equal(
+      corsHealth.headers.get("access-control-allow-origin"),
+      "https://client.example",
+    );
+    const deniedOrigin = await fetch(`${handle.url}/health`, {
+      headers: { origin: "https://denied.example" },
+    });
+    assert.equal(deniedOrigin.status, 403);
     const unauthorized = await fetch(`${handle.url}/v1/workspaces`);
     assert.equal(unauthorized.status, 401);
     const unauthorizedOverview = await fetch(

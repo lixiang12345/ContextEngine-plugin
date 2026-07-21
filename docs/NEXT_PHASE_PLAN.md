@@ -4,9 +4,16 @@
 
 起始基线：`3420ddf` (`main`)
 
-当前数据库：PostgreSQL schema v4
+当前数据库：PostgreSQL schema v6
 
-当前验证：`npm run build` 与 PostgreSQL 全量测试 `144/144` 通过
+当前验证：`npm run build` 与 PostgreSQL 全量测试 `151/151` 通过
+
+Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
+session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
+因包含不可重建的实时流状态而明确返回 405。双实例 100 次 round-robin、实例退出恢复、
+全局容量竞态、principal/workspace 隔离、TTL 和幂等 DELETE 自动化测试通过。两个
+runtime 容器共享 PostgreSQL 的行为冒烟也已通过；全新 Docker 镜像重建因 Docker Hub
+基底镜像 metadata 请求超时未完成，发布前需在网络可用环境复跑镜像构建。
 
 ## 1. 目标
 

@@ -9,7 +9,14 @@ export type SyncOperation = "upsert" | "delete" | "rename";
 export type IndexJobMode = "incremental" | "rebuild";
 export type IndexJobStatus = "queued" | "running" | "succeeded" | "failed";
 export type WorkspacePermission = "reader" | "writer" | "owner";
-export type ConnectorProvider = "github";
+/** Lowercase provider id registered by a SourceConnectorPlugin. */
+export type ConnectorProvider = string;
+export type McpSessionStatus = "active" | "closing" | "closed";
+export type McpSessionRejectionReason =
+  | "unknown"
+  | "expired"
+  | "closed"
+  | "principal_mismatch";
 
 export interface StoredWorkspace {
   id: string;
@@ -17,6 +24,17 @@ export interface StoredWorkspace {
   sourceMode: WorkspaceSourceMode;
   localRoot: string | null;
   revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoredMcpSession {
+  sessionIdHash: string;
+  workspaceId: string;
+  principalId: string;
+  protocolVersion: string;
+  status: McpSessionStatus;
+  lastSeenAt: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -196,6 +214,17 @@ interface JobRow extends QueryResultRow {
   completed_at: string | Date | null;
 }
 
+interface McpSessionRow extends QueryResultRow {
+  session_id_hash: string;
+  workspace_id: string;
+  principal_id: string;
+  protocol_version: string;
+  status: McpSessionStatus;
+  last_seen_at: string | Date;
+  created_at: string | Date;
+  updated_at: string | Date;
+}
+
 type AdvisoryLockClient = PoolClient;
 
 export class WorkspaceNotFoundError extends Error {
@@ -329,6 +358,19 @@ function connectorFileFromRow(row: ConnectorFileRow): StoredConnectorFile {
   };
 }
 
+function mcpSessionFromRow(row: McpSessionRow): StoredMcpSession {
+  return {
+    sessionIdHash: row.session_id_hash,
+    workspaceId: row.workspace_id,
+    principalId: row.principal_id,
+    protocolVersion: row.protocol_version,
+    status: row.status,
+    lastSeenAt: iso(row.last_seen_at)!,
+    createdAt: iso(row.created_at)!,
+    updatedAt: iso(row.updated_at)!,
+  };
+}
+
 const permissionRank: Record<WorkspacePermission, number> = {
   reader: 1,
   writer: 2,
@@ -405,6 +447,215 @@ export class WorkspaceRepository {
 
   async health(): Promise<void> {
     await this.pool.query("SELECT 1");
+  }
+
+  async createMcpSession(input: {
+    sessionIdHash: string;
+    workspaceId: string;
+    principalId: string;
+    protocolVersion: string;
+    idleTtlMs: number;
+    maxSessions: number;
+  }): Promise<StoredMcpSession | null> {
+    return this.withTransaction(async (client) => {
+      await client.query(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended('contextengine:mcp-session-capacity', 0)
+         )`,
+      );
+      const created = await client.query<McpSessionRow>(
+        `INSERT INTO ce_mcp_sessions(
+           session_id_hash, workspace_id, principal_id, protocol_version
+         )
+         SELECT $1, $2, $3, $4
+         WHERE (
+           SELECT COUNT(*)
+           FROM ce_mcp_sessions
+           WHERE status = 'active'
+             AND last_seen_at + ($5::bigint * interval '1 millisecond')
+                   > clock_timestamp()
+         ) < $6
+         ON CONFLICT (session_id_hash) DO NOTHING
+         RETURNING session_id_hash, workspace_id, principal_id, protocol_version,
+                   status, last_seen_at, created_at, updated_at`,
+        [
+          input.sessionIdHash,
+          input.workspaceId,
+          input.principalId,
+          input.protocolVersion,
+          input.idleTtlMs,
+          input.maxSessions,
+        ],
+      );
+      return created.rows[0] ? mcpSessionFromRow(created.rows[0]) : null;
+    });
+  }
+
+  async getAuthorizedMcpSession(input: {
+    sessionIdHash: string;
+    workspaceId: string;
+    principalId: string;
+    idleTtlMs: number;
+  }): Promise<StoredMcpSession | null> {
+    const result = await this.pool.query<McpSessionRow>(
+      `SELECT session_id_hash, workspace_id, principal_id, protocol_version,
+              status, last_seen_at, created_at, updated_at
+       FROM ce_mcp_sessions
+       WHERE session_id_hash = $1
+         AND workspace_id = $2
+         AND principal_id = $3
+         AND status = 'active'
+         AND last_seen_at + ($4::bigint * interval '1 millisecond')
+               > clock_timestamp()`,
+      [
+        input.sessionIdHash,
+        input.workspaceId,
+        input.principalId,
+        input.idleTtlMs,
+      ],
+    );
+    return result.rows[0] ? mcpSessionFromRow(result.rows[0]) : null;
+  }
+
+  async touchMcpSession(input: {
+    sessionIdHash: string;
+    workspaceId: string;
+    principalId: string;
+    idleTtlMs: number;
+  }): Promise<StoredMcpSession | null> {
+    const result = await this.pool.query<McpSessionRow>(
+      `UPDATE ce_mcp_sessions
+       SET last_seen_at = clock_timestamp(),
+           updated_at = clock_timestamp()
+       WHERE session_id_hash = $1
+         AND workspace_id = $2
+         AND principal_id = $3
+         AND status = 'active'
+         AND last_seen_at + ($4::bigint * interval '1 millisecond')
+               > clock_timestamp()
+       RETURNING session_id_hash, workspace_id, principal_id, protocol_version,
+                 status, last_seen_at, created_at, updated_at`,
+      [
+        input.sessionIdHash,
+        input.workspaceId,
+        input.principalId,
+        input.idleTtlMs,
+      ],
+    );
+    return result.rows[0] ? mcpSessionFromRow(result.rows[0]) : null;
+  }
+
+  async classifyMcpSessionRejection(input: {
+    sessionIdHash: string;
+    workspaceId: string;
+    principalId: string;
+    idleTtlMs: number;
+  }): Promise<McpSessionRejectionReason> {
+    const result = await this.pool.query<{ reason: McpSessionRejectionReason }>(
+      `SELECT CASE
+         WHEN workspace_id <> $2 OR principal_id <> $3
+           THEN 'principal_mismatch'
+         WHEN status <> 'active' THEN 'closed'
+         WHEN last_seen_at + ($4::bigint * interval '1 millisecond')
+                <= clock_timestamp() THEN 'expired'
+         ELSE 'unknown'
+       END AS reason
+       FROM ce_mcp_sessions
+       WHERE session_id_hash = $1`,
+      [
+        input.sessionIdHash,
+        input.workspaceId,
+        input.principalId,
+        input.idleTtlMs,
+      ],
+    );
+    return result.rows[0]?.reason ?? "unknown";
+  }
+
+  async closeMcpSession(input: {
+    sessionIdHash: string;
+    workspaceId: string;
+    principalId: string;
+  }): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE ce_mcp_sessions
+       SET status = 'closed', updated_at = clock_timestamp()
+       WHERE session_id_hash = $1
+         AND workspace_id = $2
+         AND principal_id = $3
+         AND status <> 'closed'`,
+      [input.sessionIdHash, input.workspaceId, input.principalId],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async pruneExpiredMcpSessions(idleTtlMs: number, limit = 256): Promise<number> {
+    const result = await this.pool.query(
+      `WITH doomed AS (
+         SELECT session_id_hash
+         FROM ce_mcp_sessions
+         WHERE (
+             status = 'active'
+             AND last_seen_at + (($1::bigint * 2) * interval '1 millisecond')
+                   <= clock_timestamp()
+           ) OR (
+             status <> 'active'
+             AND updated_at + ($1::bigint * interval '1 millisecond')
+                   <= clock_timestamp()
+           )
+         ORDER BY updated_at
+         LIMIT $2
+       )
+       DELETE FROM ce_mcp_sessions AS session
+       USING doomed
+       WHERE session.session_id_hash = doomed.session_id_hash`,
+      [idleTtlMs, limit],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async countActiveMcpSessions(idleTtlMs: number): Promise<number> {
+    const result = await this.pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM ce_mcp_sessions
+       WHERE status = 'active'
+         AND last_seen_at + ($1::bigint * interval '1 millisecond')
+               > clock_timestamp()`,
+      [idleTtlMs],
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async getMcpSessionStatistics(idleTtlMs: number): Promise<{
+    active: number;
+    expired: number;
+    closed: number;
+  }> {
+    const result = await this.pool.query<{
+      active: string;
+      expired: string;
+      closed: string;
+    }>(
+      `SELECT
+         COUNT(*) FILTER (
+           WHERE status = 'active'
+             AND last_seen_at + ($1::bigint * interval '1 millisecond')
+                   > clock_timestamp()
+         )::text AS active,
+         COUNT(*) FILTER (
+           WHERE status = 'active'
+             AND last_seen_at + ($1::bigint * interval '1 millisecond')
+                   <= clock_timestamp()
+         )::text AS expired,
+         COUNT(*) FILTER (WHERE status <> 'active')::text AS closed
+       FROM ce_mcp_sessions`,
+      [idleTtlMs],
+    );
+    return {
+      active: Number(result.rows[0]?.active ?? 0),
+      expired: Number(result.rows[0]?.expired ?? 0),
+      closed: Number(result.rows[0]?.closed ?? 0),
+    };
   }
 
   /**

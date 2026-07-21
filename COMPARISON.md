@@ -4,7 +4,7 @@ This document is an honest capability gap analysis.
 **ContextEngine-plugin** is an open, portable retrieval layer.  
 **Augment Context Engine** is a commercial, productized context platform.
 
-Last updated: 2026-07-21 · ContextEngine **v0.4.0** (based on public Augment product pages / MCP, SDK, connector, rules, and permissions docs).
+Last updated: 2026-07-22 · ContextEngine **v0.4.0** (based on public Augment product pages / MCP, SDK, connector, rules, and permissions docs).
 
 For the detailed capability-to-code audit and staged roadmap, see
 [docs/AUGMENT_ALIGNMENT.md](./docs/AUGMENT_ALIGNMENT.md).
@@ -32,7 +32,7 @@ For the detailed capability-to-code audit and staged roadmap, see
 | Real-time local indexing | ✅ hash incremental + `watch` | ✅ local indexer, “next query reflects edits” | Medium |
 | Large monorepo scale | ⚠️ PostgreSQL + pgvector; avoids full vector maps, still needs scale testing | ✅ production indexing at monorepo scale | **High** |
 | Multi-repo / org index | ✅ multi-root + profiles + HTTP workspaces | ✅ multi-repo connectors, org-wide index | Medium–High |
-| Non-code sources (docs, wikis, tickets) | ⚠️ local extra roots and content-addressed Blobs | ✅ Context Connectors (docs, websites, GitHub/GitLab, …) | **High** |
+| Non-code sources (docs, wikis, tickets) | ⚠️ provider-neutral plugin SDK and content-addressed Blobs; GitHub built in | ✅ packaged website and GitHub/GitLab/Bitbucket connectors | **Medium–High** |
 | Commit / history context | ✅ recent git log as searchable chunks | ✅ deeper Context Lineage / history products | Medium |
 | Symbol / dependency awareness | ✅ symbol table + import graph expand | ✅ deeper codebase understanding (proprietary) | Medium |
 | Team index sharing | ✅ shared PostgreSQL workspace namespaces | ✅ S3/object-store sharing and hosted team indexes | Medium–High |
@@ -42,7 +42,7 @@ For the detailed capability-to-code audit and staged roadmap, see
 | Open source / self-host | ✅ | ❌ (product) | Our advantage |
 | Offline / no SaaS | ✅ BM25-only works offline | Partial (local indexer, cloud product) | Our advantage |
 | Cost | Free infra; pay only if you use embedding API | Product pricing / free query tier | Depends |
-| Extensibility as a library | ✅ TypeScript API | SDK for connectors (closed ecosystem) | Our advantage |
+| Extensibility as a library | ✅ TypeScript API plus source connector plugin contract | ✅ TypeScript/Python SDK and open-source Context Connectors | Different strengths |
 
 ---
 
@@ -68,8 +68,9 @@ multi-tenant indexing.
 
 ### 3. Multi-source context
 
-Augment indexes **code + docs sites + internal wikis + multi-git hosts**.  
-We only index **local filesystem + recent git commits**.
+Augment packages **code + docs sites + multi-git hosts** and exposes DirectContext.
+We now provide a provider-neutral connector contract and built-in GitHub support,
+but still lack packaged GitLab/Bitbucket/website/wiki/ticket plugins.
 
 ### 4. Measured agent outcomes
 

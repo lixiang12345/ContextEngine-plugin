@@ -50,6 +50,7 @@ Most coding agents explore large repos with repeated `grep` / `find` tool calls.
 | Watch mode | Debounced incremental re-index |
 | MCP | `codebase-retrieval` (Augment-compatible; `codebase_retrieval` legacy alias) + search/file/index tools |
 | HTTP | Authenticated workspace sync, index jobs, retrieval, and SSE progress |
+| Source plugins | Provider-neutral read-only connector SDK; GitHub built in |
 | Eval | Recall/MRR/nDCG plus repeated paired PR runs and a fixed historical corpus |
 
 **Honest comparison with Augment:** [COMPARISON.md](./COMPARISON.md) · **Design:** [ARCHITECTURE.md](./ARCHITECTURE.md)
@@ -265,7 +266,10 @@ contextengine-http
 MCP-capable remote clients can use the Streamable HTTP endpoint
 `/v1/workspaces/{workspaceId}/mcp` with the same Bearer key. The first request is
 `initialize`, which returns an `mcp-session-id`; subsequent requests expose the
-canonical `codebase-retrieval` tool for that workspace. See
+canonical `codebase-retrieval` tool for that workspace. PostgreSQL-backed
+sessions can resume on any healthy instance and survive process restart without
+sticky routing. This JSON-response mode supports POST and idempotent DELETE;
+GET/SSE returns 405 because live streams are not reconstructable. See
 [docs/HTTP_API.md](./docs/HTTP_API.md#remote-mcp-over-streamable-http) for the
 wire example and deployment constraints.
 
@@ -311,6 +315,10 @@ permissions per workspace. A read-only GitHub connector can attach one
 repository to an empty Blob workspace, synchronize it incrementally, and expose
 source status in the dashboard. See `CONTEXTENGINE_HTTP_API_KEYS`,
 `CONTEXTENGINE_GITHUB_TOKEN`, and the connector/ACL routes in the HTTP API guide.
+Embedded hosts can register additional providers through `connectorPlugins`;
+see [docs/PLUGINS.md](./docs/PLUGINS.md).
+Embedded hosts can register additional providers through `connectorPlugins`;
+see [docs/PLUGINS.md](./docs/PLUGINS.md).
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).
@@ -355,8 +363,10 @@ explicitly need a smaller packed payload; omitting it returns all selected hits.
 | `CONTEXTENGINE_HTTP_API_KEY` | Required Bearer key for HTTP service |
 | `CONTEXTENGINE_HTTP_HOST` / `_PORT` | HTTP bind address and port |
 | `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES` | Max bytes per synced source Blob (default 2 MiB) |
+| `CONTEXTENGINE_HTTP_CORS_ORIGINS` | Exact comma-separated browser origins, or `*`; disabled by default |
+| `CONTEXTENGINE_MCP_SESSION_STORE` | `postgres` (default, cross-instance) or `memory` (single-process rollback) |
 | `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` | Remote MCP idle session lifetime (default 30 minutes) |
-| `CONTEXTENGINE_MCP_MAX_SESSIONS` | Remote MCP session cap per HTTP process (default 128) |
+| `CONTEXTENGINE_MCP_MAX_SESSIONS` | Global PostgreSQL Remote MCP session cap (default 128; per-process in memory mode) |
 | `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | Allow server-local workspace roots (default off) |
 | `CONTEXTENGINE_HTTP_ALLOW_PRIVATE_MODEL_URLS` | Permit runtime model URLs on private/local networks in trusted deployments (default off) |
 | `CONTEXTENGINE_COMMIT_LIMIT` | How many recent commits to index (default `80`, `0` = off) |

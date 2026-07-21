@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added a public source connector plugin SDK and registry, adapted GitHub as the
+  built-in provider, generalized HTTP source creation and synchronization, and
+  added schema v6 provider ids plus third-party plugin end-to-end coverage.
+- Added an opt-in exact-origin CORS policy with preflight handling and MCP header exposure.
+- Added schema v5 durable Remote MCP sessions: hashed session identifiers,
+  database-clock TTL and global capacity, cross-instance JSON POST handling,
+  restart recovery, idempotent close, aggregate metrics, explicit memory-mode
+  rollback, and two-instance race/restart coverage. GET/SSE is explicitly 405.
 - Added multi-principal constant-time Bearer authentication, workspace reader/writer/owner ACLs, principal-bound MCP sessions, admin-only observability/model controls, and workspace-scoped Blob possession proofs.
 - Added a read-only GitHub repository connector with bounded tree/Blob reads, incremental cursor-based synchronization, atomic source/index-job commits, source status APIs, dashboard sync controls, and credential redaction.
 - Added versioned PostgreSQL migrations through schema v4 for workspace ACLs, Blob grants, connector sources/files, durable connector attempt leases, database-clock sync-session TTL fencing, concurrent Blob uploads, sync-plan ownership fencing, and rolling-upgrade transition guards, including cross-process migration and end-to-end isolation regression coverage.

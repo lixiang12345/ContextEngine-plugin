@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 6;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -1637,7 +1637,7 @@ export class PostgresStore {
       CREATE TABLE IF NOT EXISTS ce_connector_sources (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL UNIQUE REFERENCES ce_workspaces(id) ON DELETE CASCADE,
-        provider TEXT NOT NULL CHECK (provider IN ('github')),
+        provider TEXT NOT NULL CHECK (provider ~ '^[a-z][a-z0-9_-]{0,62}$'),
         external_id TEXT NOT NULL,
         config JSONB NOT NULL DEFAULT '{}'::jsonb,
         cursor JSONB,
@@ -1750,6 +1750,63 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [4],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 5) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_mcp_sessions (
+        session_id_hash TEXT PRIMARY KEY CHECK (session_id_hash ~ '^[0-9a-f]{64}$'),
+        workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+        principal_id TEXT NOT NULL,
+        protocol_version TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK (status IN ('active', 'closing', 'closed')),
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+      );
+      CREATE INDEX IF NOT EXISTS ce_mcp_sessions_active_idx
+        ON ce_mcp_sessions(status, last_seen_at)
+        WHERE status = 'active';
+      CREATE INDEX IF NOT EXISTS ce_mcp_sessions_workspace_idx
+        ON ce_mcp_sessions(workspace_id, status);
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [5],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 6) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      ALTER TABLE ce_connector_sources
+        DROP CONSTRAINT IF EXISTS ce_connector_sources_provider_check;
+      ALTER TABLE ce_connector_sources
+        ADD CONSTRAINT ce_connector_sources_provider_check
+        CHECK (provider ~ '^[a-z][a-z0-9_-]{0,62}$');
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [6],
             );
             await client.query("COMMIT");
           } catch (error) {

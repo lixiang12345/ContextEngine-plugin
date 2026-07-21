@@ -25,6 +25,13 @@ describe("request telemetry", () => {
       observableRoute("/v1/workspaces/workspace-secret/sources/source-secret/sync"),
       "/v1/workspaces/{workspaceId}/sources/{sourceId}/sync",
     );
+    assert.equal(
+      observableRoute(
+        "/v1/workspaces/workspace-secret/sources/private-provider",
+        "POST",
+      ),
+      "/v1/workspaces/{workspaceId}/sources/{provider}",
+    );
 
     const telemetry = new RequestTelemetry();
     const searchTiming = telemetry.begin();

@@ -74,7 +74,7 @@ const OBSERVABLE_METHODS = new Set([
   "OPTIONS",
 ]);
 
-export function observableRoute(pathname: string): string {
+export function observableRoute(pathname: string, method?: string): string {
   if (/^\/v1\/workspaces\/[^/]+\/sync\/plan$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/sync/plan";
   }
@@ -90,14 +90,13 @@ export function observableRoute(pathname: string): string {
   if (/^\/v1\/workspaces\/[^/]+\/sources$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/sources";
   }
-  if (/^\/v1\/workspaces\/[^/]+\/sources\/github$/.test(pathname)) {
-    return "/v1/workspaces/{workspaceId}/sources/github";
-  }
   if (/^\/v1\/workspaces\/[^/]+\/sources\/[^/]+\/sync$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/sources/{sourceId}/sync";
   }
   if (/^\/v1\/workspaces\/[^/]+\/sources\/[^/]+$/.test(pathname)) {
-    return "/v1/workspaces/{workspaceId}/sources/{sourceId}";
+    return method?.toUpperCase() === "POST"
+      ? "/v1/workspaces/{workspaceId}/sources/{provider}"
+      : "/v1/workspaces/{workspaceId}/sources/{sourceId}";
   }
   if (/^\/v1\/workspaces\/[^/]+\/index-jobs$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/index-jobs";
@@ -154,7 +153,7 @@ export class RequestTelemetry {
     const normalizedMethod = OBSERVABLE_METHODS.has(requestedMethod)
       ? requestedMethod
       : "OTHER";
-    const route = observableRoute(pathname);
+    const route = observableRoute(pathname, normalizedMethod);
     const observation: RequestObservation = {
       id: ++this.sequence,
       method: normalizedMethod,

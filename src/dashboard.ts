@@ -513,6 +513,7 @@ export function observabilityDashboardHtml(): string {
       <div class="metric"><div class="metric-label">Error rate</div><div id="errorMetric" class="metric-value">--</div><div id="errorDetail" class="metric-detail">HTTP 4xx and 5xx</div></div>
       <div class="metric"><div class="metric-label">P95 latency</div><div id="latencyMetric" class="metric-value">--</div><div id="latencyDetail" class="metric-detail">All observed routes</div></div>
       <div class="metric"><div class="metric-label">Index jobs</div><div id="jobMetric" class="metric-value">--</div><div id="jobDetail" class="metric-detail">Queued or running</div></div>
+      <div class="metric"><div class="metric-label">MCP sessions</div><div id="mcpMetric" class="metric-value">--</div><div id="mcpDetail" class="metric-detail">Active durable sessions</div></div>
     </section>
     <section id="health" class="section split">
       <div>
@@ -789,6 +790,7 @@ export function observabilityDashboardHtml(): string {
     var files = workspaces.reduce(function (sum, item) { return sum + Number(item.stats && item.stats.fileCount || 0); }, 0);
     var chunks = workspaces.reduce(function (sum, item) { return sum + Number(item.stats && item.stats.chunkCount || 0); }, 0);
     var activeJobs = (data.jobs || []).filter(function (job) { return job.status === "queued" || job.status === "running"; }).length;
+    var mcp = data.mcp_sessions || {};
     byId("serviceMetric").textContent = "Online";
     byId("serviceDetail").textContent = uptime(data.service.uptime_seconds) + " uptime";
     byId("workspaceMetric").textContent = number(workspaces.length);
@@ -803,6 +805,8 @@ export function observabilityDashboardHtml(): string {
     byId("latencyDetail").textContent = duration(data.requests.average_ms) + " average";
     byId("jobMetric").textContent = number(activeJobs);
     byId("jobDetail").textContent = number((data.jobs || []).length) + " recent jobs";
+    byId("mcpMetric").textContent = number(mcp.active);
+    byId("mcpDetail").textContent = number(mcp.expired) + " expired · " + number(mcp.closed) + " closed";
   }
 
   function renderRuntime(data) {
@@ -891,6 +895,7 @@ export function observabilityDashboardHtml(): string {
     var indexing = config.indexing || {};
     var http = config.http || {};
     var storage = config.storage || {};
+    var mcp = data.mcp_sessions || {};
 
     stateBadge("embeddingState", embedding.state);
     stateBadge("rerankerState", reranker.state);
@@ -930,7 +935,10 @@ export function observabilityDashboardHtml(): string {
       ["HTTP auth", String(http.authentication || "--")],
       ["Max Blob", bytes(http.max_blob_bytes)],
       ["MCP idle TTL", http.mcp_session_idle_ttl_ms == null ? "--" : duration(http.mcp_session_idle_ttl_ms)],
-      ["MCP sessions", http.mcp_max_sessions == null ? "--" : number(http.mcp_max_sessions) + " max"],
+      ["MCP store", String(http.mcp_session_store || "--")],
+      ["MCP sessions", number(mcp.active) + " active / " + (http.mcp_max_sessions == null ? "--" : number(http.mcp_max_sessions)) + " max"],
+      ["MCP rejected", number(mcp.lookup_rejection) + " lookup · " + number(mcp.capacity_rejection) + " capacity"],
+      ["CORS origins", number(http.cors_origins_count)],
       ["Local workspaces", http.local_workspaces ? "enabled" : "disabled"],
       ["Allowlist entries", number(http.local_root_allowlist_count)],
       ["Database", storage.host ? storage.host + (storage.port ? ":" + storage.port : "") + " / " + (storage.database || "configured") : "--"],

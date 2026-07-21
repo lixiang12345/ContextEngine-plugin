@@ -25,13 +25,13 @@ understand query → multi-signal retrieve → fuse → rerank → expand → pa
 | Neural rerank | Optional `/v1/rerank` blend on top-N (`CONTEXTENGINE_NEURAL_RERANK`) | Cross-encoder style second stage when GPU server is available |
 | Expand | PostgreSQL import/symbol graph around retrieved candidates | Related files without a full in-memory graph |
 | Pack | MMR diversity + token budget | Fewer tokens, less duplicate noise |
-| Multi-source | Multi-root + docs roots in one index | Partial multi-source story |
+| Multi-source | Multi-root + provider-neutral source plugin SDK; GitHub built in | Extensible without weakening sync fencing |
 | Eval | Recall + MRR + nDCG@k | Continuous quality bar |
 
 ## What remains behind Augment (honest)
 
 1. Custom paired code retrieval models  
-2. Org-scale connectors (Jira, Confluence, multi-host)  
+2. Built-in GitLab/Bitbucket/web/Jira/Confluence connectors and webhooks
 3. Enterprise auth / shared cloud indexes  
 4. Published PR-generation benchmarks  
 

@@ -58,6 +58,12 @@ export {
   CODE_RETRIEVAL_QUERY_INSTRUCT,
 } from "./embeddings/provider.js";
 export { buildSymbolGraph, expandViaGraph } from "./graph/symbol-graph.js";
+export { GitHubConnectorClient, GitHubConnectorError } from "./connectors/github.js";
+export { GitHubSourceConnector } from "./connectors/github-plugin.js";
+export {
+  SourceConnectorError,
+  SourceConnectorRegistry,
+} from "./connectors/types.js";
 export { harvestCommits, commitsToChunks, isGitRepo } from "./lineage/commits.js";
 export { runEval, defaultSelfEvalCases } from "./eval/harness.js";
 export {
@@ -103,6 +109,11 @@ export type {
 } from "./eval/pr-harness.js";
 export type { RepoProfile, MultiRepoConfig } from "./config/profiles.js";
 export type { AnalyzedQuery, QueryIntent } from "./search/query-analyzer.js";
+export type {
+  ConnectorFileSnapshot,
+  ConnectorSnapshot,
+  SourceConnectorPlugin,
+} from "./connectors/types.js";
 
 export type {
   CodeChunk,

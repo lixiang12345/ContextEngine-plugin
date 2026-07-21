@@ -11,14 +11,23 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { z, ZodError } from "zod";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import {
+  isInitializeRequest,
+  LATEST_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+} from "@modelcontextprotocol/sdk/types.js";
 import { loadDotEnv, resolveDatabaseUrl, resolveEngineConfig } from "./config.js";
 import { observabilityDashboardHtml } from "./dashboard.js";
 import { ContextEngine } from "./engine.js";
 import {
   GitHubConnectorClient,
-  GitHubConnectorError,
 } from "./connectors/github.js";
+import { GitHubSourceConnector } from "./connectors/github-plugin.js";
+import {
+  SourceConnectorError,
+  SourceConnectorRegistry,
+  type SourceConnectorPlugin,
+} from "./connectors/types.js";
 import { createRetrievalMcpServer } from "./mcp-tools.js";
 import {
   ConnectorSyncConflictError,
@@ -36,6 +45,12 @@ import {
   testRerankerConnection,
 } from "./server/model-connection-test.js";
 import { RequestTelemetry } from "./server/request-telemetry.js";
+import {
+  MemoryMcpSessionStore,
+  PostgresMcpSessionStore,
+  type McpSessionStore,
+  type McpSessionStoreKind,
+} from "./server/mcp-session-store.js";
 import {
   RuntimeModelConfiguration,
   type EmbeddingConfigurationUpdate,
@@ -58,6 +73,7 @@ import {
 } from "./server/workspace-repository.js";
 import type { SearchHit } from "./types.js";
 import type { IndexGenerationStatus } from "./store/postgres-store.js";
+import { sha256 } from "./util/hash.js";
 
 const DEFAULT_MAX_BLOB_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
@@ -76,10 +92,15 @@ export interface HttpServerOptions {
   maxBlobBytes?: number;
   mcpSessionIdleTtlMs?: number;
   mcpMaxSessions?: number;
+  mcpSessionStore?: McpSessionStoreKind;
   disableEmbeddings?: boolean;
   githubToken?: string;
   githubApiBaseUrl?: string;
   githubTimeoutMs?: number;
+  /** Additional read-only source providers available under /sources/{provider}. */
+  connectorPlugins?: readonly SourceConnectorPlugin[];
+  /** Exact browser origins allowed to call the HTTP API, or ["*"]. */
+  corsOrigins?: readonly string[];
 }
 
 export interface HttpServerHandle {
@@ -274,23 +295,6 @@ const httpApiKeysSchema = z.array(
 const workspacePermissionSchema = z.object({
   permission: z.enum(["reader", "writer", "owner"]),
 });
-const githubSourceSchema = z.object({
-  owner: z.string().trim().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/),
-  repository: z
-    .string()
-    .trim()
-    .min(1)
-    .max(100)
-    .refine((value) => !/[\/\u0000-\u001f\u007f]/.test(value), "invalid repository"),
-  ref: z
-    .string()
-    .trim()
-    .min(1)
-    .max(255)
-    .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "invalid ref")
-    .default("HEAD"),
-});
-
 function readBoolean(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(value?.trim() ?? "");
 }
@@ -306,6 +310,46 @@ function positiveOption(value: number, name: string): number {
     throw new Error(`${name} must be a positive finite number`);
   }
   return normalized;
+}
+
+function mcpSessionStoreFromEnv(value: string | undefined): McpSessionStoreKind {
+  const normalized = value?.trim().toLowerCase() || "postgres";
+  if (normalized === "postgres" || normalized === "memory") return normalized;
+  throw new Error("CONTEXTENGINE_MCP_SESSION_STORE must be postgres or memory");
+}
+
+function normalizeCorsOrigins(values: readonly string[]): string[] {
+  const origins = new Set<string>();
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value) continue;
+    if (value === "*") {
+      origins.add(value);
+      continue;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new Error(`Invalid CORS origin: ${value}`);
+    }
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.origin !== value
+    ) {
+      throw new Error(`CORS origin must be an exact HTTP(S) origin: ${value}`);
+    }
+    origins.add(parsed.origin);
+  }
+  if (origins.has("*") && origins.size > 1) {
+    throw new Error("CORS wildcard cannot be combined with explicit origins");
+  }
+  return [...origins];
 }
 
 function apiKeysFromEnv(value: string | undefined): HttpApiKeyConfig[] {
@@ -648,8 +692,8 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/sources": {
         get: { summary: "List connector sources and synchronization state" },
       },
-      "/v1/workspaces/{workspaceId}/sources/github": {
-        post: { summary: "Attach a read-only GitHub repository source" },
+      "/v1/workspaces/{workspaceId}/sources/{provider}": {
+        post: { summary: "Attach a registered read-only source provider" },
       },
       "/v1/workspaces/{workspaceId}/sources/{sourceId}": {
         get: { summary: "Get connector source state" },
@@ -704,6 +748,8 @@ class HttpContextService {
   private readonly repository: WorkspaceRepository;
   private readonly runner: IndexJobRunner;
   private readonly connectorSync: ConnectorSyncCoordinator;
+  private readonly connectorRegistry: SourceConnectorRegistry;
+  private readonly corsOrigins: ReadonlySet<string>;
   private readonly telemetry = new RequestTelemetry();
   private readonly engines = new Map<string, ContextEngine>();
   private readonly modelConfiguration = new RuntimeModelConfiguration();
@@ -714,6 +760,21 @@ class HttpContextService {
   private readonly maxBlobBytes: number;
   private readonly mcpSessionIdleTtlMs: number;
   private readonly mcpMaxSessions: number;
+  private readonly mcpSessionStore: McpSessionStore;
+  private readonly mcpSessionMetrics = {
+    initialize: 0,
+    resume: 0,
+    close: 0,
+    capacityRejection: 0,
+    lookupRejection: 0,
+    unknownRejection: 0,
+    expiredRejection: 0,
+    closedRejection: 0,
+    principalMismatch: 0,
+    lookupCount: 0,
+    lookupLatencyMsTotal: 0,
+    lookupLatencyMsMax: 0,
+  };
   private readonly databaseUrl: string;
   private readonly disableEmbeddings: boolean;
   private readonly mcpSessions = new Map<string, McpHttpSession>();
@@ -733,11 +794,16 @@ class HttpContextService {
         | "maxBlobBytes"
         | "mcpSessionIdleTtlMs"
         | "mcpMaxSessions"
+        | "mcpSessionStore"
         | "disableEmbeddings"
         | "githubTimeoutMs"
+        | "corsOrigins"
       >
     > &
-      Pick<HttpServerOptions, "githubToken" | "githubApiBaseUrl">,
+      Pick<
+        HttpServerOptions,
+        "githubToken" | "githubApiBaseUrl" | "connectorPlugins"
+      >,
   ) {
     this.repository = repository;
     this.authenticator = authenticator;
@@ -755,6 +821,17 @@ class HttpContextService {
     this.maxBlobBytes = options.maxBlobBytes;
     this.mcpSessionIdleTtlMs = options.mcpSessionIdleTtlMs;
     this.mcpMaxSessions = options.mcpMaxSessions;
+    this.mcpSessionStore = options.mcpSessionStore === "postgres"
+      ? new PostgresMcpSessionStore(
+          repository,
+          options.mcpSessionIdleTtlMs,
+          options.mcpMaxSessions,
+        )
+      : new MemoryMcpSessionStore(
+          options.mcpSessionIdleTtlMs,
+          options.mcpMaxSessions,
+        );
+    this.corsOrigins = new Set(options.corsOrigins);
     this.databaseUrl = options.databaseUrl;
     this.disableEmbeddings = options.disableEmbeddings;
     this.runner = new IndexJobRunner({
@@ -766,10 +843,14 @@ class HttpContextService {
       apiBaseUrl: options.githubApiBaseUrl,
       timeoutMs: options.githubTimeoutMs,
     });
+    this.connectorRegistry = new SourceConnectorRegistry([
+      new GitHubSourceConnector(github),
+      ...(options.connectorPlugins ?? []),
+    ]);
     this.connectorSync = new ConnectorSyncCoordinator({
       repository,
       runner: this.runner,
-      github,
+      connectors: this.connectorRegistry,
       maxBlobBytes: options.maxBlobBytes,
       secrets: options.githubToken ? [options.githubToken] : [],
     });
@@ -837,6 +918,9 @@ class HttpContextService {
         numberFromEnv(process.env.CONTEXTENGINE_HTTP_MAX_BLOB_BYTES, DEFAULT_MAX_BLOB_BYTES),
       mcpSessionIdleTtlMs,
       mcpMaxSessions,
+      mcpSessionStore:
+        options.mcpSessionStore ??
+        mcpSessionStoreFromEnv(process.env.CONTEXTENGINE_MCP_SESSION_STORE),
       disableEmbeddings: options.disableEmbeddings ?? false,
       githubToken:
         options.githubToken ?? (process.env.CONTEXTENGINE_GITHUB_TOKEN?.trim() || undefined),
@@ -847,6 +931,11 @@ class HttpContextService {
         options.githubTimeoutMs ??
           numberFromEnv(process.env.CONTEXTENGINE_GITHUB_TIMEOUT_MS, 30_000),
         "githubTimeoutMs",
+      ),
+      connectorPlugins: options.connectorPlugins,
+      corsOrigins: normalizeCorsOrigins(
+        options.corsOrigins ??
+          (process.env.CONTEXTENGINE_HTTP_CORS_ORIGINS ?? "").split(","),
       ),
     });
     await service.runner.start();
@@ -872,6 +961,7 @@ class HttpContextService {
   }
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (this.applyCors(request, response)) return;
     const requestUrl = new URL(request.url ?? "/", "http://contextengine.local");
     const pathname = requestUrl.pathname;
     const observeRequest =
@@ -933,7 +1023,11 @@ class HttpContextService {
           storage: "postgresql+pgvector",
           transports: ["http", "mcp-stdio", "mcp-streamable-http"],
           workspace_source_modes: ["blob", "local"],
-          connectors: ["github"],
+          connectors: this.connectorRegistry.list().map((item) => item.provider),
+          connector_plugins: this.connectorRegistry.list().map((item) => ({
+            provider: item.provider,
+            display_name: item.displayName,
+          })),
           authorization: {
             principals: true,
             workspace_acl: this.aclEnabled,
@@ -979,9 +1073,10 @@ class HttpContextService {
           25,
           100,
         );
-        const [workspaces, jobs] = await Promise.all([
+        const [workspaces, jobs, mcpSessions] = await Promise.all([
           this.repository.listWorkspaces(),
           this.repository.listRecentIndexJobs(jobLimit),
+          this.mcpSessionStore.statistics(),
         ]);
         const observedWorkspaces = await Promise.all(
           workspaces.map(async (workspace) => {
@@ -1051,6 +1146,28 @@ class HttpContextService {
               duration_ms: item.durationMs,
               started_at: item.startedAt,
             })),
+          },
+          mcp_sessions: {
+            store: this.mcpSessionStore.kind,
+            ...mcpSessions,
+            initialize: this.mcpSessionMetrics.initialize,
+            resume: this.mcpSessionMetrics.resume,
+            takeover: 0,
+            close: this.mcpSessionMetrics.close,
+            lease_conflict: 0,
+            capacity_rejection: this.mcpSessionMetrics.capacityRejection,
+            lookup_rejection: this.mcpSessionMetrics.lookupRejection,
+            unknown_rejection: this.mcpSessionMetrics.unknownRejection,
+            expired_rejection: this.mcpSessionMetrics.expiredRejection,
+            closed_rejection: this.mcpSessionMetrics.closedRejection,
+            principal_mismatch: this.mcpSessionMetrics.principalMismatch,
+            lookup_average_ms: this.mcpSessionMetrics.lookupCount > 0
+              ? Number((
+                  this.mcpSessionMetrics.lookupLatencyMsTotal /
+                  this.mcpSessionMetrics.lookupCount
+                ).toFixed(3))
+              : 0,
+            lookup_max_ms: Number(this.mcpSessionMetrics.lookupLatencyMsMax.toFixed(3)),
           },
           workspaces: observedWorkspaces,
           jobs: jobs.map(jobPayload),
@@ -1305,24 +1422,46 @@ class HttpContextService {
         return;
       }
 
-      const githubSourceMatch = /^\/v1\/workspaces\/([^/]+)\/sources\/github$/.exec(
+      const createSourceMatch = /^\/v1\/workspaces\/([^/]+)\/sources\/([^/]+)$/.exec(
         pathname,
       );
-      if (request.method === "POST" && githubSourceMatch) {
-        const workspaceId = decodeURIComponent(githubSourceMatch[1]);
+      if (request.method === "POST" && createSourceMatch) {
+        const workspaceId = decodeURIComponent(createSourceMatch[1]);
+        const provider = decodeURIComponent(createSourceMatch[2]);
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
-        const input = githubSourceSchema.parse(await readJsonBody(request, 64 * 1024));
+        const connector = this.connectorRegistry.get(provider);
+        if (!connector) throw new HttpError(404, "Connector provider not found");
+        let config: Record<string, unknown>;
+        let externalId: string;
+        try {
+          config = connector.validateConfig(await readJsonBody(request, 64 * 1024));
+          if (!config || Array.isArray(config) || typeof config !== "object") {
+            throw new Error("Connector configuration must be a JSON object");
+          }
+          if (JSON.stringify(config) === undefined) {
+            throw new Error("Connector configuration must be JSON-serializable");
+          }
+          externalId = connector.externalId(config).trim();
+          if (
+            !externalId ||
+            externalId.length > 500 ||
+            /[\u0000-\u001f\u007f]/.test(externalId)
+          ) {
+            throw new Error("Connector external id is invalid");
+          }
+        } catch (error) {
+          throw new HttpError(
+            400,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
         let source: StoredConnectorSource;
         try {
           source = await this.repository.createConnectorSource({
             workspaceId,
-            provider: "github",
-            externalId: `${input.owner}/${input.repository}`,
-            config: {
-              owner: input.owner,
-              repository: input.repository,
-              ref: input.ref,
-            },
+            provider: connector.provider,
+            externalId,
+            config,
             createdBy: principal.principalId,
           });
         } catch (error) {
@@ -1360,7 +1499,7 @@ class HttpContextService {
         const source = await this.repository.getConnectorSource(workspaceId, sourceId);
         if (!source) throw new HttpError(404, "Connector source not found");
         try {
-          const result = await this.connectorSync.syncGitHub(workspaceId, sourceId);
+          const result = await this.connectorSync.sync(workspaceId, sourceId);
           json(response, result.noop ? 200 : 202, {
             source: connectorSourcePayload(result.source),
             noop: result.noop,
@@ -1374,7 +1513,7 @@ class HttpContextService {
           if (error instanceof ConnectorSyncConflictError) {
             throw new HttpError(409, error.message);
           }
-          if (error instanceof GitHubConnectorError) {
+          if (error instanceof SourceConnectorError) {
             throw new HttpError(502, error.message);
           }
           throw error;
@@ -1663,7 +1802,250 @@ class HttpContextService {
     }
   }
 
+  private applyCors(request: IncomingMessage, response: ServerResponse): boolean {
+    if (this.corsOrigins.size === 0) return false;
+    const originHeader = request.headers.origin;
+    const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
+    if (!origin) {
+      if (request.method === "OPTIONS" && this.corsOrigins.size > 0) {
+        response.statusCode = 204;
+        response.end();
+        return true;
+      }
+      return false;
+    }
+    const wildcard = this.corsOrigins.has("*");
+    if (!wildcard && !this.corsOrigins.has(origin)) {
+      json(response, 403, { error: { code: "cors_origin_denied", message: "Origin is not allowed" } });
+      return true;
+    }
+    response.setHeader("access-control-allow-origin", wildcard ? "*" : origin);
+    response.setHeader("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+    response.setHeader(
+      "access-control-allow-headers",
+      "Authorization,Content-Type,Accept,Mcp-Session-Id,Mcp-Protocol-Version,Last-Event-ID",
+    );
+    response.setHeader("access-control-expose-headers", "Mcp-Session-Id,Retry-After");
+    if (!wildcard) response.setHeader("vary", "Origin");
+    if (request.method === "OPTIONS") {
+      response.statusCode = 204;
+      response.end();
+      return true;
+    }
+    return false;
+  }
+
   private async handleMcpRequest(
+    workspaceId: string,
+    principal: HttpPrincipal,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    if (this.mcpSessionStore.kind === "postgres") {
+      await this.handleDurableMcpRequest(workspaceId, principal, request, response);
+      return;
+    }
+    await this.handleMemoryMcpRequest(workspaceId, principal, request, response);
+  }
+
+  private async handleDurableMcpRequest(
+    workspaceId: string,
+    principal: HttpPrincipal,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    await this.mcpSessionStore.pruneExpired();
+    try {
+      await this.requireWorkspaceAccess(principal, workspaceId, "reader");
+    } catch {
+      mcpError(response, 404, "MCP workspace was not found");
+      return;
+    }
+
+    const sessionHeader = request.headers["mcp-session-id"];
+    const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
+    const sessionIdHash = sessionId ? sha256(sessionId) : undefined;
+    const sessionInput = sessionIdHash
+      ? { sessionIdHash, workspaceId, principalId: principal.principalId }
+      : undefined;
+
+    if (request.method === "GET") {
+      response.setHeader("allow", "POST, DELETE");
+      mcpError(response, 405, "MCP SSE streams are unavailable for reconstructed sessions");
+      return;
+    }
+
+    if (request.method === "DELETE") {
+      if (!sessionInput) {
+        mcpError(response, 400, "A valid mcp-session-id is required");
+        return;
+      }
+      if (await this.mcpSessionStore.close(sessionInput)) {
+        this.mcpSessionMetrics.close += 1;
+      }
+      response.statusCode = 200;
+      response.end();
+      return;
+    }
+
+    if (request.method !== "POST") {
+      mcpError(response, 405, "Method not allowed");
+      return;
+    }
+
+    const body = await readJsonBody(request, 128 * 1024);
+    if (isInitializeRequest(body)) {
+      if (sessionInput) {
+        mcpError(response, 400, "The initialize request must not include mcp-session-id");
+        return;
+      }
+      const sessionIdForTransport = randomUUID();
+      const requestedVersion = body.params.protocolVersion;
+      const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)
+        ? requestedVersion
+        : LATEST_PROTOCOL_VERSION;
+      const created = await this.mcpSessionStore.create({
+        sessionIdHash: sha256(sessionIdForTransport),
+        workspaceId,
+        principalId: principal.principalId,
+        protocolVersion,
+      });
+      if (!created) {
+        this.mcpSessionMetrics.capacityRejection += 1;
+        response.setHeader("retry-after", "1");
+        mcpError(response, 429, "MCP session capacity has been reached");
+        return;
+      }
+      this.mcpSessionMetrics.initialize += 1;
+
+      const server = createRetrievalMcpServer(
+        {
+          ensureReady: async () => {
+            const workspace = await this.requireWorkspaceAccess(
+              principal,
+              workspaceId,
+              "reader",
+            );
+            return this.requireIndexedEngine(workspace);
+          },
+        },
+        { includeLegacyAlias: false },
+      );
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => sessionIdForTransport,
+        enableJsonResponse: true,
+      });
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(request, response, body);
+        if (response.statusCode >= 400) {
+          await this.mcpSessionStore.close({
+            sessionIdHash: sha256(sessionIdForTransport),
+            workspaceId,
+            principalId: principal.principalId,
+          });
+        }
+      } catch (error) {
+        await this.mcpSessionStore.close({
+          sessionIdHash: sha256(sessionIdForTransport),
+          workspaceId,
+          principalId: principal.principalId,
+        });
+        if (!response.headersSent) {
+          mcpError(response, 500, error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        await transport.close().catch(() => undefined);
+        await server.close().catch(() => undefined);
+      }
+      return;
+    }
+
+    if (!sessionInput) {
+      mcpError(response, 400, "A valid mcp-session-id is required");
+      return;
+    }
+    const lookupStartedAt = performance.now();
+    const session = await this.mcpSessionStore.touch(sessionInput);
+    const lookupLatencyMs = performance.now() - lookupStartedAt;
+    this.mcpSessionMetrics.lookupCount += 1;
+    this.mcpSessionMetrics.lookupLatencyMsTotal += lookupLatencyMs;
+    this.mcpSessionMetrics.lookupLatencyMsMax = Math.max(
+      this.mcpSessionMetrics.lookupLatencyMsMax,
+      lookupLatencyMs,
+    );
+    if (!session) {
+      this.mcpSessionMetrics.lookupRejection += 1;
+      const reason = await this.mcpSessionStore.classifyRejection(sessionInput);
+      if (reason === "principal_mismatch") {
+        this.mcpSessionMetrics.principalMismatch += 1;
+      } else if (reason === "expired") {
+        this.mcpSessionMetrics.expiredRejection += 1;
+      } else if (reason === "closed") {
+        this.mcpSessionMetrics.closedRejection += 1;
+      } else {
+        this.mcpSessionMetrics.unknownRejection += 1;
+      }
+      mcpError(response, 404, "MCP session was not found or has expired");
+      return;
+    }
+    this.mcpSessionMetrics.resume += 1;
+    const protocolHeader = request.headers["mcp-protocol-version"];
+    const protocolVersion = Array.isArray(protocolHeader) ? protocolHeader[0] : protocolHeader;
+    if (protocolVersion && protocolVersion !== session.protocolVersion) {
+      mcpError(response, 400, "MCP protocol version does not match the initialized session");
+      return;
+    }
+    await this.handleFreshMcpPost(
+      principal,
+      workspaceId,
+      request,
+      response,
+      body,
+    );
+  }
+
+  private async handleFreshMcpPost(
+    principal: HttpPrincipal,
+    workspaceId: string,
+    request: IncomingMessage,
+    response: ServerResponse,
+    body: unknown,
+  ): Promise<void> {
+    const server = createRetrievalMcpServer(
+      {
+        ensureReady: async () => {
+          const workspace = await this.requireWorkspaceAccess(
+            principal,
+            workspaceId,
+            "reader",
+          );
+          return this.requireIndexedEngine(workspace);
+        },
+      },
+      { includeLegacyAlias: false },
+    );
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+    transport.onerror = (error) => {
+      console.error("[mcp http]", error.message);
+    };
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(request, response, body);
+    } catch (error) {
+      if (!response.headersSent) {
+        mcpError(response, 500, error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      await transport.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+    }
+  }
+
+  private async handleMemoryMcpRequest(
     workspaceId: string,
     principal: HttpPrincipal,
     request: IncomingMessage,
@@ -1687,11 +2069,32 @@ class HttpContextService {
       (existing.workspaceId !== workspaceId ||
         existing.principalId !== principal.principalId)
     ) {
+      this.mcpSessionMetrics.lookupRejection += 1;
+      this.mcpSessionMetrics.principalMismatch += 1;
       mcpError(response, 404, "MCP session does not belong to this workspace");
       return;
     }
 
     if (existing) {
+      const touched = await this.mcpSessionStore.touch({
+        sessionIdHash: sha256(sessionId!),
+        workspaceId,
+        principalId: principal.principalId,
+      });
+      if (!touched) {
+        this.mcpSessionMetrics.lookupRejection += 1;
+        const reason = await this.mcpSessionStore.classifyRejection({
+          sessionIdHash: sha256(sessionId!),
+          workspaceId,
+          principalId: principal.principalId,
+        });
+        if (reason === "expired") this.mcpSessionMetrics.expiredRejection += 1;
+        else if (reason === "closed") this.mcpSessionMetrics.closedRejection += 1;
+        else this.mcpSessionMetrics.unknownRejection += 1;
+        mcpError(response, 404, "MCP session was not found or has expired");
+        return;
+      }
+      this.mcpSessionMetrics.resume += 1;
       existing.lastSeenAt = Date.now();
       existing.activeRequests += 1;
       try {
@@ -1704,6 +2107,8 @@ class HttpContextService {
     }
 
     if (sessionId) {
+      this.mcpSessionMetrics.lookupRejection += 1;
+      this.mcpSessionMetrics.unknownRejection += 1;
       mcpError(response, 404, "MCP session was not found or has expired");
       return;
     }
@@ -1727,6 +2132,7 @@ class HttpContextService {
       this.mcpSessions.size + this.pendingMcpInitializations >=
       this.mcpMaxSessions
     ) {
+      this.mcpSessionMetrics.capacityRejection += 1;
       response.setHeader("retry-after", "1");
       mcpError(response, 429, "MCP session capacity has been reached");
       return;
@@ -1735,6 +2141,10 @@ class HttpContextService {
     this.pendingMcpInitializations += 1;
     let session: McpHttpSession | undefined;
     let initializedSessionId: string | undefined;
+    const requestedVersion = body.params.protocolVersion;
+    const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)
+      ? requestedVersion
+      : LATEST_PROTOCOL_VERSION;
     const server = createRetrievalMcpServer(
       {
         ensureReady: async () => {
@@ -1753,16 +2163,31 @@ class HttpContextService {
       // JSON responses are easier for remote coding clients and remain fully
       // compliant with the Streamable HTTP transport.
       enableJsonResponse: true,
-      onsessioninitialized: (newSessionId) => {
+      onsessioninitialized: async (newSessionId) => {
         if (!session) return;
+        const created = await this.mcpSessionStore.create({
+          sessionIdHash: sha256(newSessionId),
+          workspaceId,
+          principalId: principal.principalId,
+          protocolVersion,
+        });
+        if (!created) throw new Error("MCP session capacity has been reached");
         initializedSessionId = newSessionId;
         session.lastSeenAt = Date.now();
         this.mcpSessions.set(newSessionId, session);
+        this.mcpSessionMetrics.initialize += 1;
       },
-      onsessionclosed: (closedSessionId) => {
+      onsessionclosed: async (closedSessionId) => {
         const closed = this.mcpSessions.get(closedSessionId);
         if (!closed) return;
         this.mcpSessions.delete(closedSessionId);
+        if (await this.mcpSessionStore.close({
+          sessionIdHash: sha256(closedSessionId),
+          workspaceId: closed.workspaceId,
+          principalId: closed.principalId,
+        })) {
+          this.mcpSessionMetrics.close += 1;
+        }
         void closed.server.close().catch(() => undefined);
       },
     });
@@ -1810,6 +2235,11 @@ class HttpContextService {
   }
 
   private async pruneExpiredMcpSessions(now = Date.now()): Promise<void> {
+    if (this.mcpSessionStore.kind === "postgres") {
+      await this.mcpSessionStore.pruneExpired();
+      return;
+    }
+    await this.mcpSessionStore.pruneExpired();
     const expired = [...this.mcpSessions.entries()].filter(
       ([, session]) =>
         session.activeRequests === 0 &&
@@ -1828,6 +2258,13 @@ class HttpContextService {
   ): Promise<void> {
     if (this.mcpSessions.get(sessionId) !== session) return;
     this.mcpSessions.delete(sessionId);
+    if (await this.mcpSessionStore.close({
+      sessionIdHash: sha256(sessionId),
+      workspaceId: session.workspaceId,
+      principalId: session.principalId,
+    })) {
+      this.mcpSessionMetrics.close += 1;
+    }
     try {
       await session.transport.close();
     } finally {
@@ -1950,6 +2387,8 @@ class HttpContextService {
       maxBlobBytes: this.maxBlobBytes,
       mcpSessionIdleTtlMs: this.mcpSessionIdleTtlMs,
       mcpMaxSessions: this.mcpMaxSessions,
+      mcpSessionStore: this.mcpSessionStore.kind,
+      corsOriginsCount: this.corsOrigins.size,
       disableEmbeddings: this.disableEmbeddings,
     });
   }

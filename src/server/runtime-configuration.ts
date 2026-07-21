@@ -47,6 +47,8 @@ export interface RuntimeConfigurationOptions {
   maxBlobBytes: number;
   mcpSessionIdleTtlMs?: number;
   mcpMaxSessions?: number;
+  mcpSessionStore?: "postgres" | "memory";
+  corsOriginsCount?: number;
   disableEmbeddings: boolean;
 }
 
@@ -408,6 +410,8 @@ export class RuntimeModelConfiguration {
         max_blob_bytes: options.maxBlobBytes,
         mcp_session_idle_ttl_ms: options.mcpSessionIdleTtlMs ?? null,
         mcp_max_sessions: options.mcpMaxSessions ?? null,
+        mcp_session_store: options.mcpSessionStore ?? null,
+        cors_origins_count: options.corsOriginsCount ?? 0,
         local_workspaces: options.allowLocalWorkspaces,
         local_root_allowlist_count: options.localRootAllowlistCount,
       },

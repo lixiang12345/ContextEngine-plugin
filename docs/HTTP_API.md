@@ -118,9 +118,9 @@ immediately, including active MCP sessions. Unauthorized workspace and job IDs
 return `404`. The legacy `CONTEXTENGINE_HTTP_API_KEY` remains a service-wide
 operator credential for backward compatibility.
 
-### Read-only GitHub source
+### Read-only source connectors
 
-Attach one GitHub repository to an empty Blob workspace, then synchronize it:
+The built-in GitHub plugin attaches a repository to an empty Blob workspace:
 
 ```http
 POST /v1/workspaces/{workspaceId}/sources/github
@@ -139,6 +139,13 @@ private repositories; credentials are never stored in source configuration or
 returned by the API. Repository trees above 20,000 files and truncated GitHub
 tree responses are rejected. Files above `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES`
 are recorded as skipped and removed from the searchable snapshot.
+
+Embedded deployments can register additional providers with the public
+`SourceConnectorPlugin` contract. Providers are advertised by
+`GET /v1/capabilities` and use the same
+`POST /v1/workspaces/{workspaceId}/sources/{provider}` creation route. Core
+synchronization retains ownership of leases, hashing, diff, Blob writes and
+index promotion. See [`PLUGINS.md`](./PLUGINS.md).
 
 ### 2. Plan a file manifest change
 
@@ -303,7 +310,6 @@ workspace-scoped endpoint:
 
 ```text
 POST /v1/workspaces/{workspaceId}/mcp
-GET  /v1/workspaces/{workspaceId}/mcp
 DELETE /v1/workspaces/{workspaceId}/mcp
 Authorization: Bearer <CONTEXTENGINE_HTTP_API_KEY>
 ```
@@ -315,13 +321,21 @@ tool. The tool returns the same packed, provenance-bearing context as the
 stdio server. A missing index is reported as a tool error; create/commit a
 workspace and wait for its index job before querying.
 
-Remote sessions are bounded per HTTP process. By default an idle session is
-closed after 30 minutes and at most 128 sessions (including in-flight
-initializations) may exist. Set `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` and
-`CONTEXTENGINE_MCP_MAX_SESSIONS` for a deployment with different limits. A
-request carrying an expired or unknown session id receives HTTP `404`; a new
-initialize request while the cap is full receives HTTP `429` with
-`Retry-After: 1`.
+The default PostgreSQL session store hashes the opaque session id and persists
+only its workspace/principal binding, negotiated protocol version, status and
+database-clock timestamps. Any healthy instance can handle a later JSON POST;
+sticky routing is not required, and process restart does not invalidate the
+session. GET/SSE is intentionally unavailable and returns `405` because a live
+SDK stream cannot be reconstructed from metadata. See
+[`MCP_SESSION_ARCHITECTURE.md`](./MCP_SESSION_ARCHITECTURE.md) for the protocol
+decision and failure model.
+
+By default an idle session closes after 30 minutes and at most 128 active
+sessions may exist globally. Set `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` and
+`CONTEXTENGINE_MCP_MAX_SESSIONS` for different limits. An expired, unknown or
+unauthorized session receives HTTP `404`; a new initialize request while the
+cap is full receives HTTP `429` with `Retry-After: 1`. DELETE is idempotent and
+becomes visible to all instances immediately.
 
 Example initialization:
 
@@ -387,8 +401,10 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_HTTP_API_KEY` | Required Bearer key |
 | `CONTEXTENGINE_HTTP_HOST` / `_PORT` | Bind address and port (defaults `127.0.0.1:8787`) |
 | `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES` | Per-Blob request limit (default 2 MiB) |
+| `CONTEXTENGINE_HTTP_CORS_ORIGINS` | Exact comma-separated browser origins, or `*`; disabled by default |
+| `CONTEXTENGINE_MCP_SESSION_STORE` | `postgres` (default, cross-instance) or `memory` (single-process rollback) |
 | `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` | Idle lifetime for remote MCP sessions (default 30 minutes) |
-| `CONTEXTENGINE_MCP_MAX_SESSIONS` | Maximum remote MCP sessions per HTTP process (default 128) |
+| `CONTEXTENGINE_MCP_MAX_SESSIONS` | Global PostgreSQL Remote MCP session limit (default 128; per-process in memory mode) |
 | `CONTEXTENGINE_HTTP_ALLOW_UNAUTHENTICATED` | Explicitly disable auth; local development only |
 | `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | Permit server-local root workspaces; default off |
 | `CONTEXTENGINE_LOCAL_ROOT_ALLOWLIST` | Path-delimited allowlist for local workspaces |
@@ -396,6 +412,34 @@ workspace revision locally and retry only after handling a `409` conflict.
 
 The service uses `CONTEXTENGINE_DATABASE_URL` and the existing embedding/rerank
 configuration described in the root README.
+
+When `CONTEXTENGINE_HTTP_CORS_ORIGINS` is configured, requests carrying an
+unlisted `Origin` are rejected with `403`. Allowed preflight requests return
+`204`; MCP session and retry headers are exposed to browser clients. Prefer
+exact HTTPS origins. The `*` wildcard is intended only for public APIs that
+still enforce strong Bearer credentials and rate limits.
+
+### v4 to v5 deployment and rollback
+
+Schema v5 adds `ce_mcp_sessions`; v4 processes do not know this table and cannot
+participate in global capacity or cross-instance session handling. Drain Remote
+MCP traffic from every v4 instance, run one v5 instance to apply the migration,
+then route initialize and resume traffic only to v5 instances. After all v4
+instances exit, normal round-robin routing can be enabled. A v4 binary refuses
+to start against schema v5, preventing silent mixed-version behavior.
+
+Schema v6 relaxes the connector provider constraint for registered plugins.
+Existing GitHub rows and schema v5 MCP sessions are unchanged. Running v5
+instances can finish GitHub work after migration, but they cannot handle a new
+plugin provider and refuse to restart once the v6 marker is committed. Drain
+v5 connector traffic before attaching non-GitHub providers; route plugin
+creation and synchronization only to v6 instances.
+
+For application rollback after migration, keep the v5 binary and set
+`CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former
+single-process behavior and requires sticky routing. A binary rollback requires
+a database restored from a pre-v5 backup or an explicitly reviewed down
+migration. Do not drop `ce_mcp_sessions` while v5 instances are serving traffic.
 
 Embedding and reranker base URLs submitted through the HTTP configuration API
 must use HTTP(S), must not contain URL credentials, and cannot introduce a
