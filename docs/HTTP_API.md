@@ -393,6 +393,12 @@ POST /v1/workspaces/{workspaceId}/snapshots/{name}/import
 Content-Type: application/json
 {}
 
+POST /v1/workspaces/{workspaceId}/snapshots/{name}/replicate
+Content-Type: application/json
+{"target_id":"region-backup"}
+
+GET /v1/workspaces/{workspaceId}/snapshot-replication-targets
+
 DELETE /v1/workspaces/{workspaceId}/snapshots/{name}
 
 POST /v1/workspaces/{workspaceId}/snapshots:prune
@@ -412,7 +418,7 @@ Content-Type: application/json
 {}
 ```
 
-Export, import, prune, and GC return `202` with a durable `job` payload. Poll the
+Export, import, prune, GC, and replication return `202` with a durable `job` payload. Poll the
 status endpoint or subscribe to its SSE endpoint; the payload includes operation,
 attempt count, phase progress, result, and a terminal error. Failed jobs can be
 requeued through the retry endpoint. A PostgreSQL claim
@@ -421,6 +427,10 @@ share the queue and an expired worker cannot overwrite a newer attempt. Import
 verifies the artifact before promotion and refreshes the cached engine after
 success. Missing configuration returns `503`; reader permissions are hidden as
 `404`. Prune and GC fail closed on malformed manifests or an active publication.
+Replication targets are injected through `HttpServerOptions.snapshotReplicationTargets`
+or `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` as a JSON object mapping stable
+target ids to store locations. Credentials are never persisted in PostgreSQL;
+target status is derived from the latest durable replication jobs.
 
 ### 2. Plan a file manifest change
 
@@ -708,6 +718,7 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_BITBUCKET_TIMEOUT_MS` | Per-request Bitbucket API timeout; default 30000 ms |
 | `CONTEXTENGINE_BITBUCKET_WEBHOOK_SECRET` | Bitbucket `repo:push` HMAC secret; minimum 16 characters |
 | `CONTEXTENGINE_SNAPSHOT_STORE` | Filesystem directory or `s3://bucket/prefix` for owner-managed snapshots; disabled when unset |
+| `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` | JSON object of target id to filesystem or `s3://bucket/prefix` store location; credentials remain in the host environment |
 | `CONTEXTENGINE_S3_ENDPOINT` / `_FORCE_PATH_STYLE` | Optional S3-compatible service endpoint and path-style mode |
 | `CONTEXTENGINE_S3_SSE` / `_KMS_KEY_ID` | Optional `AES256` or `aws:kms` server-side encryption |
 
@@ -748,7 +759,8 @@ enabling webhook delivery; schema v8 workers can safely share the inbox and use
 `SKIP LOCKED` plus connector leases across instances.
 
 Schema v9 adds source-scoped CI credentials, schema v10 adds optional validated
-provenance to inbox events, and schema v11 adds leased snapshot jobs. Older
+provenance to inbox events, schema v11 adds leased snapshot jobs, and schema v12
+adds replication jobs and target status indexes. Older
 instances reject a newer marker; drain them before issuing CI credentials,
 accepting CI deliveries, or creating snapshot jobs.
 

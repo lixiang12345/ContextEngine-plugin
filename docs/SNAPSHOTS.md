@@ -134,3 +134,24 @@ Jobs survive process restarts. A claim increments `attempts` and assigns a new
 lease token; progress and terminal writes must present that token, which fences
 off a worker whose lease was replaced by another server instance. CLI commands
 remain synchronous for scripting and maintenance workflows.
+
+## Replication Targets
+
+HTTP deployments can inject named target stores through
+`HttpServerOptions.snapshotReplicationTargets`. A simple environment-based
+deployment can map target ids to store locations:
+
+```bash
+export CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS='{
+  "region-backup":"s3://team-indexes-eu/contextengine",
+  "local-dr":"/srv/contextengine-replica"
+}'
+```
+
+Target ids are persisted with replication jobs, but store locations and
+credentials are not. Each target receives the same workspace hash prefix used
+by the primary store. Owners queue a copy with
+`POST /v1/workspaces/{workspaceId}/snapshots/{name}/replicate` and inspect the
+latest status per target and snapshot through
+`GET /v1/workspaces/{workspaceId}/snapshot-replication-targets`. Failed copies
+use the standard snapshot-job retry endpoint.

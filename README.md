@@ -336,7 +336,9 @@ filesystem or S3-compatible snapshots; see [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.
 Configure `CONTEXTENGINE_SNAPSHOT_STORE` to expose the same owner-managed
 snapshot operations through the HTTP service. Export, import, prune, and GC
 return durable PostgreSQL job records with polling and SSE status endpoints;
-CLI snapshot commands remain synchronous.
+CLI snapshot commands remain synchronous. Configure
+`CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` or inject target stores to enable
+owner-triggered asynchronous replication.
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).

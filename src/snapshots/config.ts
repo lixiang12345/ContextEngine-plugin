@@ -44,3 +44,35 @@ export function snapshotStoreFromLocation(
     kmsKeyId: process.env.CONTEXTENGINE_S3_KMS_KEY_ID,
   });
 }
+
+export function snapshotReplicationTargetsFromJson(
+  value: string | undefined,
+  root = process.cwd(),
+): Map<string, SnapshotObjectStore> {
+  const text = value?.trim();
+  if (!text) return new Map();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("Snapshot replication targets must be a JSON object");
+  }
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error("Snapshot replication targets must be a JSON object");
+  }
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.length > 32) {
+    throw new Error("At most 32 snapshot replication targets may be configured");
+  }
+  const targets = new Map<string, SnapshotObjectStore>();
+  for (const [id, location] of entries.sort(([left], [right]) => left.localeCompare(right))) {
+    if (!/^[a-z][a-z0-9_-]{0,62}$/.test(id)) {
+      throw new Error(`Invalid snapshot replication target id: ${id}`);
+    }
+    if (typeof location !== "string" || !location.trim()) {
+      throw new Error(`Snapshot replication target ${id} must be a store location`);
+    }
+    targets.set(id, snapshotStoreFromLocation(location, root)!);
+  }
+  return targets;
+}

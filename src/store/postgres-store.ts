@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 export const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -2190,6 +2190,47 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [11],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 12) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      ALTER TABLE ce_snapshot_jobs
+        DROP CONSTRAINT IF EXISTS ce_snapshot_jobs_operation_check;
+      ALTER TABLE ce_snapshot_jobs
+        ADD CONSTRAINT ce_snapshot_jobs_operation_check
+          CHECK (operation IN ('export', 'import', 'prune', 'gc', 'replicate')),
+        ADD CONSTRAINT ce_snapshot_jobs_replication_target_check
+          CHECK (
+            operation <> 'replicate'
+            OR (
+              snapshot_name IS NOT NULL
+              AND parameters ? 'target_id'
+              AND jsonb_typeof(parameters->'target_id') = 'string'
+              AND char_length(parameters->>'target_id') BETWEEN 1 AND 63
+            )
+          );
+      CREATE INDEX IF NOT EXISTS ce_snapshot_jobs_replication_idx
+        ON ce_snapshot_jobs(
+          workspace_id,
+          (parameters->>'target_id'),
+          snapshot_name,
+          created_at DESC
+        )
+        WHERE operation = 'replicate';
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [12],
             );
             await client.query("COMMIT");
           } catch (error) {

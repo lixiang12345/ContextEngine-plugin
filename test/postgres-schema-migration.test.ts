@@ -221,7 +221,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            ORDER BY workspace_id, blob_hash`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 11 }]);
+        assert.deepEqual(marker.rows, [{ version: 12 }]);
         const ciTokens = await schemaPool.query<{ table_name: string | null }>(
           `SELECT to_regclass('ce_connector_ci_tokens')::text AS table_name`,
         );
@@ -266,7 +266,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await admin.query<{ version: number }>(
           `SELECT version FROM ${quotedSchema}.ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 11 }]);
+        assert.deepEqual(marker.rows, [{ version: 12 }]);
 
         const mcpSessionColumns = await admin.query<{ column_name: string }>(
           `SELECT column_name
@@ -487,7 +487,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v2'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 11 }]);
+        assert.deepEqual(marker.rows, [{ version: 12 }]);
         assert.deepEqual(source.rows, [
           {
             id: "source-v2",
@@ -645,7 +645,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v3'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 11 }]);
+        assert.deepEqual(marker.rows, [{ version: 12 }]);
         assert.deepEqual(source.rows, [
           {
             status: "syncing",
@@ -672,7 +672,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
   );
 
   it(
-    "adds durable MCP, plugins, source ACL, webhook inbox, CI tokens, provenance, and snapshot jobs when migrating v4 to v11",
+    "adds durable MCP, plugins, source ACL, webhook inbox, CI tokens, provenance, and replication jobs when migrating v4 to v12",
     { timeout: 15_000 },
     async () => {
       const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
@@ -730,7 +730,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await schemaPool.query<{ version: number }>(
           `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 11 }]);
+        assert.deepEqual(marker.rows, [{ version: 12 }]);
         const snapshotJob = await schemaPool.query<{
           status: string;
           attempts: number;
@@ -744,6 +744,34 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            RETURNING status, attempts`,
         );
         assert.deepEqual(snapshotJob.rows, [{ status: "queued", attempts: 0 }]);
+        const replicationJob = await schemaPool.query<{ operation: string }>(
+          `INSERT INTO ce_snapshot_jobs(
+             id, workspace_id, principal_id, operation, snapshot_name,
+             parameters, status
+           ) VALUES (
+             'snapshot-replication-v12', 'workspace-v4', 'migration-test',
+             'replicate', 'main', '{"target_id":"region_backup"}'::jsonb,
+             'queued'
+           )
+           RETURNING operation`,
+        );
+        assert.deepEqual(replicationJob.rows, [{ operation: "replicate" }]);
+        await assert.rejects(
+          schemaPool.query(
+            `INSERT INTO ce_snapshot_jobs(
+               id, workspace_id, principal_id, operation, snapshot_name,
+               parameters, status
+             ) VALUES (
+               'snapshot-replication-invalid-v12', 'workspace-v4',
+               'migration-test', 'replicate', 'main', '{}'::jsonb, 'queued'
+             )`,
+          ),
+          (error: unknown) =>
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "23514",
+        );
         await schemaPool.query(
           `INSERT INTO ce_connector_sources(
              id, workspace_id, provider, external_id, created_by
@@ -795,11 +823,11 @@ describePostgres("PostgreSQL schema migration coordination", () => {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         INSERT INTO ${quotedSchema}.ce_schema_version(singleton, version)
-        VALUES (TRUE, 12);
+        VALUES (TRUE, 13);
       `);
       await assert.rejects(
         runEnsureSchemaInFreshProcess(schemaUrl),
-        /schema version 12 is newer than this build \(11\)/,
+        /schema version 13 is newer than this build \(12\)/,
       );
     } finally {
       try {

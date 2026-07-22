@@ -5,6 +5,7 @@ import {
   garbageCollectSnapshotArtifacts,
   importIndexSnapshot,
   pruneIndexSnapshots,
+  replicateIndexSnapshot,
 } from "../snapshots/snapshot.js";
 import {
   type ClaimedSnapshotJob,
@@ -18,6 +19,11 @@ export interface SnapshotJobRunnerOptions {
   repository: WorkspaceRepository;
   databaseUrl: string;
   storeFor(workspaceId: string, requiresList: boolean): SnapshotObjectStore;
+  replicationTargetFor?(
+    workspaceId: string,
+    targetId: string,
+  ): SnapshotObjectStore;
+  hasReplicationTarget?(targetId: string): boolean;
   onImportCompleted?(workspaceId: string): Promise<void>;
   leaseMs?: number;
 }
@@ -26,6 +32,8 @@ export class SnapshotJobRunner {
   private readonly repository: WorkspaceRepository;
   private readonly databaseUrl: string;
   private readonly storeFor: SnapshotJobRunnerOptions["storeFor"];
+  private readonly replicationTargetFor?: SnapshotJobRunnerOptions["replicationTargetFor"];
+  private readonly hasReplicationTarget?: SnapshotJobRunnerOptions["hasReplicationTarget"];
   private readonly onImportCompleted?: SnapshotJobRunnerOptions["onImportCompleted"];
   private readonly leaseMs: number;
   private readonly events = new EventEmitter();
@@ -39,6 +47,8 @@ export class SnapshotJobRunner {
     this.repository = options.repository;
     this.databaseUrl = options.databaseUrl;
     this.storeFor = options.storeFor;
+    this.replicationTargetFor = options.replicationTargetFor;
+    this.hasReplicationTarget = options.hasReplicationTarget;
     this.onImportCompleted = options.onImportCompleted;
     this.leaseMs = options.leaseMs ?? 5 * 60_000;
   }
@@ -79,7 +89,9 @@ export class SnapshotJobRunner {
 
   private async scan(): Promise<void> {
     const jobs = await this.repository.listQueuedSnapshotJobs(this.leaseMs);
-    for (const job of jobs) this.enqueue(job.id);
+    for (const job of jobs) {
+      if (this.canRun(job)) this.enqueue(job.id);
+    }
   }
 
   private startDrain(): void {
@@ -107,6 +119,8 @@ export class SnapshotJobRunner {
   }
 
   private async run(jobId: string): Promise<void> {
+    const candidate = await this.repository.getSnapshotJob(jobId);
+    if (!candidate || !this.canRun(candidate)) return;
     const job = await this.repository.claimSnapshotJob(jobId, this.leaseMs);
     if (!job) return;
     this.publish(job);
@@ -175,6 +189,25 @@ export class SnapshotJobRunner {
         deleted: await pruneIndexSnapshots({ store, keepLatest, olderThanMs }),
       };
     }
+    if (job.operation === "replicate") {
+      if (!job.snapshotName) throw new Error("Snapshot replication job has no snapshot name");
+      const targetId = stringParameter(job, "target_id");
+      if (!this.replicationTargetFor) {
+        throw new Error("Snapshot replication targets are not configured");
+      }
+      await this.progress(job, "replicating");
+      const result = await replicateIndexSnapshot({
+        name: job.snapshotName,
+        source: store,
+        target: this.replicationTargetFor(job.workspaceId, targetId),
+      });
+      return {
+        target_id: targetId,
+        snapshot: result.manifest,
+        manifest_key: result.manifestKey,
+        artifact_key: result.artifactKey,
+      };
+    }
     await this.progress(job, "garbage_collecting");
     return { deleted_artifacts: await garbageCollectSnapshotArtifacts(store) };
   }
@@ -192,6 +225,24 @@ export class SnapshotJobRunner {
   private publish(job: StoredSnapshotJob): void {
     this.events.emit(`snapshot-job:${job.id}`, job);
   }
+
+  private canRun(job: StoredSnapshotJob): boolean {
+    if (job.operation !== "replicate") return true;
+    const targetId = job.parameters.target_id;
+    return (
+      typeof targetId === "string" &&
+      Boolean(this.replicationTargetFor) &&
+      (this.hasReplicationTarget?.(targetId) ?? true)
+    );
+  }
+}
+
+function stringParameter(job: ClaimedSnapshotJob, key: string): string {
+  const value = job.parameters[key];
+  if (typeof value !== "string" || !value) {
+    throw new Error(`Snapshot job parameter ${key} is invalid`);
+  }
+  return value;
 }
 
 function numberParameter(job: ClaimedSnapshotJob, key: string): number {

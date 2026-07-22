@@ -98,7 +98,10 @@ import {
   PrefixedSnapshotObjectStore,
   type SnapshotObjectStore,
 } from "./snapshots/object-store.js";
-import { snapshotStoreFromLocation } from "./snapshots/config.js";
+import {
+  snapshotReplicationTargetsFromJson,
+  snapshotStoreFromLocation,
+} from "./snapshots/config.js";
 
 const DEFAULT_MAX_BLOB_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
@@ -110,6 +113,12 @@ const snapshotPruneSchema = z.object({
   older_than_days: z.number().finite().min(0).max(3650).optional(),
 }).strict();
 const emptySnapshotRequestSchema = z.object({}).strict();
+const snapshotReplicationTargetIdSchema = z
+  .string()
+  .regex(/^[a-z][a-z0-9_-]{0,62}$/);
+const snapshotReplicationSchema = z
+  .object({ target_id: snapshotReplicationTargetIdSchema })
+  .strict();
 
 export interface HttpServerOptions {
   host?: string;
@@ -151,6 +160,10 @@ export interface HttpServerOptions {
   corsOrigins?: readonly string[];
   /** Optional team snapshot object store. Can also be configured by env. */
   snapshotStore?: SnapshotObjectStore | null;
+  /** Named replication stores. Credentials remain in the injected store implementations. */
+  snapshotReplicationTargets?:
+    | ReadonlyMap<string, SnapshotObjectStore>
+    | Readonly<Record<string, SnapshotObjectStore>>;
 }
 
 export interface HttpServerHandle {
@@ -437,6 +450,30 @@ function normalizeCorsOrigins(values: readonly string[]): string[] {
   return [...origins];
 }
 
+function normalizeSnapshotReplicationTargets(
+  input:
+    | ReadonlyMap<string, SnapshotObjectStore>
+    | Readonly<Record<string, SnapshotObjectStore>>
+    | undefined,
+): Map<string, SnapshotObjectStore> {
+  const entries =
+    input && typeof (input as ReadonlyMap<string, SnapshotObjectStore>).entries === "function"
+      ? [...(input as ReadonlyMap<string, SnapshotObjectStore>).entries()]
+      : Object.entries(input ?? {});
+  if (entries.length > 32) {
+    throw new Error("At most 32 snapshot replication targets may be configured");
+  }
+  const targets = new Map<string, SnapshotObjectStore>();
+  for (const [id, store] of entries.sort(([left], [right]) => left.localeCompare(right))) {
+    snapshotReplicationTargetIdSchema.parse(id);
+    if (!store || typeof store.get !== "function" || typeof store.put !== "function") {
+      throw new Error(`Snapshot replication target ${id} is invalid`);
+    }
+    targets.set(id, store);
+  }
+  return targets;
+}
+
 function apiKeysFromEnv(value: string | undefined): HttpApiKeyConfig[] {
   if (!value?.trim()) return [];
   let parsed: unknown;
@@ -556,11 +593,13 @@ function jobPayload(job: StoredIndexJob): Record<string, unknown> {
 }
 
 function snapshotJobPayload(job: StoredSnapshotJob): Record<string, unknown> {
+  const targetId = job.parameters.target_id;
   return {
     id: job.id,
     workspace_id: job.workspaceId,
     operation: job.operation,
     snapshot_name: job.snapshotName,
+    target_id: typeof targetId === "string" ? targetId : null,
     status: job.status,
     progress: job.progress,
     result: job.result,
@@ -908,6 +947,12 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/snapshots/{name}/import": {
         post: { summary: "Atomically import a snapshot generation" },
       },
+      "/v1/workspaces/{workspaceId}/snapshots/{name}/replicate": {
+        post: { summary: "Queue snapshot replication to a configured target" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshot-replication-targets": {
+        get: { summary: "List configured snapshot replication targets and status" },
+      },
       "/v1/workspaces/{workspaceId}/snapshots:prune": {
         post: { summary: "Prune snapshots by age and retention count" },
       },
@@ -1002,6 +1047,10 @@ class HttpContextService {
   private readonly databaseUrl: string;
   private readonly disableEmbeddings: boolean;
   private readonly snapshotStore: SnapshotObjectStore | null;
+  private readonly snapshotReplicationTargets: ReadonlyMap<
+    string,
+    SnapshotObjectStore
+  >;
   private readonly mcpSessions = new Map<string, McpHttpSession>();
   private readonly mcpSessionCleanupTimer: NodeJS.Timeout;
   private pendingMcpInitializations = 0;
@@ -1045,6 +1094,7 @@ class HttpContextService {
         | "bitbucketWebhookSecret"
         | "connectorPlugins"
         | "snapshotStore"
+        | "snapshotReplicationTargets"
       >,
   ) {
     this.repository = repository;
@@ -1077,6 +1127,9 @@ class HttpContextService {
     this.databaseUrl = options.databaseUrl;
     this.disableEmbeddings = options.disableEmbeddings;
     this.snapshotStore = options.snapshotStore ?? null;
+    this.snapshotReplicationTargets = normalizeSnapshotReplicationTargets(
+      options.snapshotReplicationTargets,
+    );
     this.runner = new IndexJobRunner({
       repository,
       engineFor: (workspace) => this.engineFor(workspace),
@@ -1088,6 +1141,10 @@ class HttpContextService {
         requiresList
           ? this.requireSnapshotListStore(workspaceId)
           : this.requireSnapshotStore(workspaceId),
+      replicationTargetFor: (workspaceId, targetId) =>
+        this.requireSnapshotReplicationTarget(workspaceId, targetId),
+      hasReplicationTarget: (targetId) =>
+        this.snapshotReplicationTargets.has(targetId),
       onImportCompleted: (workspaceId) => this.closeEngine(workspaceId),
     });
     const github = new GitHubConnectorClient({
@@ -1276,6 +1333,13 @@ class HttpContextService {
                 process.cwd(),
               )
             : options.snapshotStore ?? undefined,
+        snapshotReplicationTargets:
+          options.snapshotReplicationTargets === undefined
+            ? snapshotReplicationTargetsFromJson(
+                process.env.CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS,
+                process.cwd(),
+              )
+            : options.snapshotReplicationTargets,
         corsOrigins: normalizeCorsOrigins(
           options.corsOrigins ??
             (process.env.CONTEXTENGINE_HTTP_CORS_ORIGINS ?? "").split(","),
@@ -1433,8 +1497,26 @@ class HttpContextService {
             configured: Boolean(this.snapshotStore),
             workspace_scoped: true,
             operations: this.snapshotStore?.list
-              ? ["export", "import", "list", "delete", "prune", "gc"]
-              : ["export", "import", "delete"],
+              ? [
+                  "export",
+                  "import",
+                  "list",
+                  "delete",
+                  "prune",
+                  "gc",
+                  ...(this.snapshotStore && this.snapshotReplicationTargets.size
+                    ? ["replicate"]
+                    : []),
+                ]
+              : [
+                  "export",
+                  "import",
+                  "delete",
+                  ...(this.snapshotStore && this.snapshotReplicationTargets.size
+                    ? ["replicate"]
+                    : []),
+                ],
+            replication_targets: [...this.snapshotReplicationTargets.keys()],
           },
           retrieval: ["search", "context", "file", "codebase-retrieval"],
           mcp: {
@@ -1787,6 +1869,29 @@ class HttpContextService {
         return;
       }
 
+      const snapshotReplicationTargetsMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshot-replication-targets$/.exec(pathname);
+      if (request.method === "GET" && snapshotReplicationTargetsMatch) {
+        const workspaceId = decodeURIComponent(snapshotReplicationTargetsMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const latest = await this.repository.listLatestSnapshotReplicationJobs(workspaceId);
+        const targetIds = new Set(this.snapshotReplicationTargets.keys());
+        for (const job of latest) {
+          const targetId = job.parameters.target_id;
+          if (typeof targetId === "string") targetIds.add(targetId);
+        }
+        json(response, 200, {
+          targets: [...targetIds].sort().map((targetId) => ({
+            id: targetId,
+            configured: this.snapshotReplicationTargets.has(targetId),
+            replications: latest
+              .filter((job) => job.parameters.target_id === targetId)
+              .map(snapshotJobPayload),
+          })),
+        });
+        return;
+      }
+
       const snapshotGcMatch = /^\/v1\/workspaces\/([^/]+)\/snapshots:gc$/.exec(pathname);
       if (request.method === "POST" && snapshotGcMatch) {
         const workspaceId = decodeURIComponent(snapshotGcMatch[1]);
@@ -1815,6 +1920,29 @@ class HttpContextService {
           principalId: principal.principalId,
           operation: "import",
           snapshotName: name,
+        });
+        this.snapshotRunner.enqueue(job.id);
+        json(response, 202, { job: snapshotJobPayload(job) });
+        return;
+      }
+
+      const snapshotReplicateMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshots\/([^/]+)\/replicate$/.exec(pathname);
+      if (request.method === "POST" && snapshotReplicateMatch) {
+        const workspaceId = decodeURIComponent(snapshotReplicateMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const name = snapshotNameSchema.parse(decodeURIComponent(snapshotReplicateMatch[2]));
+        this.requireSnapshotStore(workspaceId);
+        const input = snapshotReplicationSchema.parse(
+          await readJsonBody(request, 16 * 1024),
+        );
+        this.requireSnapshotReplicationTarget(workspaceId, input.target_id);
+        const job = await this.repository.createSnapshotJob({
+          workspaceId,
+          principalId: principal.principalId,
+          operation: "replicate",
+          snapshotName: name,
+          parameters: { target_id: input.target_id },
         });
         this.snapshotRunner.enqueue(job.id);
         json(response, 202, { job: snapshotJobPayload(job) });
@@ -3176,6 +3304,20 @@ class HttpContextService {
       throw new HttpError(501, "Snapshot object store does not support listing");
     }
     return store;
+  }
+
+  private requireSnapshotReplicationTarget(
+    workspaceId: string,
+    targetId: string,
+  ): SnapshotObjectStore {
+    const target = this.snapshotReplicationTargets.get(targetId);
+    if (!target) {
+      throw new HttpError(404, `Snapshot replication target not found: ${targetId}`);
+    }
+    return new PrefixedSnapshotObjectStore(
+      target,
+      `workspaces/${sha256(workspaceId).slice(0, 32)}`,
+    );
   }
 
   private async requireIndexedEngine(workspace: StoredWorkspace): Promise<ContextEngine> {

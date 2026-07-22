@@ -50,6 +50,7 @@ export type { IndexGenerationStatus } from "./store/postgres-store.js";
 export { FilesystemSnapshotStore } from "./snapshots/filesystem-store.js";
 export { S3SnapshotStore } from "./snapshots/s3-store.js";
 export { snapshotStoreFromLocation } from "./snapshots/config.js";
+export { snapshotReplicationTargetsFromJson } from "./snapshots/config.js";
 export type {
   S3CommandClient,
   S3SnapshotStoreOptions,

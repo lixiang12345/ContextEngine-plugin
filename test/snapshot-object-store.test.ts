@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { describe, it } from "node:test";
 import { FilesystemSnapshotStore } from "../src/snapshots/filesystem-store.js";
+import { snapshotReplicationTargetsFromJson } from "../src/snapshots/config.js";
 import { PrefixedSnapshotObjectStore } from "../src/snapshots/object-store.js";
 import {
   S3SnapshotStore,
@@ -129,6 +130,23 @@ describe("snapshot object stores", () => {
       () =>
         new S3SnapshotStore({ bucket: "valid-bucket", prefix: "../escape" }),
       /Invalid snapshot object key/,
+    );
+  });
+
+  it("parses bounded named replication targets without persisting credentials", () => {
+    const targets = snapshotReplicationTargetsFromJson(
+      JSON.stringify({ secondary: "./replica", archive_1: "./archive" }),
+      "/tmp/contextengine-targets",
+    );
+    assert.deepEqual([...targets.keys()], ["archive_1", "secondary"]);
+    assert.ok(targets.get("secondary") instanceof FilesystemSnapshotStore);
+    assert.throws(
+      () => snapshotReplicationTargetsFromJson('{"Bad Target":"./replica"}'),
+      /Invalid snapshot replication target id/,
+    );
+    assert.throws(
+      () => snapshotReplicationTargetsFromJson("[]"),
+      /JSON object/,
     );
   });
 });

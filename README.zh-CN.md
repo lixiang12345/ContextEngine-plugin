@@ -316,6 +316,7 @@ Source 级 CI Trigger Token 可让 GitHub Actions、GitLab CI 与 Bitbucket Pipe
 快照共享，详见 [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.md)。
 配置 `CONTEXTENGINE_SNAPSHOT_STORE` 后，HTTP 服务也会提供同一套 owner 管理操作；
 导出、导入、prune 和 GC 返回 PostgreSQL 持久 job，可轮询状态或订阅 SSE，CLI 仍保持同步语义。
+配置 `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` 或注入目标 store 后，owner 还可以异步触发跨区域复制。
 
 完整的客户端协议、入参出参、SSE 索引进度以及已检查 IntelliJ 插件的适配映射
 见 [docs/HTTP_API.md](./docs/HTTP_API.md)。

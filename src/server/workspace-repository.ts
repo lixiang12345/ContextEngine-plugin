@@ -13,7 +13,7 @@ export type WorkspaceSourceMode = "blob" | "local";
 export type SyncOperation = "upsert" | "delete" | "rename";
 export type IndexJobMode = "incremental" | "rebuild";
 export type IndexJobStatus = "queued" | "running" | "succeeded" | "failed";
-export type SnapshotJobOperation = "export" | "import" | "prune" | "gc";
+export type SnapshotJobOperation = "export" | "import" | "prune" | "gc" | "replicate";
 export type SnapshotJobStatus = "queued" | "running" | "succeeded" | "failed";
 export type WorkspacePermission = "reader" | "writer" | "owner";
 /** Lowercase provider id registered by a SourceConnectorPlugin. */
@@ -2778,6 +2778,23 @@ export class WorkspaceRepository {
       [jobId],
     );
     return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+  }
+
+  async listLatestSnapshotReplicationJobs(
+    workspaceId: string,
+  ): Promise<StoredSnapshotJob[]> {
+    const result = await this.pool.query<SnapshotJobRow>(
+      `SELECT DISTINCT ON (parameters->>'target_id', snapshot_name)
+              id, workspace_id, principal_id, operation, snapshot_name,
+              parameters, status, progress, result, error, attempts,
+              locked_at, lock_token, next_attempt_at, created_at,
+              started_at, completed_at
+       FROM ce_snapshot_jobs
+       WHERE workspace_id = $1 AND operation = 'replicate'
+       ORDER BY parameters->>'target_id', snapshot_name, created_at DESC, id DESC`,
+      [workspaceId],
+    );
+    return result.rows.map(snapshotJobFromRow);
   }
 
   async listQueuedSnapshotJobs(leaseMs = 5 * 60_000): Promise<StoredSnapshotJob[]> {

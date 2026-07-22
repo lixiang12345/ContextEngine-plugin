@@ -4,10 +4,10 @@
 
 起始基线：`3420ddf` (`main`)
 
-当前数据库：PostgreSQL schema v11
+当前数据库：PostgreSQL schema v12
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `197/197` 通过。
+全量测试 `198/198` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -83,6 +83,13 @@ HTTP 创建返回 202，并提供 workspace-scoped 状态轮询与 SSE。schema 
 CLI 仍保留同步语义。已补 `replicateIndexSnapshot` 跨 store 复制原语：临时文件校验、
 content-addressed artifact 幂等写入、manifest 最后发布。下一步将其接入可配置的跨区域
 复制目标、目标级状态与异步 job。
+
+Phase 12 状态（2026-07-22）：已完成复制控制面的第一版。schema v12 将 `replicate`
+纳入同一套 durable job 状态机；HTTP owner 可查看配置目标和最近复制状态，并通过
+`POST .../snapshots/{name}/replicate` 异步触发复制。目标由注入的 `SnapshotObjectStore`
+或 `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` 提供，数据库不保存凭据；workspace hash
+前缀、attempt fencing、失败重试和 manifest-last 发布继续生效。下一步是每目标调度策略、
+带退避的自动重试和复制延迟/容量指标。
 
 ## 1. 目标
 
