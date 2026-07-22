@@ -4,7 +4,11 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ContextEngine } from "../src/engine.js";
-import { runEval, type EvalCase } from "../src/eval/harness.js";
+import {
+  runEval,
+  formatEvalReportSummary,
+  type EvalCase,
+} from "../src/eval/harness.js";
 
 const describePostgres =
   process.env.CONTEXTENGINE_TEST_DATABASE_URL ||
@@ -98,4 +102,21 @@ describePostgres("eval harness", () => {
     // The two cases were served by the same immutable generation.
     assert.ok(summary.generations.length <= 1 || summary.generations.length === 2);
   });
+
+  it("formats a scannable human-readable summary", async () => {
+    const engine = ContextEngine.open({ root, dataDir });
+    const cases: EvalCase[] = [
+      { id: "bill", query: "create invoice billing", expectPaths: ["billing"] },
+    ];
+    const report = await runEval(engine, cases, { trace: true });
+    await engine.close();
+    const summary = formatEvalReportSummary(report);
+    assert.match(summary, /eval: \d+\/\d+ passed/);
+    assert.match(summary, /recall@k/);
+    assert.match(summary, /top1/);
+    assert.match(summary, /latency mean/);
+    assert.match(summary, /(ok|FAIL)\s+bill:/);
+    assert.match(summary, /trace: channels/);
+  });
+
 });

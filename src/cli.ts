@@ -491,6 +491,7 @@ program
     "--trace",
     "capture a reproducible retrieval trace per case and an aggregate summary",
   )
+  .option("--summary", "print a compact human-readable summary to stderr")
   .action(
     async (opts: {
       root: string;
@@ -499,11 +500,13 @@ program
       self?: boolean;
       reindex?: boolean;
       trace?: boolean;
+      summary?: boolean;
     }) => {
       const { readFileSync } = await import("node:fs");
       const {
         runEval,
         defaultSelfEvalCases,
+        formatEvalReportSummary,
       } = await import("./eval/harness.js");
       const engine = ContextEngine.open({
         root: path.resolve(opts.root),
@@ -522,7 +525,11 @@ program
       }
       const report = await runEval(engine, cases, { trace: Boolean(opts.trace) });
       await engine.close();
-      console.log(JSON.stringify(report, null, 2));
+      if (opts.summary) {
+        console.error(formatEvalReportSummary(report));
+      } else {
+        console.log(JSON.stringify(report, null, 2));
+      }
       if (report.failed > 0) process.exitCode = 1;
     },
   );

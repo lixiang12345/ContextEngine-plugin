@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added a `--summary` flag to `contextengine eval` that prints a compact,
+  scannable report to stderr (pass rate, mean recall/MRR/nDCG, top-1/3/5,
+  mean/p95 latency, and a per-case line) while keeping the full JSON on stdout
+  for pipelines. With `--trace` the summary also lists channel case counts,
+  degraded channels, mean packed tokens, and the generation count.
 - Added the analyzer's understood concepts (identifiers and expanded query
   terms) to the retrieval trace as `RetrievalTrace.concepts`, surfaced as an
   "Understood" chip row in the dashboard trace panel and a `concepts:` field in

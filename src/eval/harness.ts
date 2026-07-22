@@ -281,3 +281,50 @@ export function defaultSelfEvalCases(): EvalCase[] {
     },
   ];
 }
+
+/**
+ * Render a compact, scannable summary of an eval report for humans (stderr),
+ * leaving the full JSON for pipelines (stdout). Includes the aggregate trace
+ * summary when trace mode was enabled.
+ */
+export function formatEvalReportSummary(report: EvalReport): string {
+  const pct = (value: number): string => `${(value * 100).toFixed(1)}%`;
+  const ms = (value: number): string => `${value.toFixed(1)}ms`;
+  const lines: string[] = [];
+  lines.push(
+    `eval: ${report.passed}/${report.total} passed` +
+      (report.failed ? ` · ${report.failed} failed` : ""),
+  );
+  lines.push(
+    `  recall@k ${report.meanRecallAtK.toFixed(3)} · MRR ${report.meanMrr.toFixed(3)} · nDCG@k ${report.meanNdcgAtK.toFixed(3)}`,
+  );
+  lines.push(
+    `  top1 ${pct(report.top1Accuracy)} · top3 ${pct(report.top3Accuracy)} · top5 ${pct(report.top5Accuracy)}`,
+  );
+  lines.push(
+    `  latency mean ${ms(report.meanLatencyMs)} · p95 ${ms(report.p95LatencyMs)}`,
+  );
+  for (const c of report.cases) {
+    const mark = c.passed ? "ok  " : "FAIL";
+    lines.push(
+      `  ${mark} ${c.id}: recall ${c.recallAtK.toFixed(2)} · mrr ${c.mrr.toFixed(2)} · ${ms(c.latencyMs)}`,
+    );
+  }
+  const summary = report.traceSummary;
+  if (summary) {
+    const channels = Object.entries(summary.channelCaseCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, count]) => `${name}:${count}`)
+      .join(" ");
+    lines.push(
+      `  trace: channels ${channels || "none"} · mean packed ~${Math.round(summary.meanPackedTokens)} tokens`,
+    );
+    if (summary.degradedChannels.length) {
+      lines.push(`  trace: degraded ${summary.degradedChannels.join(", ")}`);
+    }
+    if (summary.generations.length) {
+      lines.push(`  trace: generations ${summary.generations.length}`);
+    }
+  }
+  return lines.join("\n");
+}
