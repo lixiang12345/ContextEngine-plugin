@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Scoped the workspace rules scan by source mode over HTTP. Blob-backed
+  workspaces have a synthetic root that never holds `AGENTS.md` / `.augment/rules`
+  files, so `POST /context` no longer runs a per-request rules disk scan for them
+  unless the caller explicitly sets `include_rules: true`; local workspaces still
+  load rules by default. An explicit `include_rules` value always wins.
 - Added an active-vs-deprecated ranking signal to the feature scorer. Clearly
   retired code — `legacy/`, `deprecated/`, `vendor/` paths, `.old`/`.bak`
   filenames, and `@deprecated`/`Obsolete` markers — is demoted so current

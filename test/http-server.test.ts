@@ -322,6 +322,7 @@ describePostgres("ContextEngine HTTP service", () => {
         packedCount?: number;
         generationId?: string;
         indexedRevision?: string;
+        rules?: Array<{ path: string; scope: string }>;
       };
     };
     assert.equal(
@@ -338,6 +339,9 @@ describePostgres("ContextEngine HTTP service", () => {
       searchPayload.index.generation_id,
     );
     assert.equal(contextPayload.trace.indexedRevision, "1");
+    // Blob-backed workspaces have a synthetic root with no rule files, so the
+    // rules disk scan is skipped by default and the trace carries no rules.
+    assert.equal(contextPayload.trace.rules, undefined);
 
     const extractiveContext = await request(
       `/v1/workspaces/${workspaceId}/context`,

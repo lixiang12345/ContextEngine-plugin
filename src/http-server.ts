@@ -2983,7 +2983,13 @@ class HttpContextService {
           sourceAccess,
           diversify: true,
           packing: input.packing,
-          includeRules: input.include_rules,
+          // Blob-backed workspaces have a synthetic root that never holds rule
+          // files, so skip the disk scan unless a caller explicitly opts in.
+          // Local workspaces default to loading their on-disk conventions.
+          // Blob workspaces have a synthetic root that never holds rule files;
+          // skip the disk scan for them unless the caller explicitly opts in.
+          includeRules:
+            input.include_rules ?? (workspace.sourceMode === "local"),
         });
         const index = await engine.indexStatus();
         json(response, 200, {
