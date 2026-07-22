@@ -257,7 +257,7 @@ export function observabilityDashboardHtml(): string {
     .latency-track { width: 100%; height: 5px; margin-top: 5px; background: #e8ebed; }
     .latency-fill { height: 100%; background: var(--info); }
     .empty { border: 1px dashed var(--line-strong); color: var(--muted); padding: 24px; text-align: center; }
-    .probe-form { display: grid; grid-template-columns: minmax(200px, 0.75fr) minmax(240px, 2fr) 84px 118px 148px auto; gap: 8px; align-items: end; }
+    .probe-form { display: grid; grid-template-columns: minmax(190px, 0.72fr) minmax(220px, 1.8fr) 80px 112px 142px 104px auto; gap: 8px; align-items: end; }
     .field { min-width: 0; }
     .field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
     .field .control { width: 100%; }
@@ -271,6 +271,12 @@ export function observabilityDashboardHtml(): string {
     .trace-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
     .trace-chip { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 9px; font-size: 11px; font-weight: 600; }
     .trace-chip.warn { border-color: var(--warning); color: var(--warning); }
+    .budget-line { font-variant-numeric: tabular-nums; }
+    .budget-track { width: 100%; max-width: 200px; height: 5px; margin-top: 5px; border-radius: 999px; background: #e8ebed; overflow: hidden; }
+    .budget-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+    .budget-fill.near { background: var(--warning); }
+    .budget-fill.over { background: var(--danger); }
+    html[data-theme="dark"] .budget-track { background: #263440; }
     .packed-block { margin-top: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 13px 14px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px; line-height: 1.55; max-height: 520px; overflow-y: auto; }
     .result-list { border: 1px solid var(--line); background: var(--surface); }
     .result { padding: 13px 14px; border-bottom: 1px solid var(--line); }
@@ -451,7 +457,7 @@ export function observabilityDashboardHtml(): string {
       .config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .config-panel:nth-child(2) { border-right: 0; }
       .config-panel:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
-      .probe-form { grid-template-columns: 1fr 2fr 90px 110px 120px; }
+      .probe-form { grid-template-columns: 1fr 2fr 90px 110px 120px 104px; }
       .probe-form .button { grid-column: 1 / -1; justify-self: start; }
     }
     @media (max-width: 760px) {
@@ -625,6 +631,7 @@ export function observabilityDashboardHtml(): string {
         <div class="field"><label for="probeTopK">Top K</label><input id="probeTopK" class="control" type="number" min="1" max="40" value="8"></div>
         <div class="field"><label for="probeMode">Mode</label><select id="probeMode" class="control"><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="bm25">BM25</option><option value="semantic">Semantic</option></select></div>
         <div class="field"><label for="probeView">View</label><select id="probeView" class="control"><option value="hits">Ranked hits</option><option value="raw">Packed · raw</option><option value="extractive">Packed · extractive</option></select></div>
+        <div class="field" id="probeMaxTokensField" hidden><label for="probeMaxTokens">Max tokens</label><input id="probeMaxTokens" class="control" type="number" min="1" max="128000" placeholder="uncapped"></div>
         <button id="probeSubmit" class="button primary" type="submit">Run search</button>
       </form>
       <div id="probeMeta" class="probe-meta" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -1291,14 +1298,17 @@ export function observabilityDashboardHtml(): string {
           });
         }
       } else {
+        var maxTokensRaw = Number(byId("probeMaxTokens").value);
+        var contextBody = { information_request: query, top_k: Number(byId("probeTopK").value || 8), packing: view };
+        if (maxTokensRaw > 0) contextBody.max_tokens = Math.floor(maxTokensRaw);
         var packed = await api("/v1/workspaces/" + encodeURIComponent(workspaceId) + "/context", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ information_request: query, top_k: Number(byId("probeTopK").value || 8), packing: view })
+          body: JSON.stringify(contextBody)
         });
         var packedElapsed = performance.now() - started;
         byId("probeMeta").textContent = (packed.hits ? packed.hits.length : 0) + " passages packed in " + duration(packedElapsed);
-        renderTrace(packed.trace);
+        renderTrace(packed.trace, maxTokensRaw > 0 ? Math.floor(maxTokensRaw) : null);
         var text = packed.packed_text || "";
         if (!text) { byId("probeResults").className = "empty"; byId("probeResults").textContent = "No context packed."; }
         else {

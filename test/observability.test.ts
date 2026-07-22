@@ -144,6 +144,9 @@ describe("observability dashboard", () => {
     // Ranked hits show a per-channel score breakdown (keyword/semantic/etc).
     assert.match(dashboard, /function renderChannels/);
     assert.match(dashboard, /channel-chips/);
+    // Packed views accept a token budget and render a fill gauge against it.
+    assert.match(dashboard, /id="probeMaxTokens"/);
+    assert.match(dashboard, /budget-track/);
     assert.doesNotMatch(dashboard, /<script[^>]+src=/i);
     assert.doesNotMatch(dashboard, /<link[^>]+href=["']https?:/i);
 

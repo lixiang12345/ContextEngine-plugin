@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added a max-tokens control and a token-budget gauge to the dashboard retrieval
+  probe. Packed views can now set an explicit output cap so the `raw` and
+  `extractive` policies can be exercised from the UI, and the trace panel renders
+  a fill bar of estimated-vs-budget tokens (with near/over tones and a capped
+  marker) instead of a bare token count.
 - Surfaced per-channel retrieval confidence in the dashboard retrieval probe.
   Each ranked hit now shows which channels matched it (keyword/symbol/path/
   semantic/graph/neural) with their normalized score as a percentage, plus a
