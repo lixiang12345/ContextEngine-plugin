@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { Pool } from "pg";
 import { after, before, describe, it } from "node:test";
 import { FilesystemSnapshotStore } from "../src/snapshots/filesystem-store.js";
@@ -104,6 +105,7 @@ describePostgres("portable index snapshots", () => {
     assert.equal(exported.manifest.counts.chunks, 1);
     assert.equal(exported.manifest.counts.embeddings, 1);
     assert.doesNotMatch(JSON.stringify(exported.manifest), /private\/source/);
+    assert.deepEqual(await objectStore.list("operations"), []);
     assert.deepEqual(await listIndexSnapshots(objectStore), ["team-main"]);
 
     const imported = await importIndexSnapshot({
@@ -161,6 +163,16 @@ describePostgres("portable index snapshots", () => {
     assert.deepEqual(await listIndexSnapshots(objectStore), ["team-new"]);
     await deleteIndexSnapshot({ name: "team-new", store: objectStore });
     assert.deepEqual(await listIndexSnapshots(objectStore), []);
+    const markerKey = `operations/publish-${randomUUID()}.json`;
+    await objectStore.put(
+      markerKey,
+      Readable.from([JSON.stringify({ created_at: new Date().toISOString() })]),
+    );
+    await assert.rejects(
+      garbageCollectSnapshotArtifacts(objectStore),
+      /publication is active/,
+    );
+    await objectStore.delete(markerKey);
     assert.deepEqual(await garbageCollectSnapshotArtifacts(objectStore), [
       exported.manifest.artifact.key,
     ]);

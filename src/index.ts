@@ -49,6 +49,7 @@ export { PostgresStore } from "./store/postgres-store.js";
 export type { IndexGenerationStatus } from "./store/postgres-store.js";
 export { FilesystemSnapshotStore } from "./snapshots/filesystem-store.js";
 export { S3SnapshotStore } from "./snapshots/s3-store.js";
+export { snapshotStoreFromLocation } from "./snapshots/config.js";
 export type {
   S3CommandClient,
   S3SnapshotStoreOptions,
@@ -60,12 +61,14 @@ export {
   deleteIndexSnapshot,
   garbageCollectSnapshotArtifacts,
   pruneIndexSnapshots,
+  SnapshotNotFoundError,
   SNAPSHOT_FORMAT_VERSION,
 } from "./snapshots/snapshot.js";
 export type {
   SnapshotObjectMetadata,
   SnapshotObjectStore,
 } from "./snapshots/object-store.js";
+export { PrefixedSnapshotObjectStore } from "./snapshots/object-store.js";
 export type {
   SnapshotManifest,
   SnapshotExportResult,

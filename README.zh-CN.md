@@ -314,6 +314,7 @@ Source 级 CI Trigger Token 可让 GitHub Actions、GitLab CI 与 Bitbucket Pipe
 中的 CI Trigger 小节。
 活动索引 generation 还可以通过版本化、checksum 校验的 filesystem 或 S3-compatible
 快照共享，详见 [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.md)。
+配置 `CONTEXTENGINE_SNAPSHOT_STORE` 后，HTTP 服务也会提供同一套 owner 管理操作。
 
 完整的客户端协议、入参出参、SSE 索引进度以及已检查 IntelliJ 插件的适配映射
 见 [docs/HTTP_API.md](./docs/HTTP_API.md)。

@@ -333,6 +333,8 @@ Pipelines refresh one source without receiving a workspace-wide API key; see
 the CI trigger section in [docs/HTTP_API.md](./docs/HTTP_API.md).
 Active index generations can also be shared through versioned, checksum-verified
 filesystem or S3-compatible snapshots; see [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.md).
+Configure `CONTEXTENGINE_SNAPSHOT_STORE` to expose the same owner-managed
+snapshot operations through the HTTP service.
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).

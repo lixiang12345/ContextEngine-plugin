@@ -24,6 +24,9 @@
   content-addressed gzip artifacts, strict manifest/record/checksum validation,
   atomic generation import, pluggable filesystem/S3-compatible stores, and
   safe list/delete, age/count retention pruning, and unreferenced-artifact GC.
+- Added owner-managed HTTP snapshot routes with workspace-scoped object prefixes,
+  synchronous export/import, list/delete/prune/gc operations, explicit `503`
+  behavior when the store is unconfigured, and ACL/HTTP integration coverage.
 - Added schema v8 persistent connector webhook events, a provider-neutral signed
   webhook contract, GitHub HMAC-SHA256 push handling, delivery/body replay
   protection, database-clock worker recovery, bounded retries, and attempt

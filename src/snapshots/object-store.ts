@@ -20,6 +20,51 @@ export interface SnapshotObjectStore {
   list?(prefix?: string): Promise<string[]>;
 }
 
+/** Restrict a shared object store to one validated key prefix. */
+export class PrefixedSnapshotObjectStore implements SnapshotObjectStore {
+  private readonly prefix: string;
+
+  constructor(
+    private readonly inner: SnapshotObjectStore,
+    prefix: string,
+  ) {
+    this.prefix = validateSnapshotObjectKey(
+      `${prefix.replace(/\/+$/, "")}/item`,
+    ).replace(/\/item$/, "");
+  }
+
+  put(
+    key: string,
+    source: Readable,
+    metadata?: SnapshotObjectMetadata,
+  ): Promise<void> {
+    return this.inner.put(this.key(key), source, metadata);
+  }
+
+  get(key: string): Promise<Readable> {
+    return this.inner.get(this.key(key));
+  }
+
+  delete(key: string): Promise<void> {
+    return this.inner.delete(this.key(key));
+  }
+
+  async list(prefix = ""): Promise<string[]> {
+    if (!this.inner.list) {
+      throw new Error("Snapshot object store does not support listing");
+    }
+    const scopedPrefix = prefix ? this.key(prefix) : this.prefix;
+    const marker = `${this.prefix}/`;
+    return (await this.inner.list(scopedPrefix))
+      .filter((key) => key.startsWith(marker))
+      .map((key) => key.slice(marker.length));
+  }
+
+  private key(key: string): string {
+    return `${this.prefix}/${validateSnapshotObjectKey(key)}`;
+  }
+}
+
 export function validateSnapshotObjectKey(key: string): string {
   if (
     !key ||

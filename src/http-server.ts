@@ -87,11 +87,31 @@ import {
 import type { SearchHit, SourcePathPolicy } from "./types.js";
 import type { IndexGenerationStatus } from "./store/postgres-store.js";
 import { sha256 } from "./util/hash.js";
+import {
+  deleteIndexSnapshot,
+  exportIndexSnapshot,
+  garbageCollectSnapshotArtifacts,
+  importIndexSnapshot,
+  listIndexSnapshots,
+  pruneIndexSnapshots,
+  SnapshotNotFoundError,
+} from "./snapshots/snapshot.js";
+import {
+  PrefixedSnapshotObjectStore,
+  type SnapshotObjectStore,
+} from "./snapshots/object-store.js";
+import { snapshotStoreFromLocation } from "./snapshots/config.js";
 
 const DEFAULT_MAX_BLOB_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_MCP_MAX_SESSIONS = 128;
 const MAX_BATCH_BLOBS = 16;
+const snapshotNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/);
+const snapshotPruneSchema = z.object({
+  keep: z.number().int().min(0).max(10_000).default(0),
+  older_than_days: z.number().finite().min(0).max(3650).optional(),
+}).strict();
+const emptySnapshotRequestSchema = z.object({}).strict();
 
 export interface HttpServerOptions {
   host?: string;
@@ -131,6 +151,8 @@ export interface HttpServerOptions {
   connectorPlugins?: readonly SourceConnectorPlugin[];
   /** Exact browser origins allowed to call the HTTP API, or ["*"]. */
   corsOrigins?: readonly string[];
+  /** Optional team snapshot object store. Can also be configured by env. */
+  snapshotStore?: SnapshotObjectStore | null;
 }
 
 export interface HttpServerHandle {
@@ -699,6 +721,14 @@ function errorPayload(error: unknown): {
       payload: { error: { code: "workspace_not_found", message: error.message } },
     };
   }
+  if (error instanceof SnapshotNotFoundError) {
+    return {
+      status: 404,
+      payload: {
+        error: { code: "snapshot_not_found", message: error.message },
+      },
+    };
+  }
   if (error instanceof RevisionConflictError) {
     return {
       status: 409,
@@ -853,6 +883,22 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/sources/{sourceId}/ci-tokens/{tokenId}": {
         delete: { summary: "Revoke a source-scoped CI trigger token" },
       },
+      "/v1/workspaces/{workspaceId}/snapshots": {
+        get: { summary: "List team index snapshots" },
+        post: { summary: "Export the active index generation" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshots/{name}": {
+        delete: { summary: "Delete a snapshot manifest" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshots/{name}/import": {
+        post: { summary: "Atomically import a snapshot generation" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshots:prune": {
+        post: { summary: "Prune snapshots by age and retention count" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshots:gc": {
+        post: { summary: "Delete unreferenced snapshot artifacts" },
+      },
       "/v1/blobs/{sha256}": {
         put: { summary: "Upload a raw source Blob after SHA-256 verification" },
       },
@@ -930,6 +976,7 @@ class HttpContextService {
   };
   private readonly databaseUrl: string;
   private readonly disableEmbeddings: boolean;
+  private readonly snapshotStore: SnapshotObjectStore | null;
   private readonly mcpSessions = new Map<string, McpHttpSession>();
   private readonly mcpSessionCleanupTimer: NodeJS.Timeout;
   private pendingMcpInitializations = 0;
@@ -972,6 +1019,7 @@ class HttpContextService {
         | "bitbucketApiBaseUrl"
         | "bitbucketWebhookSecret"
         | "connectorPlugins"
+        | "snapshotStore"
       >,
   ) {
     this.repository = repository;
@@ -1003,6 +1051,7 @@ class HttpContextService {
     this.corsOrigins = new Set(options.corsOrigins);
     this.databaseUrl = options.databaseUrl;
     this.disableEmbeddings = options.disableEmbeddings;
+    this.snapshotStore = options.snapshotStore ?? null;
     this.runner = new IndexJobRunner({
       repository,
       engineFor: (workspace) => this.engineFor(workspace),
@@ -1186,6 +1235,13 @@ class HttpContextService {
           "webhookMaxAttempts",
         ),
         connectorPlugins: options.connectorPlugins,
+        snapshotStore:
+          options.snapshotStore === undefined
+            ? snapshotStoreFromLocation(
+                process.env.CONTEXTENGINE_SNAPSHOT_STORE,
+                process.cwd(),
+              )
+            : options.snapshotStore ?? undefined,
         corsOrigins: normalizeCorsOrigins(
           options.corsOrigins ??
             (process.env.CONTEXTENGINE_HTTP_CORS_ORIGINS ?? "").split(","),
@@ -1336,6 +1392,13 @@ class HttpContextService {
             async_jobs: true,
             server_sent_events: true,
             incremental: true,
+          },
+          snapshots: {
+            configured: Boolean(this.snapshotStore),
+            workspace_scoped: true,
+            operations: this.snapshotStore?.list
+              ? ["export", "import", "list", "delete", "prune", "gc"]
+              : ["export", "import", "delete"],
           },
           retrieval: ["search", "context", "file", "codebase-retrieval"],
           mcp: {
@@ -1635,6 +1698,89 @@ class HttpContextService {
           json(response, 200, { ok: true });
           return;
         }
+      }
+
+      const snapshotCollectionMatch = /^\/v1\/workspaces\/([^/]+)\/snapshots$/.exec(pathname);
+      if (
+        snapshotCollectionMatch &&
+        (request.method === "GET" || request.method === "POST")
+      ) {
+        const workspaceId = decodeURIComponent(snapshotCollectionMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const store = this.requireSnapshotStore(workspaceId);
+        if (request.method === "GET") {
+          json(response, 200, {
+            snapshots: await listIndexSnapshots(this.requireSnapshotListStore(workspaceId)),
+          });
+          return;
+        }
+        const input = z.object({ name: snapshotNameSchema }).strict().parse(
+          await readJsonBody(request, 16 * 1024),
+        );
+        json(response, 201, {
+          snapshot: (await exportIndexSnapshot({
+            databaseUrl: this.databaseUrl,
+            workspaceId,
+            name: input.name,
+            store,
+          })).manifest,
+        });
+        return;
+      }
+
+      const snapshotPruneMatch = /^\/v1\/workspaces\/([^/]+)\/snapshots:prune$/.exec(pathname);
+      if (request.method === "POST" && snapshotPruneMatch) {
+        const workspaceId = decodeURIComponent(snapshotPruneMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const store = this.requireSnapshotListStore(workspaceId);
+        const input = snapshotPruneSchema.parse(await readJsonBody(request, 16 * 1024));
+        const olderThanMs = input.older_than_days === undefined
+          ? undefined
+          : input.older_than_days * 24 * 60 * 60 * 1000;
+        json(response, 200, {
+          deleted: await pruneIndexSnapshots({ store, keepLatest: input.keep, olderThanMs }),
+        });
+        return;
+      }
+
+      const snapshotGcMatch = /^\/v1\/workspaces\/([^/]+)\/snapshots:gc$/.exec(pathname);
+      if (request.method === "POST" && snapshotGcMatch) {
+        const workspaceId = decodeURIComponent(snapshotGcMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const store = this.requireSnapshotListStore(workspaceId);
+        emptySnapshotRequestSchema.parse(await readJsonBody(request, 16 * 1024));
+        json(response, 200, {
+          deleted_artifacts: await garbageCollectSnapshotArtifacts(store),
+        });
+        return;
+      }
+
+      const snapshotImportMatch = /^\/v1\/workspaces\/([^/]+)\/snapshots\/([^/]+)\/import$/.exec(pathname);
+      if (request.method === "POST" && snapshotImportMatch) {
+        const workspaceId = decodeURIComponent(snapshotImportMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const name = snapshotNameSchema.parse(decodeURIComponent(snapshotImportMatch[2]));
+        const store = this.requireSnapshotStore(workspaceId);
+        emptySnapshotRequestSchema.parse(await readJsonBody(request, 16 * 1024));
+        await this.closeEngine(workspaceId);
+        const result = await importIndexSnapshot({
+          databaseUrl: this.databaseUrl,
+          workspaceId,
+          name,
+          store,
+        });
+        json(response, 200, { snapshot: result.manifest, generation_id: result.generationId });
+        return;
+      }
+
+      const snapshotItemMatch = /^\/v1\/workspaces\/([^/]+)\/snapshots\/([^/]+)$/.exec(pathname);
+      if (request.method === "DELETE" && snapshotItemMatch) {
+        const workspaceId = decodeURIComponent(snapshotItemMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const name = snapshotNameSchema.parse(decodeURIComponent(snapshotItemMatch[2]));
+        await deleteIndexSnapshot({ name, store: this.requireSnapshotStore(workspaceId) });
+        json(response, 200, { deleted: name });
+        return;
       }
 
       const statusMatch = /^\/v1\/workspaces\/([^/]+)\/status$/.exec(pathname);
@@ -2913,6 +3059,27 @@ class HttpContextService {
     const engine = new ContextEngine(config);
     this.engines.set(workspace.id, engine);
     return engine;
+  }
+
+  private requireSnapshotStore(workspaceId: string): SnapshotObjectStore {
+    if (!this.snapshotStore) {
+      throw new HttpError(
+        503,
+        "Snapshot object store is not configured",
+      );
+    }
+    return new PrefixedSnapshotObjectStore(
+      this.snapshotStore,
+      `workspaces/${sha256(workspaceId).slice(0, 32)}`,
+    );
+  }
+
+  private requireSnapshotListStore(workspaceId: string): SnapshotObjectStore {
+    const store = this.requireSnapshotStore(workspaceId);
+    if (!this.snapshotStore?.list) {
+      throw new HttpError(501, "Snapshot object store does not support listing");
+    }
+    return store;
   }
 
   private async requireIndexedEngine(workspace: StoredWorkspace): Promise<ContextEngine> {

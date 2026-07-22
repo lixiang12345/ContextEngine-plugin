@@ -20,6 +20,7 @@ const MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024 * 1024;
 const MAX_LINE_BYTES = 16 * 1024 * 1024;
 const PAGE_SIZE = 500;
+const PUBLICATION_MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const snapshotNameSchema = z
   .string()
@@ -64,6 +65,13 @@ export interface SnapshotImportResult {
   generationId: string;
 }
 
+export class SnapshotNotFoundError extends Error {
+  constructor(readonly key: string) {
+    super(`Snapshot object not found: ${key}`);
+    this.name = "SnapshotNotFoundError";
+  }
+}
+
 export async function listIndexSnapshots(
   store: SnapshotObjectStore,
 ): Promise<string[]> {
@@ -94,6 +102,22 @@ export async function garbageCollectSnapshotArtifacts(
 ): Promise<string[]> {
   if (!store.list)
     throw new Error("Snapshot object store does not support listing");
+  for (const key of await store.list("operations")) {
+    if (!/^operations\/publish-[0-9a-f-]{36}\.json$/.test(key)) continue;
+    const marker = z
+      .object({ created_at: z.string().datetime() })
+      .strict()
+      .parse(JSON.parse(await readObject(store, key, MAX_MANIFEST_BYTES)));
+    if (
+      Date.now() - Date.parse(marker.created_at) <=
+      PUBLICATION_MARKER_TTL_MS
+    ) {
+      throw new Error(
+        "Cannot garbage collect while a snapshot publication is active",
+      );
+    }
+    await store.delete(key);
+  }
   const referenced = new Set<string>();
   for (const name of await listIndexSnapshots(store)) {
     try {
@@ -195,7 +219,7 @@ export async function exportIndexSnapshot(options: {
     os.tmpdir(),
     `contextengine-snapshot-${randomUUID()}.ndjson.gz`,
   );
-  let artifactKey = "";
+  let publicationMarkerKey: string | null = null;
   try {
     const status = await reader.generationStatus();
     if (!status.generationId)
@@ -287,7 +311,13 @@ export async function exportIndexSnapshot(options: {
     const file = await stat(temporary);
     if (file.size !== bytes)
       throw new Error("Snapshot artifact size accounting failed");
-    artifactKey = `objects/sha256/${digestHex}.ndjson.gz`;
+    const artifactKey = `objects/sha256/${digestHex}.ndjson.gz`;
+    publicationMarkerKey = `operations/publish-${randomUUID()}.json`;
+    const markerBody = JSON.stringify({ created_at: new Date().toISOString() });
+    await options.store.put(publicationMarkerKey, Readable.from([markerBody]), {
+      contentType: "application/json",
+      contentLength: Buffer.byteLength(markerBody),
+    });
     await options.store.put(artifactKey, createReadStream(temporary), {
       contentType: "application/x-ndjson",
       contentEncoding: "gzip",
@@ -323,6 +353,13 @@ export async function exportIndexSnapshot(options: {
     );
     return { manifest, manifestKey };
   } finally {
+    if (publicationMarkerKey) {
+      try {
+        await options.store.delete(publicationMarkerKey);
+      } catch {
+        // A stale marker fails GC closed and expires after the bounded TTL.
+      }
+    }
     await reader.close();
     await rm(temporary, { force: true });
   }
@@ -624,16 +661,35 @@ async function readObject(
   key: string,
   maxBytes: number,
 ): Promise<string> {
-  const stream = await store.get(key);
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    bytes += buffer.length;
-    if (bytes > maxBytes) throw new Error("Snapshot manifest is too large");
-    chunks.push(buffer);
+  try {
+    const stream = await store.get(key);
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.length;
+      if (bytes > maxBytes) throw new Error("Snapshot manifest is too large");
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  } catch (error) {
+    if (isMissingObjectError(error)) throw new SnapshotNotFoundError(key);
+    throw error;
   }
-  return Buffer.concat(chunks).toString("utf8");
+}
+
+function isMissingObjectError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    code?: unknown;
+    name?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  return (
+    candidate.code === "ENOENT" ||
+    candidate.name === "NoSuchKey" ||
+    candidate.$metadata?.httpStatusCode === 404
+  );
 }
 
 async function downloadAndVerify(

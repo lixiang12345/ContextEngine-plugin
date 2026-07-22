@@ -371,6 +371,43 @@ Embedded deployments can register additional providers with the public
 synchronization retains ownership of leases, hashing, diff, Blob writes and
 index promotion. See [`PLUGINS.md`](./PLUGINS.md).
 
+### Owner-managed team snapshots
+
+Set `CONTEXTENGINE_SNAPSHOT_STORE` to a filesystem directory or an
+`s3://bucket/prefix` location before enabling these routes. S3 uses the standard
+AWS credential chain; `CONTEXTENGINE_S3_ENDPOINT`,
+`CONTEXTENGINE_S3_FORCE_PATH_STYLE`, `CONTEXTENGINE_S3_SSE`, and
+`CONTEXTENGINE_S3_KMS_KEY_ID` configure compatible services and encryption.
+
+Every route requires workspace `owner` permission. Keys are automatically
+scoped by a hash of the workspace id when workspaces share one bucket:
+
+```http
+GET /v1/workspaces/{workspaceId}/snapshots
+
+POST /v1/workspaces/{workspaceId}/snapshots
+Content-Type: application/json
+{"name":"team-main"}
+
+POST /v1/workspaces/{workspaceId}/snapshots/{name}/import
+Content-Type: application/json
+{}
+
+DELETE /v1/workspaces/{workspaceId}/snapshots/{name}
+
+POST /v1/workspaces/{workspaceId}/snapshots:prune
+Content-Type: application/json
+{"keep":3,"older_than_days":30}
+
+POST /v1/workspaces/{workspaceId}/snapshots:gc
+Content-Type: application/json
+{}
+```
+
+Import verifies the artifact before promotion and refreshes the cached engine.
+Missing configuration returns `503`; reader permissions are hidden as `404`.
+Prune and GC fail closed on malformed manifests or an active publication.
+
 ### 2. Plan a file manifest change
 
 Hash each UTF-8 file with SHA-256. Paths must be normalized, relative POSIX
@@ -656,6 +693,9 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_BITBUCKET_API_BASE_URL` | Bitbucket API base (default `https://api.bitbucket.org/2.0`; HTTP only for loopback) |
 | `CONTEXTENGINE_BITBUCKET_TIMEOUT_MS` | Per-request Bitbucket API timeout; default 30000 ms |
 | `CONTEXTENGINE_BITBUCKET_WEBHOOK_SECRET` | Bitbucket `repo:push` HMAC secret; minimum 16 characters |
+| `CONTEXTENGINE_SNAPSHOT_STORE` | Filesystem directory or `s3://bucket/prefix` for owner-managed snapshots; disabled when unset |
+| `CONTEXTENGINE_S3_ENDPOINT` / `_FORCE_PATH_STYLE` | Optional S3-compatible service endpoint and path-style mode |
+| `CONTEXTENGINE_S3_SSE` / `_KMS_KEY_ID` | Optional `AES256` or `aws:kms` server-side encryption |
 
 The service uses `CONTEXTENGINE_DATABASE_URL` and the existing embedding/rerank
 configuration described in the root README.

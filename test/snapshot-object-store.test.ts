@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { describe, it } from "node:test";
 import { FilesystemSnapshotStore } from "../src/snapshots/filesystem-store.js";
+import { PrefixedSnapshotObjectStore } from "../src/snapshots/object-store.js";
 import {
   S3SnapshotStore,
   type S3CommandClient,
@@ -94,6 +95,21 @@ describe("snapshot object stores", () => {
       Buffer.alloc(32).toString("base64"),
     );
     assert.equal(commands[2].input.Prefix, "contextengine/shared/snapshots/");
+  });
+
+  it("isolates callers behind validated object prefixes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "ce-prefixed-store-"));
+    const base = new FilesystemSnapshotStore(root);
+    const alice = new PrefixedSnapshotObjectStore(base, "workspaces/alice");
+    const bob = new PrefixedSnapshotObjectStore(base, "workspaces/bob");
+    await alice.put("snapshots/main/manifest.json", Readable.from(["alice"]));
+    assert.deepEqual(await alice.list("snapshots"), [
+      "snapshots/main/manifest.json",
+    ]);
+    assert.deepEqual(await bob.list("snapshots"), []);
+    await assert.rejects(
+      bob.get("snapshots/main/manifest.json").then(streamText),
+    );
   });
 
   it("rejects unsafe S3 configuration", () => {

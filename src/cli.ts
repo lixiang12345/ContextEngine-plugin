@@ -4,8 +4,7 @@ import path from "node:path";
 import { loadDotEnv, resolveDatabaseUrl, resolveEngineConfig } from "./config.js";
 import { ContextEngine } from "./engine.js";
 import { renderCiTemplate, type CiTemplateProvider } from "./ci/templates.js";
-import { FilesystemSnapshotStore } from "./snapshots/filesystem-store.js";
-import { S3SnapshotStore } from "./snapshots/s3-store.js";
+import { snapshotStoreFromLocation } from "./snapshots/config.js";
 import {
   deleteIndexSnapshot,
   exportIndexSnapshot,
@@ -355,6 +354,7 @@ program
   .option("--host <host>", "listen host", "127.0.0.1")
   .option("--port <port>", "listen port", "8787")
   .option("--api-key <key>", "Bearer API key (defaults to CONTEXTENGINE_HTTP_API_KEY)")
+  .option("--snapshot-store <location>", "snapshot directory or s3://bucket/prefix")
   .option(
     "--allow-local-workspaces",
     "allow server-side local-root workspaces (disabled by default)",
@@ -364,6 +364,7 @@ program
       host: string;
       port: string;
       apiKey?: string;
+      snapshotStore?: string;
       allowLocalWorkspaces?: boolean;
     }) => {
       const { startHttpServer } = await import("./http-server.js");
@@ -375,6 +376,7 @@ program
         host: opts.host,
         port: parsedPort,
         apiKey: opts.apiKey,
+        snapshotStore: snapshotStoreFromLocation(opts.snapshotStore),
         allowLocalWorkspaces: opts.allowLocalWorkspaces,
       });
       console.log(`ContextEngine HTTP server listening at ${handle.url}`);
@@ -674,24 +676,5 @@ function requireSnapshotDatabaseUrl(): string {
 
 function snapshotStore(location: string | undefined, root: string): SnapshotObjectStore {
   const value = location?.trim() || path.join(root, ".contextengine", "snapshots");
-  if (!value.startsWith("s3://")) return new FilesystemSnapshotStore(value);
-  const parsed = new URL(value);
-  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error("Snapshot S3 location must be s3://bucket/prefix");
-  }
-  return new S3SnapshotStore({
-    bucket: parsed.hostname,
-    prefix: parsed.pathname.replace(/^\/+|\/+$/g, "") || "contextengine",
-    region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION,
-    endpoint: process.env.CONTEXTENGINE_S3_ENDPOINT || process.env.CC_S3_ENDPOINT,
-    forcePathStyle: /^(1|true|yes|on)$/i.test(
-      process.env.CONTEXTENGINE_S3_FORCE_PATH_STYLE || process.env.CC_S3_FORCE_PATH_STYLE || "",
-    ),
-    serverSideEncryption: process.env.CONTEXTENGINE_S3_SSE === "aws:kms"
-      ? "aws:kms"
-      : process.env.CONTEXTENGINE_S3_SSE === "AES256"
-        ? "AES256"
-        : undefined,
-    kmsKeyId: process.env.CONTEXTENGINE_S3_KMS_KEY_ID,
-  });
+  return snapshotStoreFromLocation(value, root)!;
 }
