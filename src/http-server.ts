@@ -36,8 +36,9 @@ import {
 import {
   createHttpAuthenticator,
   type HttpApiKeyConfig,
-  type HttpBearerAuthenticator,
   type HttpPrincipal,
+  type HttpRequestAuthenticator,
+  type OidcAuthenticatorOptions,
 } from "./server/http-auth.js";
 import { IndexJobRunner } from "./server/index-job-runner.js";
 import {
@@ -85,6 +86,8 @@ export interface HttpServerOptions {
   port?: number;
   apiKey?: string;
   apiKeys?: HttpApiKeyConfig[];
+  /** Optional OAuth 2.0/OIDC JWT access-token verifier. API keys keep working. */
+  oidc?: OidcAuthenticatorOptions;
   databaseUrl?: string;
   allowUnauthenticated?: boolean;
   allowLocalWorkspaces?: boolean;
@@ -304,6 +307,13 @@ function numberFromEnv(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+function optionalIntegerFromEnv(value: string | undefined, name: string): number | undefined {
+  if (!value?.trim()) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) throw new Error(`${name} must be an integer`);
+  return parsed;
+}
+
 function positiveOption(value: number, name: string): number {
   const normalized = Math.floor(value);
   if (!Number.isFinite(value) || value <= 0 || normalized < 1) {
@@ -367,6 +377,52 @@ function apiKeysFromEnv(value: string | undefined): HttpApiKeyConfig[] {
     role: entry.role,
     admin: entry.admin,
   }));
+}
+
+function oidcFromEnv(): OidcAuthenticatorOptions | undefined {
+  const issuer = process.env.CONTEXTENGINE_OIDC_ISSUER?.trim();
+  const audienceValue = process.env.CONTEXTENGINE_OIDC_AUDIENCE?.trim();
+  if (!issuer && !audienceValue) return undefined;
+  if (!issuer || !audienceValue) {
+    throw new Error(
+      "CONTEXTENGINE_OIDC_ISSUER and CONTEXTENGINE_OIDC_AUDIENCE must be configured together",
+    );
+  }
+  const audience = audienceValue.split(",").map((value) => value.trim()).filter(Boolean);
+  if (audience.length === 0) {
+    throw new Error("CONTEXTENGINE_OIDC_AUDIENCE must not be empty");
+  }
+  const algorithms = (process.env.CONTEXTENGINE_OIDC_ALLOWED_ALGORITHMS ?? "RS256")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean) as OidcAuthenticatorOptions["allowedAlgorithms"];
+  return {
+    issuer,
+    audience,
+    jwksUri: process.env.CONTEXTENGINE_OIDC_JWKS_URL?.trim() || undefined,
+    allowedAlgorithms: algorithms,
+    groupsClaim: process.env.CONTEXTENGINE_OIDC_GROUPS_CLAIM?.trim() || undefined,
+    operatorGroups: (process.env.CONTEXTENGINE_OIDC_OPERATOR_GROUPS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    clockToleranceSeconds: optionalIntegerFromEnv(
+      process.env.CONTEXTENGINE_OIDC_CLOCK_TOLERANCE_SECONDS,
+      "CONTEXTENGINE_OIDC_CLOCK_TOLERANCE_SECONDS",
+    ),
+    jwksCacheTtlMs: optionalIntegerFromEnv(
+      process.env.CONTEXTENGINE_OIDC_JWKS_CACHE_TTL_MS,
+      "CONTEXTENGINE_OIDC_JWKS_CACHE_TTL_MS",
+    ),
+    unknownKidRefreshIntervalMs: optionalIntegerFromEnv(
+      process.env.CONTEXTENGINE_OIDC_UNKNOWN_KID_REFRESH_INTERVAL_MS,
+      "CONTEXTENGINE_OIDC_UNKNOWN_KID_REFRESH_INTERVAL_MS",
+    ),
+    fetchTimeoutMs: optionalIntegerFromEnv(
+      process.env.CONTEXTENGINE_OIDC_FETCH_TIMEOUT_MS,
+      "CONTEXTENGINE_OIDC_FETCH_TIMEOUT_MS",
+    ),
+  };
 }
 
 function normalizedRelativePath(value: string): string {
@@ -753,7 +809,7 @@ class HttpContextService {
   private readonly telemetry = new RequestTelemetry();
   private readonly engines = new Map<string, ContextEngine>();
   private readonly modelConfiguration = new RuntimeModelConfiguration();
-  private readonly authenticator: HttpBearerAuthenticator;
+  private readonly authenticator: HttpRequestAuthenticator;
   private readonly aclEnabled: boolean;
   private readonly allowLocalWorkspaces: boolean;
   private readonly localRootAllowlist: string[];
@@ -783,7 +839,7 @@ class HttpContextService {
 
   private constructor(
     repository: WorkspaceRepository,
-    authenticator: HttpBearerAuthenticator,
+    authenticator: HttpRequestAuthenticator,
     aclEnabled: boolean,
     options: Required<
       Pick<
@@ -880,10 +936,12 @@ class HttpContextService {
     const apiKey =
       options.apiKey ?? (process.env.CONTEXTENGINE_HTTP_API_KEY?.trim() || undefined);
     const apiKeys = options.apiKeys ?? apiKeysFromEnv(process.env.CONTEXTENGINE_HTTP_API_KEYS);
+    const oidc = options.oidc ?? oidcFromEnv();
     const authenticator = createHttpAuthenticator({
       apiKey,
       apiKeys,
       allowUnauthenticated,
+      oidc,
     });
     const mcpSessionIdleTtlMs = positiveOption(
       options.mcpSessionIdleTtlMs ??
@@ -902,42 +960,47 @@ class HttpContextService {
       "mcpMaxSessions",
     );
     const repository = await WorkspaceRepository.open(databaseUrl);
-    const service = new HttpContextService(repository, authenticator, apiKeys.length > 0, {
-      databaseUrl,
-      allowLocalWorkspaces:
-        options.allowLocalWorkspaces ??
-        readBoolean(process.env.CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES),
-      localRootAllowlist:
-        options.localRootAllowlist ??
-        (process.env.CONTEXTENGINE_LOCAL_ROOT_ALLOWLIST ?? "")
-          .split(path.delimiter)
-          .map((value) => value.trim())
-          .filter(Boolean),
-      maxBlobBytes:
-        options.maxBlobBytes ??
-        numberFromEnv(process.env.CONTEXTENGINE_HTTP_MAX_BLOB_BYTES, DEFAULT_MAX_BLOB_BYTES),
-      mcpSessionIdleTtlMs,
-      mcpMaxSessions,
-      mcpSessionStore:
-        options.mcpSessionStore ??
-        mcpSessionStoreFromEnv(process.env.CONTEXTENGINE_MCP_SESSION_STORE),
-      disableEmbeddings: options.disableEmbeddings ?? false,
-      githubToken:
-        options.githubToken ?? (process.env.CONTEXTENGINE_GITHUB_TOKEN?.trim() || undefined),
-      githubApiBaseUrl:
-        options.githubApiBaseUrl ??
-        (process.env.CONTEXTENGINE_GITHUB_API_BASE_URL?.trim() || undefined),
-      githubTimeoutMs: positiveOption(
-        options.githubTimeoutMs ??
-          numberFromEnv(process.env.CONTEXTENGINE_GITHUB_TIMEOUT_MS, 30_000),
-        "githubTimeoutMs",
-      ),
-      connectorPlugins: options.connectorPlugins,
-      corsOrigins: normalizeCorsOrigins(
-        options.corsOrigins ??
-          (process.env.CONTEXTENGINE_HTTP_CORS_ORIGINS ?? "").split(","),
-      ),
-    });
+    const service = new HttpContextService(
+      repository,
+      authenticator,
+      apiKeys.length > 0 || oidc !== undefined,
+      {
+        databaseUrl,
+        allowLocalWorkspaces:
+          options.allowLocalWorkspaces ??
+          readBoolean(process.env.CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES),
+        localRootAllowlist:
+          options.localRootAllowlist ??
+          (process.env.CONTEXTENGINE_LOCAL_ROOT_ALLOWLIST ?? "")
+            .split(path.delimiter)
+            .map((value) => value.trim())
+            .filter(Boolean),
+        maxBlobBytes:
+          options.maxBlobBytes ??
+          numberFromEnv(process.env.CONTEXTENGINE_HTTP_MAX_BLOB_BYTES, DEFAULT_MAX_BLOB_BYTES),
+        mcpSessionIdleTtlMs,
+        mcpMaxSessions,
+        mcpSessionStore:
+          options.mcpSessionStore ??
+          mcpSessionStoreFromEnv(process.env.CONTEXTENGINE_MCP_SESSION_STORE),
+        disableEmbeddings: options.disableEmbeddings ?? false,
+        githubToken:
+          options.githubToken ?? (process.env.CONTEXTENGINE_GITHUB_TOKEN?.trim() || undefined),
+        githubApiBaseUrl:
+          options.githubApiBaseUrl ??
+          (process.env.CONTEXTENGINE_GITHUB_API_BASE_URL?.trim() || undefined),
+        githubTimeoutMs: positiveOption(
+          options.githubTimeoutMs ??
+            numberFromEnv(process.env.CONTEXTENGINE_GITHUB_TIMEOUT_MS, 30_000),
+          "githubTimeoutMs",
+        ),
+        connectorPlugins: options.connectorPlugins,
+        corsOrigins: normalizeCorsOrigins(
+          options.corsOrigins ??
+            (process.env.CONTEXTENGINE_HTTP_CORS_ORIGINS ?? "").split(","),
+        ),
+      },
+    );
     await service.runner.start();
     return service;
   }
@@ -997,9 +1060,10 @@ class HttpContextService {
         json(response, 200, openApiDocument());
         return;
       }
-      const principal = this.authenticator.authenticate(request);
+      const principal = await this.authenticator.authenticate(request);
       if (!principal) {
-        throw new HttpError(401, "Missing or invalid Bearer API key");
+        response.setHeader("www-authenticate", "Bearer");
+        throw new HttpError(401, "Missing or invalid Bearer credential");
       }
 
       const mcpMatch = /^\/v1\/workspaces\/([^/]+)\/mcp$/.exec(pathname);
@@ -1032,6 +1096,11 @@ class HttpContextService {
             principals: true,
             workspace_acl: this.aclEnabled,
             permissions: ["reader", "writer", "owner"],
+            current_principal: {
+              principal_id: principal.principalId,
+              role: principal.role,
+              authentication_method: principal.authenticationMethod,
+            },
           },
           sync: {
             content_addressed_blobs: true,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added composable OAuth 2.0/OIDC JWT authentication alongside existing API
+  keys, with exact issuer/audience and lifetime validation, explicit algorithm
+  allowlists, HTTPS discovery/JWKS caching and rotation refresh, stable
+  issuer+subject principals, and server-configured operator-group mapping.
 - Added a public source connector plugin SDK and registry, adapted GitHub as the
   built-in provider, generalized HTTP source creation and synchronization, and
   added schema v6 provider ids plus third-party plugin end-to-end coverage.

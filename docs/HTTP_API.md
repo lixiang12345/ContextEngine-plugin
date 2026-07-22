@@ -22,8 +22,8 @@ contextengine-http
 # or: contextengine http --port 8787
 ```
 
-The server binds `127.0.0.1:8787` by default. It refuses to start without
-`CONTEXTENGINE_HTTP_API_KEY` unless `CONTEXTENGINE_HTTP_ALLOW_UNAUTHENTICATED=1`
+The server binds `127.0.0.1:8787` by default. It refuses to start without an API
+key or OIDC issuer/audience unless `CONTEXTENGINE_HTTP_ALLOW_UNAUTHENTICATED=1`
 is explicitly set.
 
 Public routes:
@@ -35,8 +35,11 @@ Public routes:
 All `/v1/*` routes require:
 
 ```http
-Authorization: Bearer <CONTEXTENGINE_HTTP_API_KEY>
+Authorization: Bearer <API-key-or-OIDC-access-token>
 ```
+
+An invalid credential returns `401` with `WWW-Authenticate: Bearer`. Raw access
+tokens are never stored in principals, MCP session metadata, telemetry, or logs.
 
 ## Docker deployment
 
@@ -116,7 +119,38 @@ Content-Type: application/json
 `DELETE /v1/workspaces/{workspaceId}/acl/{principalId}` revokes access
 immediately, including active MCP sessions. Unauthorized workspace and job IDs
 return `404`. The legacy `CONTEXTENGINE_HTTP_API_KEY` remains a service-wide
-operator credential for backward compatibility.
+operator credential for backward compatibility. `GET /v1/capabilities` returns
+the caller's stable `authorization.current_principal.principal_id`, which is the
+value used by ACL routes.
+
+### OAuth 2.0 / OIDC access tokens
+
+Configure `CONTEXTENGINE_OIDC_ISSUER` and `CONTEXTENGINE_OIDC_AUDIENCE` together.
+The service discovers the provider's JWKS endpoint and verifies signed JWT access
+tokens. Set `CONTEXTENGINE_OIDC_JWKS_URL` to use an explicit endpoint instead.
+Issuer, JWKS, and discovery URLs must use HTTPS. API keys continue to work while
+OIDC is enabled.
+
+```bash
+export CONTEXTENGINE_OIDC_ISSUER=https://identity.example.com/realms/acme
+export CONTEXTENGINE_OIDC_AUDIENCE=contextengine-api
+export CONTEXTENGINE_OIDC_ALLOWED_ALGORITHMS=RS256
+export CONTEXTENGINE_OIDC_GROUPS_CLAIM=groups
+export CONTEXTENGINE_OIDC_OPERATOR_GROUPS=contextengine-operators
+```
+
+The verifier checks the signature, exact issuer, accepted audience, `exp`,
+optional `nbf`/`iat`, non-empty subject, key use, key operations, key type, and an
+explicit algorithm allowlist. JWKS responses have bounded size/key count and a
+bounded cache TTL; an unknown `kid` triggers one rate-limited refresh for key
+rotation. Redirects and non-HTTPS key endpoints are rejected.
+
+OIDC principal IDs are stable hashes of the verified issuer and subject. Normal
+access-token rotation therefore does not invalidate workspace ACLs or Remote MCP
+sessions, while the raw subject is not exposed through the API. A verified OIDC
+caller is a regular user unless a value in the configured groups claim exactly
+matches `CONTEXTENGINE_OIDC_OPERATOR_GROUPS`. Token-provided `role`, `admin`, or
+unconfigured group claims never grant operator access.
 
 ### Read-only source connectors
 
@@ -399,6 +433,15 @@ workspace revision locally and retry only after handling a `409` conflict.
 | Variable | Purpose |
 |---|---|
 | `CONTEXTENGINE_HTTP_API_KEY` | Required Bearer key |
+| `CONTEXTENGINE_HTTP_API_KEYS` | JSON array of multi-principal API keys |
+| `CONTEXTENGINE_OIDC_ISSUER` / `_AUDIENCE` | Enable verified JWT access tokens; required together |
+| `CONTEXTENGINE_OIDC_JWKS_URL` | Optional explicit HTTPS JWKS endpoint; otherwise discovery is used |
+| `CONTEXTENGINE_OIDC_ALLOWED_ALGORITHMS` | Comma-separated explicit allowlist; default `RS256` |
+| `CONTEXTENGINE_OIDC_GROUPS_CLAIM` / `_OPERATOR_GROUPS` | Claim name and exact operator group mapping |
+| `CONTEXTENGINE_OIDC_CLOCK_TOLERANCE_SECONDS` | JWT clock tolerance, 0–300 seconds; default 30 |
+| `CONTEXTENGINE_OIDC_JWKS_CACHE_TTL_MS` | JWKS/discovery cache TTL, 1 second–24 hours; default 5 minutes |
+| `CONTEXTENGINE_OIDC_UNKNOWN_KID_REFRESH_INTERVAL_MS` | Minimum interval for rotation refresh; default 30 seconds |
+| `CONTEXTENGINE_OIDC_FETCH_TIMEOUT_MS` | Discovery/JWKS request timeout; default 5 seconds |
 | `CONTEXTENGINE_HTTP_HOST` / `_PORT` | Bind address and port (defaults `127.0.0.1:8787`) |
 | `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES` | Per-Blob request limit (default 2 MiB) |
 | `CONTEXTENGINE_HTTP_CORS_ORIGINS` | Exact comma-separated browser origins, or `*`; disabled by default |

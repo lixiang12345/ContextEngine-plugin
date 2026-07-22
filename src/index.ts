@@ -16,6 +16,7 @@
 
 export { ContextEngine, estimateTokens } from "./engine.js";
 export { startHttpServer } from "./http-server.js";
+export { OidcJwtAuthenticator } from "./server/oidc-auth.js";
 export {
   resolveEngineConfig,
   resolveEmbeddingsConfig,
@@ -136,6 +137,10 @@ export type {
   HttpServerHandle,
   HttpServerOptions,
 } from "./http-server.js";
+export type {
+  OidcAuthenticatorOptions,
+  OidcJwtAlgorithm,
+} from "./server/oidc-auth.js";
 export type {
   IndexJobMode,
   IndexJobStatus,

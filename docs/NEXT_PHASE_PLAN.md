@@ -6,7 +6,8 @@
 
 当前数据库：PostgreSQL schema v6
 
-当前验证：`npm run build` 与 PostgreSQL 全量测试 `151/151` 通过
+当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
+全量测试 `159/159` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -14,6 +15,12 @@ session metadata，后续 JSON POST 在任意实例按请求重建 server/transp
 全局容量竞态、principal/workspace 隔离、TTL 和幂等 DELETE 自动化测试通过。两个
 runtime 容器共享 PostgreSQL 的行为冒烟也已通过；全新 Docker 镜像重建因 Docker Hub
 基底镜像 metadata 请求超时未完成，发布前需在网络可用环境复跑镜像构建。
+
+Phase 2 状态（2026-07-22）：已实现可组合 API Key + OIDC JWT 认证、HTTPS
+discovery/JWKS、显式算法白名单、issuer/audience/lifetime/key-use 校验、未知 `kid`
+限频刷新、稳定 issuer+subject principal 和显式 operator group 映射。现有 API Key
+继续可用；OIDC-only 部署自动启用 workspace ACL。全量 PostgreSQL 回归和
+OIDC HTTP/MCP token-rotation 集成测试已通过，下一阶段进入 source-level ACL。
 
 ## 1. 目标
 
@@ -177,8 +184,9 @@ git diff --check
 
 Phase 1 完成后按以下顺序继续，避免在身份与隔离基础不稳时扩展数据面：
 
-1. **OAuth/OIDC**：issuer/audience/JWKS 校验、key rotation、subject/group 映射，兼容
-   现有 API key；禁止从未验证的 token claim 直接授予 operator。
+1. **OAuth/OIDC（已完成）**：issuer/audience/JWKS 校验、key
+   rotation、subject/group 映射，兼容现有 API key；禁止从未验证的 token claim
+   直接授予 operator。
 2. **source-level ACL**：repo/path/document 权限在 retrieval、file read、MCP 三层强制
    执行，并保存 connector permission snapshot 与 provenance。
 3. **connector SDK + webhook**：抽象 `listChanges/readBlob/commitCursor/watch`，增加

@@ -293,10 +293,13 @@ HTTP 服务内置 `/dashboard` 可观测控制台，与 `/v1/*` 共用 Bearer AP
 核心接口包括工作区创建/查询、`/sync/plan`、`PUT /blobs/{sha256}`、
 `/sync/commit`、`/index-jobs`、`/search`、`/context` 与 `/file`。
 
-多 Principal Bearer Key 可按工作区实施 `reader`、`writer`、`owner` 权限。
+多 Principal Bearer Key 或经过验证的 OAuth/OIDC JWT Access Token 可按工作区实施
+`reader`、`writer`、`owner` 权限。OIDC Principal 在 Token 轮换后保持稳定，只有
+服务端明确配置的用户组映射才能授予 Operator 权限。
 只读 GitHub Connector 可将一个仓库绑定到空 Blob 工作区，进行增量同步，并在
 控制台展示来源状态。配置方式见 `CONTEXTENGINE_HTTP_API_KEYS`、
-`CONTEXTENGINE_GITHUB_TOKEN` 和 HTTP API 文档中的 Connector/ACL 路由。
+`CONTEXTENGINE_OIDC_ISSUER`、`CONTEXTENGINE_GITHUB_TOKEN` 和 HTTP API 文档中的
+认证、Connector/ACL 路由。
 宿主可以通过 `connectorPlugins` 注册其他来源，详见
 [docs/PLUGINS.md](./docs/PLUGINS.md)。
 

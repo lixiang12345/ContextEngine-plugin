@@ -1,11 +1,15 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
+import {
+  OidcJwtAuthenticator,
+  type OidcAuthenticatorOptions,
+} from "./oidc-auth.js";
 
 export const LEGACY_HTTP_PRINCIPAL_ID = "legacy-operator";
 export const ANONYMOUS_HTTP_PRINCIPAL_ID = "anonymous";
 
 export type HttpPrincipalRole = "user" | "operator";
-export type HttpAuthenticationMethod = "bearer" | "anonymous";
+export type HttpAuthenticationMethod = "bearer" | "oidc" | "anonymous";
 export type HttpAuthenticationMode = "bearer" | "anonymous-admin";
 
 export interface HttpPrincipal {
@@ -32,11 +36,22 @@ export interface HttpAuthenticatorOptions {
    * always take precedence and continue to require Bearer authentication.
    */
   readonly allowUnauthenticated?: boolean;
+  readonly oidc?: OidcAuthenticatorOptions;
 }
 
 export interface HttpAuthenticationPolicy {
   readonly mode: HttpAuthenticationMode;
   readonly authenticationRequired: boolean;
+}
+
+export interface HttpRequestAuthenticator {
+  readonly policy: HttpAuthenticationPolicy;
+  authenticate(
+    request: Pick<IncomingMessage, "headers">,
+  ): HttpPrincipal | null | Promise<HttpPrincipal | null>;
+  authenticateAuthorization(
+    authorization: string | readonly string[] | undefined,
+  ): HttpPrincipal | null | Promise<HttpPrincipal | null>;
 }
 
 interface StoredCredential {
@@ -211,8 +226,51 @@ export class HttpBearerAuthenticator {
   }
 }
 
+export class HttpCompositeAuthenticator implements HttpRequestAuthenticator {
+  readonly policy: HttpAuthenticationPolicy = Object.freeze({
+    mode: "bearer",
+    authenticationRequired: true,
+  });
+
+  constructor(
+    private readonly apiKeys: HttpBearerAuthenticator | null,
+    private readonly oidc: OidcJwtAuthenticator,
+  ) {}
+
+  authenticate(
+    request: Pick<IncomingMessage, "headers">,
+  ): Promise<HttpPrincipal | null> {
+    return this.authenticateAuthorization(request.headers.authorization);
+  }
+
+  async authenticateAuthorization(
+    authorization: string | readonly string[] | undefined,
+  ): Promise<HttpPrincipal | null> {
+    const apiKeyPrincipal = this.apiKeys?.authenticateAuthorization(authorization) ?? null;
+    if (apiKeyPrincipal) return apiKeyPrincipal;
+    const token = parseBearerAuthorization(authorization);
+    return token === null ? null : this.oidc.authenticateToken(token);
+  }
+}
+
 export function createHttpAuthenticator(
   options: HttpAuthenticatorOptions,
-): HttpBearerAuthenticator {
+): HttpRequestAuthenticator {
+  if (options.oidc) {
+    const hasApiKeys = options.apiKey !== undefined || (options.apiKeys?.length ?? 0) > 0;
+    const apiKeys = hasApiKeys
+      ? new HttpBearerAuthenticator({
+          apiKey: options.apiKey,
+          apiKeys: options.apiKeys,
+          allowUnauthenticated: false,
+        })
+      : null;
+    return new HttpCompositeAuthenticator(
+      apiKeys,
+      new OidcJwtAuthenticator(options.oidc),
+    );
+  }
   return new HttpBearerAuthenticator(options);
 }
+
+export type { OidcAuthenticatorOptions } from "./oidc-auth.js";

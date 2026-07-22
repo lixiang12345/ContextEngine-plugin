@@ -1,6 +1,6 @@
 # ContextEngine 与 Augment Context Engine 对齐报告
 
-更新时间：2026-07-21。本文把公开的 Augment 产品/文档能力与当前仓库代码逐项核对，区分“官方文档明确说明的能力”和“厂商营销或尚未独立复现的指标”。目标不是声称功能等价，而是确定 ContextEngine 下一阶段最值得投入的工程工作。
+更新时间：2026-07-22。本文把公开的 Augment 产品/文档能力与当前仓库代码逐项核对，区分“官方文档明确说明的能力”和“厂商营销或尚未独立复现的指标”。目标不是声称功能等价，而是确定 ContextEngine 下一阶段最值得投入的工程工作。
 
 ## 结论摘要
 
@@ -20,14 +20,14 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 | 能力 | 官方资料中可核验的描述 | 当前 ContextEngine | 差距 |
 |---|---|---|---|
 | Context Engine MCP | 提供 `codebase-retrieval`，可接入多种 agent；本地模式随工作区实时更新，远程模式连接选定仓库 | stdio MCP 已提供 `codebase-retrieval`，并保留旧下划线别名；默认 watcher 会监听主根和额外根 | 低到中 |
-| Remote MCP | Context Connectors 文档给出 Streamable HTTP、Bearer key、session id、可选 search-only/CORS；托管 MCP 另支持 OAuth/API key | HTTP 服务已有 workspace-scoped JSON-response MCP、Bearer 认证、PostgreSQL durable session、数据库时钟 TTL 与跨实例全局容量 | 中：缺 CORS、OAuth；GET/SSE 未实现 durable event stream |
+| Remote MCP | Context Connectors 文档给出 Streamable HTTP、Bearer key、session id、可选 search-only/CORS；托管 MCP 另支持 OAuth/API key | HTTP 服务已有 workspace-scoped JSON-response MCP、API Key + OIDC、精确 Origin CORS、PostgreSQL durable session、数据库时钟 TTL 与跨实例全局容量 | 低到中：GET/SSE 未实现 durable event stream，尚缺 provider-specific OAuth client UX |
 | 混合/语义检索 | 官方强调语义理解、代码关系和任务相关上下文；具体模型实现未公开 | PostgreSQL FTS、symbol/path、pgvector、RRF、MMR、可选 neural rerank；模型 BYO | 高：检索模型质量与大规模验证不足 |
 | 多仓库/工作区上下文 | IDE 可添加额外仓库和文件夹，并显示同步状态 | `CONTEXTENGINE_EXTRA_ROOTS`、profiles、HTTP workspace 与 revision/generation 状态 | 中：没有 IDE 活跃文件/编辑状态上下文 |
 | 历史和关系 | 官方宣传 commit history、codebase patterns、服务依赖和跨 repo 关系 | git commit chunks、symbol/import graph expansion | 中到高：缺跨仓库关系图和更深的 lineage |
 | Connectors | 官方提供 GitHub/GitLab/Bitbucket、网站、webhook、GitHub Actions、S3，以及 custom indexer/client/store | provider-neutral `SourceConnectorPlugin`、GitHub 内置、租约化增量同步与 HTTP Blob pipeline | 中到高：缺内置 GitLab/Bitbucket/网站和 webhook |
 | SDK / 自定义来源 | `DirectContext` 可把 API、数据库、memory、磁盘内容加入索引并保存状态 | TypeScript `ContextEngine` API；输入主要是本地树或 HTTP Blob | 中到高 |
 | 规则和团队知识 | CLI 支持 `AGENTS.md`、`CLAUDE.md`、`.augment/rules`、用户规则和 agent-requested 规则 | 仓库可读取代码/文档，但没有规则解析、优先级和持久化 memory 层 | 高 |
-| 权限 | Auggie/Cosmos 支持 allow/deny、脚本或 webhook policy、工具级匹配和审计语义 | HTTP Bearer、local-root allowlist、模型 URL SSRF 防护、路径边界校验 | 高：缺来源级 ACL、proof-of-possession 和策略审计 |
+| 权限 | Auggie/Cosmos 支持 allow/deny、脚本或 webhook policy、工具级匹配和审计语义 | API Key/OIDC principal、workspace ACL、local-root allowlist、模型 URL SSRF 防护、路径边界校验 | 高：缺来源/路径级 ACL、connector 权限快照和策略审计 |
 | 自动更新 | Remote default branch 随 push 更新；Connectors 提供 webhook/GitHub Actions | 本地 watcher 和 HTTP sync/index jobs | 中：缺 Git provider webhook/CI 集成 |
 | 团队索引共享 | 官方文档给出 S3 store/team sharing | 可共享 PostgreSQL 数据库 workspace | 中：缺对象存储快照、跨区域复制和 GC 策略 |
 | 评测 | Augment 公开过端到端 PR 评测和 token/tool-call 叙述 | 有 Recall/MRR/nDCG、多仓库脚本、重复成对 `eval-pr` 和 3 个固定历史任务 | 高：缺公共大样本 corpus、受控真实模型结果和可比结论 |
@@ -48,7 +48,7 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 ## 本机可复现实测
 
 截至 2026-07-22，本仓库 `npm run build` 通过，带 PostgreSQL 的完整测试为
-**151/151**；`contextengine eval --self` 在当前索引上为 8/8，Recall/MRR/nDCG
+**159/159**；`contextengine eval --self` 在当前索引上为 8/8，Recall/MRR/nDCG
 和 Top-1/3/5 均为 1.0，平均延迟 2.14 秒、P95 4.17 秒。Docker Compose 的
 HTTP 与 PostgreSQL 容器均为 healthy，Remote MCP 已实测 initialize、tools/list、
 `codebase-retrieval`、DELETE 会话链路。当前配置的 embedding/reranker 探测均返回
@@ -80,7 +80,7 @@ Augment 产品页中的“数十万文件”“更少 token 仍达到相近 solv
 
 - 实现 connector interface：`listChanges`、`readBlob`、`commitCursor`、`watch`，先支持 GitHub/GitLab 和静态网站。
 - 为 webhook 提供签名校验、幂等 event id、队列化 index job，并把 GitHub Actions 作为无常驻服务的备选。
-- 为 Remote MCP 增加 CORS allowlist 和 OAuth/OIDC；如果未来需要 GET/SSE 或 server-initiated notification，再增加外部 event store 或带内部转发的 owner lease。
+- Remote MCP 的 CORS allowlist 和 OAuth/OIDC 已完成；如果未来需要 GET/SSE 或 server-initiated notification，再增加外部 event store 或带内部转发的 owner lease。
 - generation GC 增加空间指标、失败重试和跨进程 job lease；对超大 monorepo 做分片/分区压力测试。
 
 ### P2：企业上下文

@@ -310,13 +310,14 @@ no separate frontend build or deployment.
 Core endpoints are workspace create/list, `/sync/plan`, `PUT /blobs/{sha256}`,
 `/sync/commit`, `/index-jobs`, `/search`, `/context`, and `/file`.
 
-Multi-principal Bearer keys can enforce `reader`, `writer`, and `owner`
-permissions per workspace. A read-only GitHub connector can attach one
+Multi-principal Bearer keys or verified OAuth/OIDC JWT access tokens can enforce
+`reader`, `writer`, and `owner` permissions per workspace. OIDC principals remain
+stable across token rotation, and only server-configured group mappings can grant
+operator access. A read-only GitHub connector can attach one
 repository to an empty Blob workspace, synchronize it incrementally, and expose
 source status in the dashboard. See `CONTEXTENGINE_HTTP_API_KEYS`,
-`CONTEXTENGINE_GITHUB_TOKEN`, and the connector/ACL routes in the HTTP API guide.
-Embedded hosts can register additional providers through `connectorPlugins`;
-see [docs/PLUGINS.md](./docs/PLUGINS.md).
+`CONTEXTENGINE_OIDC_ISSUER`, `CONTEXTENGINE_GITHUB_TOKEN`, and the authentication,
+connector, and ACL routes in the HTTP API guide.
 Embedded hosts can register additional providers through `connectorPlugins`;
 see [docs/PLUGINS.md](./docs/PLUGINS.md).
 
