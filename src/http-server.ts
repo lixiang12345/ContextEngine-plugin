@@ -41,6 +41,7 @@ import {
   type OidcAuthenticatorOptions,
 } from "./server/http-auth.js";
 import { IndexJobRunner } from "./server/index-job-runner.js";
+import { ConnectorWebhookProcessor } from "./server/connector-webhook.js";
 import {
   testEmbeddingConnection,
   testRerankerConnection,
@@ -64,6 +65,7 @@ import {
   SyncPlanConflictError,
   SyncPlanExpiredError,
   SourceAccessPolicyTargetError,
+  ConnectorWebhookReplayError,
   type StoredIndexJob,
   type StoredConnectorSource,
   type StoredWorkspace,
@@ -102,6 +104,9 @@ export interface HttpServerOptions {
   githubToken?: string;
   githubApiBaseUrl?: string;
   githubTimeoutMs?: number;
+  githubWebhookSecret?: string;
+  webhookPollIntervalMs?: number;
+  webhookMaxAttempts?: number;
   /** Additional read-only source providers available under /sources/{provider}. */
   connectorPlugins?: readonly SourceConnectorPlugin[];
   /** Exact browser origins allowed to call the HTTP API, or ["*"]. */
@@ -733,6 +738,9 @@ function openApiDocument(): Record<string, unknown> {
     security: [{ bearerAuth: [] }],
     paths: {
       "/health": { get: { summary: "Service health" } },
+      "/webhooks/{provider}": {
+        post: { summary: "Receive a provider-signed connector event" },
+      },
       "/dashboard": { get: { summary: "Embedded observability dashboard" } },
       "/v1/capabilities": { get: { summary: "Service capabilities" } },
       "/v1/observability/overview": {
@@ -828,6 +836,7 @@ class HttpContextService {
   private readonly repository: WorkspaceRepository;
   private readonly runner: IndexJobRunner;
   private readonly connectorSync: ConnectorSyncCoordinator;
+  private readonly webhookProcessor: ConnectorWebhookProcessor;
   private readonly connectorRegistry: SourceConnectorRegistry;
   private readonly corsOrigins: ReadonlySet<string>;
   private readonly telemetry = new RequestTelemetry();
@@ -877,12 +886,17 @@ class HttpContextService {
         | "mcpSessionStore"
         | "disableEmbeddings"
         | "githubTimeoutMs"
+        | "webhookPollIntervalMs"
+        | "webhookMaxAttempts"
         | "corsOrigins"
       >
     > &
       Pick<
         HttpServerOptions,
-        "githubToken" | "githubApiBaseUrl" | "connectorPlugins"
+        | "githubToken"
+        | "githubApiBaseUrl"
+        | "githubWebhookSecret"
+        | "connectorPlugins"
       >,
   ) {
     this.repository = repository;
@@ -924,7 +938,7 @@ class HttpContextService {
       timeoutMs: options.githubTimeoutMs,
     });
     this.connectorRegistry = new SourceConnectorRegistry([
-      new GitHubSourceConnector(github),
+      new GitHubSourceConnector(github, options.githubWebhookSecret),
       ...(options.connectorPlugins ?? []),
     ]);
     this.connectorSync = new ConnectorSyncCoordinator({
@@ -933,6 +947,12 @@ class HttpContextService {
       connectors: this.connectorRegistry,
       maxBlobBytes: options.maxBlobBytes,
       secrets: options.githubToken ? [options.githubToken] : [],
+    });
+    this.webhookProcessor = new ConnectorWebhookProcessor({
+      repository,
+      coordinator: this.connectorSync,
+      pollIntervalMs: options.webhookPollIntervalMs,
+      maxAttempts: options.webhookMaxAttempts,
     });
     const cleanupIntervalMs = Math.max(
       1_000,
@@ -1018,6 +1038,19 @@ class HttpContextService {
             numberFromEnv(process.env.CONTEXTENGINE_GITHUB_TIMEOUT_MS, 30_000),
           "githubTimeoutMs",
         ),
+        githubWebhookSecret:
+          options.githubWebhookSecret ??
+          (process.env.CONTEXTENGINE_GITHUB_WEBHOOK_SECRET?.trim() || undefined),
+        webhookPollIntervalMs: positiveOption(
+          options.webhookPollIntervalMs ??
+            numberFromEnv(process.env.CONTEXTENGINE_WEBHOOK_POLL_INTERVAL_MS, 2_000),
+          "webhookPollIntervalMs",
+        ),
+        webhookMaxAttempts: positiveOption(
+          options.webhookMaxAttempts ??
+            numberFromEnv(process.env.CONTEXTENGINE_WEBHOOK_MAX_ATTEMPTS, 5),
+          "webhookMaxAttempts",
+        ),
         connectorPlugins: options.connectorPlugins,
         corsOrigins: normalizeCorsOrigins(
           options.corsOrigins ??
@@ -1026,11 +1059,13 @@ class HttpContextService {
       },
     );
     await service.runner.start();
+    service.webhookProcessor.start();
     return service;
   }
 
   async close(): Promise<void> {
     clearInterval(this.mcpSessionCleanupTimer);
+    await this.webhookProcessor.close();
     const sessions = [...new Set(this.mcpSessions.values())];
     this.mcpSessions.clear();
     await Promise.all(
@@ -1084,6 +1119,15 @@ class HttpContextService {
         json(response, 200, openApiDocument());
         return;
       }
+      const webhookMatch = /^\/webhooks\/([^/]+)$/.exec(pathname);
+      if (request.method === "POST" && webhookMatch) {
+        await this.handleConnectorWebhook(
+          decodeURIComponent(webhookMatch[1]),
+          request,
+          response,
+        );
+        return;
+      }
       const principal = await this.authenticator.authenticate(request);
       if (!principal) {
         response.setHeader("www-authenticate", "Bearer");
@@ -1115,6 +1159,7 @@ class HttpContextService {
           connector_plugins: this.connectorRegistry.list().map((item) => ({
             provider: item.provider,
             display_name: item.displayName,
+            webhook: Boolean(this.connectorRegistry.get(item.provider)?.webhook),
           })),
           authorization: {
             principals: true,
@@ -1135,6 +1180,13 @@ class HttpContextService {
             content_addressed_blobs: true,
             revisioned_commits: true,
             resumable_missing_blob_check: true,
+          },
+          webhooks: {
+            persistent_inbox: true,
+            providers: this.connectorRegistry
+              .list()
+              .filter((item) => this.connectorRegistry.get(item.provider)?.webhook)
+              .map((item) => item.provider),
           },
           indexing: {
             async_jobs: true,
@@ -1171,10 +1223,11 @@ class HttpContextService {
           25,
           100,
         );
-        const [workspaces, jobs, mcpSessions] = await Promise.all([
+        const [workspaces, jobs, mcpSessions, webhooks] = await Promise.all([
           this.repository.listWorkspaces(),
           this.repository.listRecentIndexJobs(jobLimit),
           this.mcpSessionStore.statistics(),
+          this.repository.getConnectorWebhookStatistics(),
         ]);
         const observedWorkspaces = await Promise.all(
           workspaces.map(async (workspace) => {
@@ -1267,6 +1320,7 @@ class HttpContextService {
               : 0,
             lookup_max_ms: Number(this.mcpSessionMetrics.lookupLatencyMsMax.toFixed(3)),
           },
+          connector_webhooks: webhooks,
           workspaces: observedWorkspaces,
           jobs: jobs.map(jobPayload),
         });
@@ -1974,6 +2028,67 @@ class HttpContextService {
         );
       }
     }
+  }
+
+  private async handleConnectorWebhook(
+    provider: string,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const connector = this.connectorRegistry.get(provider);
+    if (!connector?.webhook) throw new HttpError(404, "Webhook provider not found");
+    const body = await readRequestBody(request, 256 * 1024);
+    const headers: Record<string, string | undefined> = {};
+    for (const [name, value] of Object.entries(request.headers)) {
+      headers[name.toLowerCase()] = typeof value === "string" ? value : undefined;
+    }
+    let event;
+    try {
+      event = connector.webhook.verify({ headers, body });
+    } catch {
+      throw new HttpError(401, "Webhook signature or payload is invalid");
+    }
+    if (
+      !event ||
+      typeof event.id !== "string" ||
+      !event.id ||
+      event.id.length > 200 ||
+      !/^[A-Za-z0-9._:-]+$/.test(event.id) ||
+      typeof event.externalId !== "string" ||
+      !event.externalId ||
+      event.externalId.length > 500 ||
+      /[\u0000-\u001f\u007f]/.test(event.externalId) ||
+      (event.action !== "sync" && event.action !== "ignore")
+    ) {
+      throw new HttpError(401, "Webhook signature or payload is invalid");
+    }
+    if (event.action === "ignore") {
+      json(response, 202, { accepted: 0, duplicates: 0, ignored: true });
+      return;
+    }
+    const candidates = await this.repository.listConnectorSourcesForWebhook(
+      provider,
+      event.externalId,
+    );
+    const sources = candidates.filter((source) =>
+      connector.webhook!.matchesConfig(event, source.config)
+    );
+    let queued: { accepted: number; duplicates: number };
+    try {
+      queued = await this.repository.enqueueConnectorWebhookEvents({
+        provider,
+        eventId: event.id,
+        bodyHash: sha256(body),
+        sourceIds: sources.map((source) => source.id),
+      });
+    } catch (error) {
+      if (error instanceof ConnectorWebhookReplayError) {
+        throw new HttpError(409, "Webhook delivery id conflicts with an earlier payload");
+      }
+      throw error;
+    }
+    this.webhookProcessor.notify();
+    json(response, 202, { ...queued, ignored: false });
   }
 
   private applyCors(request: IncomingMessage, response: ServerResponse): boolean {

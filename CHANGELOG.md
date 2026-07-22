@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added schema v8 persistent connector webhook events, a provider-neutral signed
+  webhook contract, GitHub HMAC-SHA256 push handling, delivery/body replay
+  protection, database-clock worker recovery, bounded retries, and attempt
+  fencing around terminal event updates.
 - Added schema v7 source/path ACL policies with most-specific prefix precedence,
   owner-managed HTTP APIs, SQL-level filtering across lexical/semantic/graph
   retrieval, direct file-read enforcement, and live policy re-resolution for

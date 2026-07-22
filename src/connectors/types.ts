@@ -10,6 +10,29 @@ export interface ConnectorSnapshot {
   cursor: Record<string, unknown>;
 }
 
+export interface ConnectorWebhookRequest {
+  readonly headers: Readonly<Record<string, string | undefined>>;
+  readonly body: Buffer;
+}
+
+export interface VerifiedConnectorWebhookEvent {
+  /** Provider delivery id used for persistent idempotency. */
+  readonly id: string;
+  /** Must exactly match SourceConnectorPlugin.externalId(config). */
+  readonly externalId: string;
+  readonly action: "sync" | "ignore";
+  /** Bounded, non-secret provider metadata used only for config matching. */
+  readonly metadata?: Readonly<Record<string, string | boolean | null>>;
+}
+
+export interface SourceConnectorWebhookHandler {
+  verify(request: ConnectorWebhookRequest): VerifiedConnectorWebhookEvent;
+  matchesConfig(
+    event: VerifiedConnectorWebhookEvent,
+    config: Readonly<Record<string, unknown>>,
+  ): boolean;
+}
+
 /**
  * A read-only content source. Core synchronization owns hashing, diffing,
  * leases, Blob persistence and index promotion; plugins only enumerate and
@@ -30,6 +53,8 @@ export interface SourceConnectorPlugin {
     file: Readonly<ConnectorFileSnapshot>,
   ): Promise<Buffer>;
   secrets?(config: Readonly<Record<string, unknown>>): readonly string[];
+  /** Optional signed webhook adapter. Core owns inbox idempotency and retries. */
+  readonly webhook?: SourceConnectorWebhookHandler;
 }
 
 export class SourceConnectorError extends Error {

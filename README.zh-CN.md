@@ -299,8 +299,10 @@ HTTP 服务内置 `/dashboard` 可观测控制台，与 `/v1/*` 共用 Bearer AP
 allow/deny 与嵌套路径前缀规则；Search、Context、File Read 和 Remote MCP 共用同一
 套数据面策略。
 只读 GitHub Connector 可将一个仓库绑定到空 Blob 工作区，进行增量同步，并在
-控制台展示来源状态。配置方式见 `CONTEXTENGINE_HTTP_API_KEYS`、
-`CONTEXTENGINE_OIDC_ISSUER`、`CONTEXTENGINE_GITHUB_TOKEN` 和 HTTP API 文档中的
+控制台展示来源状态。经过签名验证的 GitHub Push Webhook 可通过持久、幂等的事件
+inbox 触发同一套带租约同步流程。配置方式见 `CONTEXTENGINE_HTTP_API_KEYS`、
+`CONTEXTENGINE_OIDC_ISSUER`、`CONTEXTENGINE_GITHUB_TOKEN`、
+`CONTEXTENGINE_GITHUB_WEBHOOK_SECRET` 和 HTTP API 文档中的
 认证、Connector/ACL 路由。
 宿主可以通过 `connectorPlugins` 注册其他来源，详见
 [docs/PLUGINS.md](./docs/PLUGINS.md)。

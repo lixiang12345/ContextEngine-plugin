@@ -17,6 +17,11 @@ export type WorkspacePermission = "reader" | "writer" | "owner";
 /** Lowercase provider id registered by a SourceConnectorPlugin. */
 export type ConnectorProvider = string;
 export type McpSessionStatus = "active" | "closing" | "closed";
+export type ConnectorWebhookEventStatus =
+  | "pending"
+  | "processing"
+  | "succeeded"
+  | "failed";
 export type McpSessionRejectionReason =
   | "unknown"
   | "expired"
@@ -124,6 +129,22 @@ export interface StoredConnectorFile {
   remoteRevision: string;
   contentHash: string | null;
   bytes: number;
+}
+
+export interface StoredConnectorWebhookEvent {
+  sourceId: string;
+  eventId: string;
+  provider: string;
+  bodyHash: string;
+  status: ConnectorWebhookEventStatus;
+  attempts: number;
+  nextAttemptAt: string;
+  lockedAt: string | null;
+  lastError: string | null;
+  result: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
 }
 
 export interface StoredSourceDocument {
@@ -247,6 +268,22 @@ interface SourceAccessPolicyRow extends QueryResultRow {
   effect: SourceAccessEffect | null;
 }
 
+interface ConnectorWebhookEventRow extends QueryResultRow {
+  source_id: string;
+  event_id: string;
+  provider: string;
+  body_hash: string;
+  status: ConnectorWebhookEventStatus;
+  attempts: number;
+  next_attempt_at: string | Date;
+  locked_at: string | Date | null;
+  last_error: string | null;
+  result: unknown;
+  created_at: string | Date;
+  updated_at: string | Date;
+  completed_at: string | Date | null;
+}
+
 type AdvisoryLockClient = PoolClient;
 
 export class WorkspaceNotFoundError extends Error {
@@ -288,6 +325,13 @@ export class SourceAccessPolicyTargetError extends Error {
   constructor() {
     super("Source access policy principal must have workspace access");
     this.name = "SourceAccessPolicyTargetError";
+  }
+}
+
+export class ConnectorWebhookReplayError extends Error {
+  constructor() {
+    super("Webhook delivery id was reused with a different payload");
+    this.name = "ConnectorWebhookReplayError";
   }
 }
 
@@ -397,6 +441,26 @@ function mcpSessionFromRow(row: McpSessionRow): StoredMcpSession {
     lastSeenAt: iso(row.last_seen_at)!,
     createdAt: iso(row.created_at)!,
     updatedAt: iso(row.updated_at)!,
+  };
+}
+
+function webhookEventFromRow(
+  row: ConnectorWebhookEventRow,
+): StoredConnectorWebhookEvent {
+  return {
+    sourceId: row.source_id,
+    eventId: row.event_id,
+    provider: row.provider,
+    bodyHash: row.body_hash,
+    status: row.status,
+    attempts: Number(row.attempts),
+    nextAttemptAt: iso(row.next_attempt_at)!,
+    lockedAt: iso(row.locked_at),
+    lastError: row.last_error,
+    result: asObject(row.result),
+    createdAt: iso(row.created_at)!,
+    updatedAt: iso(row.updated_at)!,
+    completedAt: iso(row.completed_at),
   };
 }
 
@@ -1129,6 +1193,202 @@ export class WorkspaceRepository {
       [workspaceId, sourceId],
     );
     return result.rows[0] ? connectorSourceFromRow(result.rows[0]) : null;
+  }
+
+  async getConnectorSourceById(sourceId: string): Promise<StoredConnectorSource | null> {
+    const result = await this.pool.query<ConnectorSourceRow>(
+      `SELECT id, workspace_id, provider, external_id, config, cursor,
+              cursor_version, upstream_revision, status, last_error,
+              last_synced_at, created_by, created_at, updated_at
+       FROM ce_connector_sources
+       WHERE id = $1`,
+      [sourceId],
+    );
+    return result.rows[0] ? connectorSourceFromRow(result.rows[0]) : null;
+  }
+
+  async listConnectorSourcesForWebhook(
+    provider: string,
+    externalId: string,
+  ): Promise<StoredConnectorSource[]> {
+    const result = await this.pool.query<ConnectorSourceRow>(
+      `SELECT id, workspace_id, provider, external_id, config, cursor,
+              cursor_version, upstream_revision, status, last_error,
+              last_synced_at, created_by, created_at, updated_at
+       FROM ce_connector_sources
+       WHERE provider = $1 AND external_id = $2
+       ORDER BY id`,
+      [provider, externalId],
+    );
+    return result.rows.map(connectorSourceFromRow);
+  }
+
+  async enqueueConnectorWebhookEvents(input: {
+    provider: string;
+    eventId: string;
+    bodyHash: string;
+    sourceIds: readonly string[];
+  }): Promise<{ accepted: number; duplicates: number }> {
+    if (!input.sourceIds.length) return { accepted: 0, duplicates: 0 };
+    return this.withTransaction(async (client) => {
+      const inserted = await client.query<{ source_id: string }>(
+        `INSERT INTO ce_connector_webhook_events(
+           source_id, event_id, provider, body_hash
+         )
+         SELECT source.id, $2, $3, $4
+         FROM ce_connector_sources AS source
+         WHERE source.id = ANY($1::text[]) AND source.provider = $3
+         ON CONFLICT(source_id, event_id) DO NOTHING
+         RETURNING source_id`,
+        [input.sourceIds, input.eventId, input.provider, input.bodyHash],
+      );
+      const persisted = await client.query<{ body_hash: string }>(
+        `SELECT body_hash
+         FROM ce_connector_webhook_events
+         WHERE source_id = ANY($1::text[]) AND event_id = $2
+         FOR UPDATE`,
+        [input.sourceIds, input.eventId],
+      );
+      if (persisted.rows.some((row) => row.body_hash !== input.bodyHash)) {
+        throw new ConnectorWebhookReplayError();
+      }
+      return {
+        accepted: inserted.rowCount ?? 0,
+        duplicates: input.sourceIds.length - (inserted.rowCount ?? 0),
+      };
+    });
+  }
+
+  async claimConnectorWebhookEvents(
+    limit = 8,
+    processingLeaseMs = 5 * 60 * 1000,
+  ): Promise<StoredConnectorWebhookEvent[]> {
+    const result = await this.pool.query<ConnectorWebhookEventRow>(
+      `WITH candidates AS (
+         SELECT source_id, event_id
+         FROM ce_connector_webhook_events
+         WHERE (
+             status = 'pending' AND next_attempt_at <= clock_timestamp()
+           ) OR (
+             status = 'processing'
+             AND locked_at + ($2::bigint * interval '1 millisecond')
+                   <= clock_timestamp()
+           )
+         ORDER BY next_attempt_at, created_at, source_id
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE ce_connector_webhook_events AS event
+       SET status = 'processing',
+           attempts = attempts + 1,
+           locked_at = clock_timestamp(),
+           updated_at = clock_timestamp()
+       FROM candidates
+       WHERE event.source_id = candidates.source_id
+         AND event.event_id = candidates.event_id
+       RETURNING event.source_id, event.event_id, event.provider,
+                 event.body_hash, event.status, event.attempts,
+                 event.next_attempt_at, event.locked_at, event.last_error,
+                 event.result, event.created_at, event.updated_at,
+                 event.completed_at`,
+      [Math.max(1, Math.min(64, Math.floor(limit))), processingLeaseMs],
+    );
+    return result.rows.map(webhookEventFromRow);
+  }
+
+  async completeConnectorWebhookEvent(
+    sourceId: string,
+    eventId: string,
+    expectedAttempt: number,
+    result: Record<string, unknown>,
+  ): Promise<boolean> {
+    const updated = await this.pool.query(
+      `UPDATE ce_connector_webhook_events
+       SET status = 'succeeded', result = $4::jsonb, last_error = NULL,
+           locked_at = NULL, completed_at = clock_timestamp(),
+           updated_at = clock_timestamp()
+       WHERE source_id = $1 AND event_id = $2 AND status = 'processing'
+         AND attempts = $3
+       RETURNING source_id`,
+      [sourceId, eventId, expectedAttempt, JSON.stringify(result)],
+    );
+    return Boolean(updated.rows[0]);
+  }
+
+  async retryConnectorWebhookEvent(
+    sourceId: string,
+    eventId: string,
+    expectedAttempt: number,
+    error: string,
+    retryDelayMs: number,
+    maxAttempts = 5,
+  ): Promise<"pending" | "failed" | null> {
+    const updated = await this.pool.query<{ status: "pending" | "failed" }>(
+      `UPDATE ce_connector_webhook_events
+       SET status = CASE WHEN attempts >= $6 THEN 'failed' ELSE 'pending' END,
+           next_attempt_at = CASE
+             WHEN attempts >= $6 THEN next_attempt_at
+             ELSE clock_timestamp() + ($5::bigint * interval '1 millisecond')
+           END,
+           last_error = $4,
+           locked_at = NULL,
+           completed_at = CASE WHEN attempts >= $6 THEN clock_timestamp() ELSE NULL END,
+           updated_at = clock_timestamp()
+       WHERE source_id = $1 AND event_id = $2 AND status = 'processing'
+         AND attempts = $3
+       RETURNING status`,
+      [
+        sourceId,
+        eventId,
+        expectedAttempt,
+        error.slice(0, 1000),
+        Math.max(1_000, retryDelayMs),
+        Math.max(1, maxAttempts),
+      ],
+    );
+    return updated.rows[0]?.status ?? null;
+  }
+
+  async getConnectorWebhookEvent(
+    sourceId: string,
+    eventId: string,
+  ): Promise<StoredConnectorWebhookEvent | null> {
+    const result = await this.pool.query<ConnectorWebhookEventRow>(
+      `SELECT source_id, event_id, provider, body_hash, status, attempts,
+              next_attempt_at, locked_at, last_error, result, created_at,
+              updated_at, completed_at
+       FROM ce_connector_webhook_events
+       WHERE source_id = $1 AND event_id = $2`,
+      [sourceId, eventId],
+    );
+    return result.rows[0] ? webhookEventFromRow(result.rows[0]) : null;
+  }
+
+  async getConnectorWebhookStatistics(): Promise<{
+    pending: number;
+    processing: number;
+    succeeded: number;
+    failed: number;
+  }> {
+    const result = await this.pool.query<{
+      pending: string;
+      processing: string;
+      succeeded: string;
+      failed: string;
+    }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'pending')::text AS pending,
+         COUNT(*) FILTER (WHERE status = 'processing')::text AS processing,
+         COUNT(*) FILTER (WHERE status = 'succeeded')::text AS succeeded,
+         COUNT(*) FILTER (WHERE status = 'failed')::text AS failed
+       FROM ce_connector_webhook_events`,
+    );
+    return {
+      pending: Number(result.rows[0]?.pending ?? 0),
+      processing: Number(result.rows[0]?.processing ?? 0),
+      succeeded: Number(result.rows[0]?.succeeded ?? 0),
+      failed: Number(result.rows[0]?.failed ?? 0),
+    };
   }
 
   async workspaceHasConnector(workspaceId: string): Promise<boolean> {

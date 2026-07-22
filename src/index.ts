@@ -114,7 +114,10 @@ export type { AnalyzedQuery, QueryIntent } from "./search/query-analyzer.js";
 export type {
   ConnectorFileSnapshot,
   ConnectorSnapshot,
+  ConnectorWebhookRequest,
   SourceConnectorPlugin,
+  SourceConnectorWebhookHandler,
+  VerifiedConnectorWebhookEvent,
 } from "./connectors/types.js";
 
 export type {
@@ -149,12 +152,14 @@ export type {
   IndexJobMode,
   IndexJobStatus,
   ConnectorProvider,
+  ConnectorWebhookEventStatus,
   ConnectorSyncAttempt,
   ConnectorSyncCommit,
   ConnectorSyncLease,
   StoredIndexJob,
   StoredConnectorFile,
   StoredConnectorSource,
+  StoredConnectorWebhookEvent,
   StoredSourceDocument,
   StoredSourceAccessPolicy,
   StoredWorkspace,

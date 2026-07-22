@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -1851,6 +1851,44 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [7],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 8) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_connector_webhook_events (
+        source_id TEXT NOT NULL REFERENCES ce_connector_sources(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        body_hash TEXT NOT NULL CHECK (body_hash ~ '^[0-9a-f]{64}$'),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'processing', 'succeeded', 'failed')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        locked_at TIMESTAMPTZ,
+        last_error TEXT,
+        result JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        completed_at TIMESTAMPTZ,
+        PRIMARY KEY (source_id, event_id)
+      );
+      CREATE INDEX IF NOT EXISTS ce_connector_webhook_events_pending_idx
+        ON ce_connector_webhook_events(status, next_attempt_at, created_at)
+        WHERE status IN ('pending', 'processing');
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [8],
             );
             await client.query("COMMIT");
           } catch (error) {

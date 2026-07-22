@@ -32,6 +32,16 @@ describe("request telemetry", () => {
       ),
       "/v1/workspaces/{workspaceId}/sources/{provider}",
     );
+    assert.equal(
+      observableRoute("/webhooks/private-provider", "POST"),
+      "/webhooks/{provider}",
+    );
+    assert.equal(
+      observableRoute(
+        "/v1/workspaces/workspace-secret/source-acl/principal-secret",
+      ),
+      "/v1/workspaces/{workspaceId}/source-acl/{principalId}",
+    );
 
     const telemetry = new RequestTelemetry();
     const searchTiming = telemetry.begin();

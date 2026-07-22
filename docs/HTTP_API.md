@@ -205,6 +205,22 @@ returned by the API. Repository trees above 20,000 files and truncated GitHub
 tree responses are rejected. Files above `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES`
 are recorded as skipped and removed from the searchable snapshot.
 
+Set `CONTEXTENGINE_GITHUB_WEBHOOK_SECRET` to enable signed push delivery at
+`POST /webhooks/github`, then configure the same secret in the GitHub repository
+webhook with `application/json` content. This route does not use the HTTP API
+Bearer credential; it requires `X-Hub-Signature-256`, `X-GitHub-Delivery`, and
+`X-GitHub-Event`. HMAC is checked against the bounded raw body before JSON is
+parsed. Only non-deleted pushes matching the source's configured ref are queued.
+
+The schema v8 inbox stores only source id, delivery id, body hash, status,
+attempt count, bounded error, and result metadata—never the raw payload or
+webhook secret. Re-delivering identical bytes is idempotent. Reusing one delivery
+id with different bytes returns `409`, including concurrent races. Workers claim
+events with PostgreSQL `SKIP LOCKED`, recover expired processing claims using the
+database clock, fence terminal writes by attempt number, and retry failures with
+bounded exponential backoff. A crash after connector commit but before event
+completion safely retries through the connector cursor and becomes a noop.
+
 Embedded deployments can register additional providers with the public
 `SourceConnectorPlugin` contract. Providers are advertised by
 `GET /v1/capabilities` and use the same
@@ -483,6 +499,9 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | Permit server-local root workspaces; default off |
 | `CONTEXTENGINE_LOCAL_ROOT_ALLOWLIST` | Path-delimited allowlist for local workspaces |
 | `CONTEXTENGINE_HTTP_ALLOW_PRIVATE_MODEL_URLS` | Allow HTTP runtime configuration to target private/local model endpoints; default off |
+| `CONTEXTENGINE_GITHUB_WEBHOOK_SECRET` | Enables HMAC-SHA256 GitHub push delivery; minimum 16 characters |
+| `CONTEXTENGINE_WEBHOOK_POLL_INTERVAL_MS` | Persistent inbox poll interval; default 2000 ms |
+| `CONTEXTENGINE_WEBHOOK_MAX_ATTEMPTS` | Terminal failure threshold; default 5 |
 
 The service uses `CONTEXTENGINE_DATABASE_URL` and the existing embedding/rerank
 configuration described in the root README.
@@ -514,6 +533,11 @@ new marker on restart and do not enforce path policies, so drain every v6 HTTP
 reader before creating a source policy. The migration is additive and existing
 workspace members remain unrestricted until an owner explicitly creates a
 policy.
+
+Schema v8 adds the connector webhook inbox. Version 7 instances reject this
+marker on restart and cannot claim events. Drain v7 HTTP instances before
+enabling webhook delivery; schema v8 workers can safely share the inbox and use
+`SKIP LOCKED` plus connector leases across instances.
 
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former

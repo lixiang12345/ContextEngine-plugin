@@ -75,6 +75,9 @@ const OBSERVABLE_METHODS = new Set([
 ]);
 
 export function observableRoute(pathname: string, method?: string): string {
+  if (/^\/webhooks\/[^/]+$/.test(pathname)) {
+    return "/webhooks/{provider}";
+  }
   if (/^\/v1\/workspaces\/[^/]+\/sync\/plan$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/sync/plan";
   }
@@ -86,6 +89,12 @@ export function observableRoute(pathname: string, method?: string): string {
   }
   if (/^\/v1\/workspaces\/[^/]+\/acl\/[^/]+$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/acl/{principalId}";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/source-acl$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/source-acl";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/source-acl\/[^/]+$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/source-acl/{principalId}";
   }
   if (/^\/v1\/workspaces\/[^/]+\/sources$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/sources";

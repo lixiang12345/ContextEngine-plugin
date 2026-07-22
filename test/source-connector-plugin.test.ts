@@ -7,6 +7,7 @@ import type {
   ConnectorFileSnapshot,
   ConnectorSnapshot,
   SourceConnectorPlugin,
+  SourceConnectorWebhookHandler,
 } from "../src/connectors/types.js";
 
 const databaseUrl =
@@ -34,6 +35,24 @@ class MemoryDocsPlugin implements SourceConnectorPlugin {
   readonly provider = "memory_docs";
   readonly displayName = "Memory documents";
   readonly collections = new Map<string, MemoryDocument[]>();
+  readonly webhook: SourceConnectorWebhookHandler = {
+    verify: ({ headers, body }) => {
+      if (headers["x-memory-signature"] !== "signed-fixture") {
+        throw new Error("invalid fixture signature");
+      }
+      const payload = JSON.parse(body.toString("utf8")) as {
+        id: string;
+        collection: string;
+      };
+      return {
+        id: payload.id,
+        externalId: payload.collection,
+        action: "sync",
+      };
+    },
+    matchesConfig: (event, config) =>
+      event.externalId === String(config.collection),
+  };
 
   validateConfig(input: unknown): Record<string, unknown> {
     if (!input || Array.isArray(input) || typeof input !== "object") {
@@ -136,6 +155,7 @@ describePostgres("source connector plugin contract", () => {
       apiKey: token,
       disableEmbeddings: true,
       connectorPlugins: [plugin],
+      webhookPollIntervalMs: 100,
     });
     plugin.collections.set("handbook", [
       {
@@ -160,12 +180,20 @@ describePostgres("source connector plugin contract", () => {
     assert.equal(capabilities.status, 200);
     const capabilityPayload = await capabilities.json() as {
       connectors: string[];
-      connector_plugins: Array<{ provider: string; display_name: string }>;
+      connector_plugins: Array<{
+        provider: string;
+        display_name: string;
+        webhook: boolean;
+      }>;
     };
     assert.ok(capabilityPayload.connectors.includes("memory_docs"));
     assert.deepEqual(
       capabilityPayload.connector_plugins.find((plugin) => plugin.provider === "memory_docs"),
-      { provider: "memory_docs", display_name: "Memory documents" },
+      {
+        provider: "memory_docs",
+        display_name: "Memory documents",
+        webhook: true,
+      },
     );
 
     const created = await request("/v1/workspaces", {
@@ -201,15 +229,27 @@ describePostgres("source connector plugin contract", () => {
         revision: "beta-1",
       },
     ]);
-    await sync();
-
-    const secondSearch = await request(`/v1/workspaces/${workspaceId}/search`, {
+    const pluginWebhook = await fetch(`${handle.url}/webhooks/memory_docs`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: "connector plugin contract", top_k: 5 }),
+      headers: { "x-memory-signature": "signed-fixture" },
+      body: JSON.stringify({ id: "memory-delivery-1", collection: "handbook" }),
     });
-    assert.equal(secondSearch.status, 200);
-    const secondPayload = await secondSearch.json() as { results: Array<{ path: string }> };
+    assert.equal(pluginWebhook.status, 202);
+
+    let secondPayload: { results: Array<{ path: string }> } = { results: [] };
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const secondSearch = await request(`/v1/workspaces/${workspaceId}/search`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: "connector plugin contract", top_k: 5 }),
+      });
+      assert.equal(secondSearch.status, 200);
+      secondPayload = await secondSearch.json() as {
+        results: Array<{ path: string }>;
+      };
+      if (secondPayload.results.some((result) => result.path === "docs/beta.md")) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     assert.ok(secondPayload.results.some((result) => result.path === "docs/beta.md"));
     assert.equal(secondPayload.results.some((result) => result.path === "docs/alpha.md"), false);
   });

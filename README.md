@@ -317,8 +317,11 @@ operator access. Owners can additionally apply default allow/deny source policie
 with nested path-prefix rules; the same policy is enforced by search, context,
 file reads, and Remote MCP. A read-only GitHub connector can attach one
 repository to an empty Blob workspace, synchronize it incrementally, and expose
-source status in the dashboard. See `CONTEXTENGINE_HTTP_API_KEYS`,
-`CONTEXTENGINE_OIDC_ISSUER`, `CONTEXTENGINE_GITHUB_TOKEN`, and the authentication,
+source status in the dashboard. Signed GitHub push webhooks can persistently and
+idempotently trigger the same leased synchronization pipeline. See
+`CONTEXTENGINE_HTTP_API_KEYS`,
+`CONTEXTENGINE_OIDC_ISSUER`, `CONTEXTENGINE_GITHUB_TOKEN`,
+`CONTEXTENGINE_GITHUB_WEBHOOK_SECRET`, and the authentication,
 connector, and ACL routes in the HTTP API guide.
 Embedded hosts can register additional providers through `connectorPlugins`;
 see [docs/PLUGINS.md](./docs/PLUGINS.md).

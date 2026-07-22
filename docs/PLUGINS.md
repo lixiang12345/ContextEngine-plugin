@@ -12,6 +12,7 @@ and authorization boundaries as the built-in GitHub connector.
 import type {
   ConnectorFileSnapshot,
   ConnectorSnapshot,
+  SourceConnectorWebhookHandler,
   SourceConnectorPlugin,
 } from "contextengine-plugin";
 
@@ -81,6 +82,16 @@ uses `POST /v1/workspaces/{workspaceId}/sources/{sourceId}/sync`.
   Use `secrets()` only as defense-in-depth redaction.
 
 The current contract is deliberately read-only. Webhook delivery, cursor commit
-and source-level permission snapshots will be separate interfaces so a simple
-connector does not need to implement a queue or authorization system.
+remains optional, so a simple connector does not need to implement a queue.
+Plugins that support signed delivery expose `webhook.verify(rawRequest)` and
+`webhook.matchesConfig(event, config)`. Verification must authenticate the raw
+bounded body before parsing it and return a stable provider delivery id plus the
+same external id produced by `externalId(config)`. Core persists idempotency,
+claims work, retries, invokes the normal leased sync coordinator, and commits
+terminal state; plugins never write the event inbox or connector cursor.
 
+The built-in GitHub adapter is the reference implementation. It verifies
+`X-Hub-Signature-256` with constant-time HMAC comparison, accepts push events for
+the configured branch, and ignores ping/deleted-ref deliveries. Custom webhook
+adapters are trusted code and should keep signing secrets in their instance or
+external secret manager, never source configuration or returned metadata.

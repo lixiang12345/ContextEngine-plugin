@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import { after, before, describe, it } from "node:test";
@@ -31,12 +31,15 @@ function databaseUrlForSchema(baseUrl: string, schema: string): string {
 
 describePostgres("principal ACL and GitHub connector", () => {
   const githubToken = "github-read-token-must-stay-secret";
-  const githubContent = [
+  let githubContent = [
     "export function connectorPermission(user: string) {",
     "  return user === 'repository-reader';",
     "}",
     "",
   ].join("\n");
+  let githubTreeRevision = "tree-revision-1";
+  let githubBlobRevision = "github-blob-1";
+  const webhookSecret = "github-http-webhook-secret";
   const githubPrivateContent = [
     "export function privateBillingCredential() {",
     "  return 'source-acl-must-hide-this';",
@@ -71,13 +74,13 @@ describePostgres("principal ACL and GitHub connector", () => {
         }
         response.end(
           JSON.stringify({
-            sha: "tree-revision-1",
+            sha: githubTreeRevision,
             truncated: false,
             tree: [
               {
                 type: "blob",
                 path: "src/connector-permission.ts",
-                sha: "github-blob-1",
+                sha: githubBlobRevision,
                 size: Buffer.byteLength(githubContent),
               },
               {
@@ -91,7 +94,7 @@ describePostgres("principal ACL and GitHub connector", () => {
         );
         return;
       }
-      if (request.url?.includes("/git/blobs/github-blob-1")) {
+      if (request.url?.includes(`/git/blobs/${githubBlobRevision}`)) {
         response.end(
           JSON.stringify({
             encoding: "base64",
@@ -131,6 +134,8 @@ describePostgres("principal ACL and GitHub connector", () => {
       ],
       disableEmbeddings: true,
       githubToken,
+      githubWebhookSecret: webhookSecret,
+      webhookPollIntervalMs: 100,
       githubApiBaseUrl: mockGitHubUrl,
     });
   });
@@ -526,6 +531,91 @@ describePostgres("principal ACL and GitHub connector", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }),
     });
     assert.equal(revokedMcp.status, 404);
+
+    githubContent = [
+      "export function connectorPermission(user: string) {",
+      "  return user === 'webhook-refreshed-reader';",
+      "}",
+      "",
+    ].join("\n");
+    githubTreeRevision = "tree-revision-2";
+    githubBlobRevision = "github-blob-2";
+    const webhookBody = Buffer.from(JSON.stringify({
+      ref: "refs/heads/main",
+      deleted: false,
+      repository: {
+        full_name: "octo-owner/context-repo",
+        default_branch: "main",
+      },
+    }));
+    const webhookSignature = `sha256=${createHmac("sha256", webhookSecret)
+      .update(webhookBody)
+      .digest("hex")}`;
+    const invalidWebhook = await fetch(`${handle.url}/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "x-github-event": "push",
+        "x-github-delivery": "delivery-http-1",
+        "x-hub-signature-256": `sha256=${"0".repeat(64)}`,
+      },
+      body: webhookBody,
+    });
+    assert.equal(invalidWebhook.status, 401);
+    const deliver = (body: Buffer) => fetch(`${handle.url}/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "x-github-event": "push",
+        "x-github-delivery": "delivery-http-1",
+        "x-hub-signature-256": `sha256=${createHmac("sha256", webhookSecret)
+          .update(body)
+          .digest("hex")}`,
+      },
+      body,
+    });
+    const acceptedWebhook = await deliver(webhookBody);
+    assert.equal(acceptedWebhook.status, 202);
+    assert.deepEqual(await acceptedWebhook.json(), {
+      accepted: 1,
+      duplicates: 0,
+      ignored: false,
+    });
+    const duplicateWebhook = await deliver(webhookBody);
+    assert.equal(duplicateWebhook.status, 202);
+    assert.deepEqual(await duplicateWebhook.json(), {
+      accepted: 0,
+      duplicates: 1,
+      ignored: false,
+    });
+    const conflictingBody = Buffer.from(webhookBody.toString("utf8").replace(
+      '"deleted":false',
+      '"deleted":null',
+    ));
+    assert.equal((await deliver(conflictingBody)).status, 409);
+
+    let webhookSynced = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const state = await request(
+        "alice",
+        `/v1/workspaces/${workspaceId}/sources/${sourceId}`,
+      );
+      const payload = await state.json() as {
+        source: { upstream_revision: string | null; status: string };
+      };
+      if (
+        payload.source.upstream_revision === githubTreeRevision &&
+        payload.source.status === "ready"
+      ) {
+        webhookSynced = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(webhookSynced, true);
+    const refreshedFile = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/file?path=${filePath}`,
+    );
+    assert.match(await refreshedFile.text(), /webhook-refreshed-reader/);
 
     failTree = true;
     const failedSync = await request(
