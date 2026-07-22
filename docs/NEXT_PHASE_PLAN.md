@@ -7,7 +7,7 @@
 当前数据库：PostgreSQL schema v8
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `169/169` 通过。
+全量测试 `174/174` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -31,7 +31,13 @@ connector webhook/SDK 扩展。
 Phase 4 状态（2026-07-22）：已实现 provider-neutral signed webhook contract、
 GitHub HMAC-SHA256 push adapter、schema v8 persistent inbox、delivery/body replay
 保护、数据库时钟 processing recovery、attempt fencing 和有界重试。全量回归已通过，
-下一步继续 GitLab/website provider。
+进入 provider 扩展。
+
+Phase 5 状态（2026-07-22）：已实现内置可插拔静态网站 connector。生产默认只允许
+公网 HTTPS，使用 DNS 校验与连接地址固定防止 rebinding，限制同源/路径前缀、robots、
+三次重定向、页面数/深度/单页与总字节；HTML 转为稳定可检索文档，ETag、
+Last-Modified 与有界 cursor 支持增量 noop。HTTP/PostgreSQL 端到端覆盖首次索引、
+304、链接变化、删除与搜索。下一步实现 GitLab provider 与 webhook adapter。
 
 ## 1. 目标
 
@@ -201,8 +207,8 @@ Phase 1 完成后按以下顺序继续，避免在身份与隔离基础不稳时
 2. **source-level ACL（路径策略已实现）**：repo/path/document 权限已在 retrieval、
    file read、MCP 三层强制执行；后续 connector 阶段继续补 provider permission
    snapshot 与 provenance。
-3. **connector SDK + webhook（签名 webhook/inbox 已实现）**：继续抽象
-   `listChanges/readBlob/commitCursor/watch`，增加 GitLab 和静态网站；事件
+3. **connector SDK + webhook（签名 webhook/inbox、GitHub/website 已实现）**：继续
+   增加 GitLab 与 Bitbucket provider；事件
    idempotency 已由 schema v8 inbox 与现有 cursor/lease 共同保证。
 4. **PR 评测扩容**：公共多仓库 corpus、受控真实模型重复实验、token/tool-call/P95 与
    测试结果的可复现报告。

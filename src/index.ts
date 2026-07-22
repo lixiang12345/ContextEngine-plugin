@@ -63,6 +63,11 @@ export { buildSymbolGraph, expandViaGraph } from "./graph/symbol-graph.js";
 export { GitHubConnectorClient, GitHubConnectorError } from "./connectors/github.js";
 export { GitHubSourceConnector } from "./connectors/github-plugin.js";
 export {
+  WebsiteConnectorError,
+  WebsiteSourceConnector,
+} from "./connectors/website.js";
+export type { WebsiteSourceConnectorOptions } from "./connectors/website.js";
+export {
   SourceConnectorError,
   SourceConnectorRegistry,
 } from "./connectors/types.js";

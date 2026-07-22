@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added a production-oriented static website source connector with public-HTTPS
+  DNS pinning, same-origin/path-prefix and robots enforcement, bounded redirects,
+  pages/depth/bytes, searchable HTML-to-text conversion, validator-based
+  incremental cursors, and HTTP/PostgreSQL end-to-end coverage.
 - Added schema v8 persistent connector webhook events, a provider-neutral signed
   webhook contract, GitHub HMAC-SHA256 push handling, delivery/body replay
   protection, database-clock worker recovery, bounded retries, and attempt

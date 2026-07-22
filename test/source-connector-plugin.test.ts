@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { Pool } from "pg";
 import { startHttpServer, type HttpServerHandle } from "../src/http-server.js";
@@ -113,6 +115,39 @@ describePostgres("source connector plugin contract", () => {
   let handle: HttpServerHandle;
   let workspaceId = "";
   let sourceId = "";
+  let websiteVersion = 1;
+  const websiteServer = createServer((request, response) => {
+    if (request.url === "/robots.txt") {
+      response.setHeader("content-type", "text/plain; charset=utf-8");
+      response.end("User-agent: *\nAllow: /docs/\nDisallow: /\n");
+      return;
+    }
+    const etag = `\"website-${websiteVersion}-${request.url}\"`;
+    if (request.headers["if-none-match"] === etag) {
+      response.statusCode = 304;
+      response.end();
+      return;
+    }
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.setHeader("etag", etag);
+    if (request.url === "/docs/") {
+      response.end(websiteVersion === 1
+        ? "<title>Portal</title><main>alpha launch notebook</main><a href='/docs/guide'>Guide</a>"
+        : "<title>Portal</title><main>beta migration compass</main><a href='/docs/new'>New</a>");
+      return;
+    }
+    if (request.url === "/docs/guide" && websiteVersion === 1) {
+      response.end("<title>Guide</title><p>obsolete retention appendix</p>");
+      return;
+    }
+    if (request.url === "/docs/new" && websiteVersion === 2) {
+      response.end("<title>New</title><p>current deployment handbook</p>");
+      return;
+    }
+    response.statusCode = 404;
+    response.end("not found");
+  });
+  let websiteUrl = "";
 
   async function request(pathname: string, init: RequestInit = {}): Promise<Response> {
     return fetch(`${handle.url}${pathname}`, {
@@ -137,17 +172,33 @@ describePostgres("source connector plugin contract", () => {
     assert.fail("plugin index job timed out");
   }
 
-  async function sync(): Promise<void> {
-    const response = await request(`/v1/workspaces/${workspaceId}/sources/${sourceId}/sync`, {
+  async function sync(id = sourceId): Promise<{
+    noop: boolean;
+    changed_paths: string[];
+    deleted_paths: string[];
+    index_job: { id: string } | null;
+  }> {
+    const response = await request(`/v1/workspaces/${workspaceId}/sources/${id}/sync`, {
       method: "POST",
     });
     assert.ok(response.status === 202 || response.status === 200);
-    const payload = await response.json() as { index_job: { id: string } | null };
+    const payload = await response.json() as {
+      noop: boolean;
+      changed_paths: string[];
+      deleted_paths: string[];
+      index_job: { id: string } | null;
+    };
     if (payload.index_job) await waitForJob(payload.index_job.id);
+    return payload;
   }
 
   before(async () => {
     await admin.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+    websiteServer.listen(0, "127.0.0.1");
+    await once(websiteServer, "listening");
+    const websiteAddress = websiteServer.address();
+    assert.ok(websiteAddress && typeof websiteAddress !== "string");
+    websiteUrl = `http://127.0.0.1:${websiteAddress.port}`;
     handle = await startHttpServer({
       host: "127.0.0.1",
       port: 0,
@@ -155,6 +206,7 @@ describePostgres("source connector plugin contract", () => {
       apiKey: token,
       disableEmbeddings: true,
       connectorPlugins: [plugin],
+      websiteAllowPrivateNetwork: true,
       webhookPollIntervalMs: 100,
     });
     plugin.collections.set("handbook", [
@@ -168,6 +220,8 @@ describePostgres("source connector plugin contract", () => {
 
   after(async () => {
     await handle.close();
+    websiteServer.close();
+    await once(websiteServer, "close");
     try {
       await admin.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
     } finally {
@@ -252,5 +306,82 @@ describePostgres("source connector plugin contract", () => {
     }
     assert.ok(secondPayload.results.some((result) => result.path === "docs/beta.md"));
     assert.equal(secondPayload.results.some((result) => result.path === "docs/alpha.md"), false);
+  });
+
+  it("crawls and incrementally updates the built-in website provider through HTTP", async () => {
+    const capabilities = await request("/v1/capabilities");
+    assert.equal(capabilities.status, 200);
+    const capabilityPayload = await capabilities.json() as {
+      connector_plugins: Array<{
+        provider: string;
+        display_name: string;
+        webhook: boolean;
+      }>;
+    };
+    assert.deepEqual(
+      capabilityPayload.connector_plugins.find((plugin) => plugin.provider === "website"),
+      { provider: "website", display_name: "Static website", webhook: false },
+    );
+
+    const created = await request("/v1/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Website workspace" }),
+    });
+    assert.equal(created.status, 201);
+    workspaceId = (await created.json() as { workspace: { id: string } }).workspace.id;
+
+    const attached = await request(`/v1/workspaces/${workspaceId}/sources/website`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        start_url: `${websiteUrl}/docs/`,
+        max_pages: 10,
+        max_depth: 2,
+      }),
+    });
+    assert.equal(attached.status, 201);
+    const websiteSourceId = (await attached.json() as { source: { id: string } }).source.id;
+
+    const first = await sync(websiteSourceId);
+    assert.equal(first.noop, false);
+    assert.deepEqual(first.changed_paths.sort(), [
+      "website/docs/guide.md",
+      "website/docs/index.md",
+    ]);
+    const firstSearch = await request(`/v1/workspaces/${workspaceId}/search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "alpha launch notebook", mode: "bm25", top_k: 5 }),
+    });
+    assert.equal(firstSearch.status, 200);
+    assert.match(await firstSearch.text(), /website\/docs\/index\.md/);
+
+    const unchanged = await sync(websiteSourceId);
+    assert.equal(unchanged.noop, true);
+    assert.equal(unchanged.index_job, null);
+
+    websiteVersion = 2;
+    const second = await sync(websiteSourceId);
+    assert.equal(second.noop, false);
+    assert.deepEqual(second.changed_paths.sort(), [
+      "website/docs/index.md",
+      "website/docs/new.md",
+    ]);
+    assert.deepEqual(second.deleted_paths, ["website/docs/guide.md"]);
+
+    const secondSearch = await request(`/v1/workspaces/${workspaceId}/search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "beta migration compass", mode: "bm25", top_k: 5 }),
+    });
+    assert.equal(secondSearch.status, 200);
+    assert.match(await secondSearch.text(), /website\/docs\/index\.md/);
+    assert.equal(
+      (await request(
+        `/v1/workspaces/${workspaceId}/file?path=${encodeURIComponent("website/docs/guide.md")}`,
+      )).status,
+      404,
+    );
   });
 });

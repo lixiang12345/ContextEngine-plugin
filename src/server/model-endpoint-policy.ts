@@ -69,7 +69,7 @@ function trustedEndpointIdentity(raw: string): string | null {
   }
 }
 
-function nonPublicHostReason(rawHostname: string): string | null {
+export function nonPublicHostReason(rawHostname: string): string | null {
   const hostname = rawHostname
     .replace(/^\[|\]$/g, "")
     .replace(/\.$/, "")
@@ -113,9 +113,19 @@ function nonPublicIpv4Reason(hostname: string): string | null {
   if (a === 127) return "a loopback IPv4 address";
   if (a === 169 && b === 254) return "a link-local IPv4 address";
   if (a === 172 && b >= 16 && b <= 31) return "a private IPv4 address";
+  if (a === 192 && b === 0 && octets[2] === 2) {
+    return "a documentation IPv4 address";
+  }
+  if (a === 192 && b === 0) return "a reserved IPv4 address";
   if (a === 192 && b === 168) return "a private IPv4 address";
   if (a === 198 && (b === 18 || b === 19)) {
     return "a benchmark-network IPv4 address";
+  }
+  if (
+    (a === 198 && b === 51 && octets[2] === 100) ||
+    (a === 203 && b === 0 && octets[2] === 113)
+  ) {
+    return "a documentation IPv4 address";
   }
   if (a >= 224) return "a multicast or reserved IPv4 address";
   return null;
@@ -135,6 +145,19 @@ function nonPublicIpv6Reason(hostname: string): string | null {
   if (firstByte === 0xff) return "a multicast IPv6 address";
 
   const upper96Bits = address >> 32n;
+  if (upper96Bits === 0x64ff9b0000000000000000n) {
+    const embedded = Number(address & 0xffff_ffffn);
+    const ipv4 = [
+      (embedded >>> 24) & 0xff,
+      (embedded >>> 16) & 0xff,
+      (embedded >>> 8) & 0xff,
+      embedded & 0xff,
+    ].join(".");
+    return nonPublicIpv4Reason(ipv4);
+  }
+  if (address >> 80n === 0x64ff9b0001n) return "a local-use translation IPv6 address";
+  if (address >> 96n === 0x20010db8n) return "a documentation IPv6 address";
+  if (address >> 112n === 0x2002n) return "a deprecated 6to4 IPv6 address";
   if (upper96Bits === 0n || upper96Bits === 0xffffn) {
     const embedded = Number(address & 0xffff_ffffn);
     const ipv4 = [

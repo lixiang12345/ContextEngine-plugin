@@ -4,7 +4,8 @@ ContextEngine exposes a provider-neutral, read-only source connector contract.
 Plugins enumerate immutable file revisions and read their bytes; the core owns
 leases, hashing, incremental diff, Blob persistence, workspace revisions, index
 jobs and promotion. This keeps third-party providers inside the same consistency
-and authorization boundaries as the built-in GitHub connector.
+and authorization boundaries as the built-in GitHub and static website
+connectors.
 
 ## Contract
 
@@ -90,8 +91,14 @@ same external id produced by `externalId(config)`. Core persists idempotency,
 claims work, retries, invokes the normal leased sync coordinator, and commits
 terminal state; plugins never write the event inbox or connector cursor.
 
-The built-in GitHub adapter is the reference implementation. It verifies
+The built-in GitHub adapter is the webhook reference implementation. It verifies
 `X-Hub-Signature-256` with constant-time HMAC comparison, accepts push events for
 the configured branch, and ignores ping/deleted-ref deliveries. Custom webhook
 adapters are trusted code and should keep signing secrets in their instance or
 external secret manager, never source configuration or returned metadata.
+
+`WebsiteSourceConnector` is the bounded-crawler reference implementation. It
+shows how a provider can validate source-specific configuration, maintain an
+incremental cursor, expose immutable synthetic files, and keep network policy in
+the plugin while core synchronization remains provider-neutral. Its private
+network override is intended only for explicitly trusted deployments.

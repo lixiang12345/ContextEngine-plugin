@@ -205,6 +205,36 @@ returned by the API. Repository trees above 20,000 files and truncated GitHub
 tree responses are rejected. Files above `CONTEXTENGINE_HTTP_MAX_BLOB_BYTES`
 are recorded as skipped and removed from the searchable snapshot.
 
+The built-in `website` plugin turns a bounded static documentation site into
+searchable Markdown documents:
+
+```http
+POST /v1/workspaces/{workspaceId}/sources/website
+Content-Type: application/json
+
+{
+  "start_url": "https://docs.example.com/guide/",
+  "path_prefix": "/guide/",
+  "max_pages": 100,
+  "max_depth": 3,
+  "max_page_bytes": 1048576,
+  "max_total_bytes": 20971520
+}
+```
+
+Production crawls require HTTPS, resolve and pin public IP addresses for each
+request, follow at most three same-origin redirects, stay inside the configured
+path prefix, skip query URLs and common binary/static assets, and never send
+cookies or source credentials. `robots.txt` is evaluated for
+`ContextEngineBot` (falling back to `*`); 401/403 disallow crawling and
+429/5xx fail closed. Crawls default to 100 pages, depth 3, 1 MiB per page, and
+20 MiB total, with hard maxima of 500 pages, depth 10, 5 MiB per page, and
+100 MiB total. HTML title/body text is normalized into `website/*.md` paths.
+ETag and Last-Modified validators plus a bounded cursor make unchanged syncs
+noops while preserving crawl traversal. Plain HTTP/private-network crawling is
+available only through the trusted-deployment
+`CONTEXTENGINE_WEBSITE_ALLOW_PRIVATE_NETWORK=1` override.
+
 Set `CONTEXTENGINE_GITHUB_WEBHOOK_SECRET` to enable signed push delivery at
 `POST /webhooks/github`, then configure the same secret in the GitHub repository
 webhook with `application/json` content. This route does not use the HTTP API
@@ -502,6 +532,8 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_GITHUB_WEBHOOK_SECRET` | Enables HMAC-SHA256 GitHub push delivery; minimum 16 characters |
 | `CONTEXTENGINE_WEBHOOK_POLL_INTERVAL_MS` | Persistent inbox poll interval; default 2000 ms |
 | `CONTEXTENGINE_WEBHOOK_MAX_ATTEMPTS` | Terminal failure threshold; default 5 |
+| `CONTEXTENGINE_WEBSITE_ALLOW_PRIVATE_NETWORK` | Trusted deployment override for private-network/plain-HTTP website crawling; default off |
+| `CONTEXTENGINE_WEBSITE_TIMEOUT_MS` | Per-request website crawl timeout; default 15000 ms |
 
 The service uses `CONTEXTENGINE_DATABASE_URL` and the existing embedding/rerank
 configuration described in the root README.

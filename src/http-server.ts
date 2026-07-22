@@ -23,6 +23,7 @@ import {
   GitHubConnectorClient,
 } from "./connectors/github.js";
 import { GitHubSourceConnector } from "./connectors/github-plugin.js";
+import { WebsiteSourceConnector } from "./connectors/website.js";
 import {
   SourceConnectorError,
   SourceConnectorRegistry,
@@ -105,6 +106,9 @@ export interface HttpServerOptions {
   githubApiBaseUrl?: string;
   githubTimeoutMs?: number;
   githubWebhookSecret?: string;
+  /** Trusted deployments only: permit the built-in website connector to crawl private networks. */
+  websiteAllowPrivateNetwork?: boolean;
+  websiteTimeoutMs?: number;
   webhookPollIntervalMs?: number;
   webhookMaxAttempts?: number;
   /** Additional read-only source providers available under /sources/{provider}. */
@@ -886,6 +890,8 @@ class HttpContextService {
         | "mcpSessionStore"
         | "disableEmbeddings"
         | "githubTimeoutMs"
+        | "websiteAllowPrivateNetwork"
+        | "websiteTimeoutMs"
         | "webhookPollIntervalMs"
         | "webhookMaxAttempts"
         | "corsOrigins"
@@ -939,6 +945,10 @@ class HttpContextService {
     });
     this.connectorRegistry = new SourceConnectorRegistry([
       new GitHubSourceConnector(github, options.githubWebhookSecret),
+      new WebsiteSourceConnector({
+        allowPrivateNetwork: options.websiteAllowPrivateNetwork,
+        timeoutMs: options.websiteTimeoutMs,
+      }),
       ...(options.connectorPlugins ?? []),
     ]);
     this.connectorSync = new ConnectorSyncCoordinator({
@@ -1041,6 +1051,14 @@ class HttpContextService {
         githubWebhookSecret:
           options.githubWebhookSecret ??
           (process.env.CONTEXTENGINE_GITHUB_WEBHOOK_SECRET?.trim() || undefined),
+        websiteAllowPrivateNetwork:
+          options.websiteAllowPrivateNetwork ??
+          readBoolean(process.env.CONTEXTENGINE_WEBSITE_ALLOW_PRIVATE_NETWORK),
+        websiteTimeoutMs: positiveOption(
+          options.websiteTimeoutMs ??
+            numberFromEnv(process.env.CONTEXTENGINE_WEBSITE_TIMEOUT_MS, 15_000),
+          "websiteTimeoutMs",
+        ),
         webhookPollIntervalMs: positiveOption(
           options.webhookPollIntervalMs ??
             numberFromEnv(process.env.CONTEXTENGINE_WEBHOOK_POLL_INTERVAL_MS, 2_000),
