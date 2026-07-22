@@ -15,6 +15,22 @@ export type IndexJobMode = "incremental" | "rebuild";
 export type IndexJobStatus = "queued" | "running" | "succeeded" | "failed";
 export type SnapshotJobOperation = "export" | "import" | "prune" | "gc" | "replicate";
 export type SnapshotJobStatus = "queued" | "running" | "succeeded" | "failed";
+export type SnapshotJobAttemptStatus =
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "retry_scheduled"
+  | "lease_expired";
+export type SnapshotJobEventKind =
+  | "snapshot"
+  | "queued"
+  | "attempt_started"
+  | "lease_takeover"
+  | "progress"
+  | "retry_scheduled"
+  | "manual_retry"
+  | "succeeded"
+  | "failed";
 export type SnapshotReplicationScheduleMode = "manual" | "interval" | "nightly";
 export type WorkspacePermission = "reader" | "writer" | "owner";
 /** Lowercase provider id registered by a SourceConnectorPlugin. */
@@ -219,6 +235,38 @@ export interface ClaimedSnapshotJob extends StoredSnapshotJob {
   attemptToken: string;
 }
 
+export interface StoredSnapshotJobAttempt {
+  jobId: string;
+  attempt: number;
+  budgetAttempt: number;
+  status: SnapshotJobAttemptStatus;
+  progress: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  backfilled: boolean;
+  startedAt: string;
+  lastHeartbeatAt: string;
+  completedAt: string | null;
+}
+
+export interface StoredSnapshotJobEvent {
+  eventId: string;
+  jobId: string;
+  attempt: number | null;
+  kind: SnapshotJobEventKind;
+  status: SnapshotJobStatus;
+  attempts: number;
+  details: Record<string, unknown>;
+  progress: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  nextAttemptAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  backfilled: boolean;
+  createdAt: string;
+}
+
 export interface StoredSnapshotReplicationSchedule {
   id: string;
   workspaceId: string;
@@ -354,6 +402,38 @@ interface SnapshotJobRow extends QueryResultRow {
   completed_at: string | Date | null;
 }
 
+interface SnapshotJobAttemptRow extends QueryResultRow {
+  job_id: string;
+  attempt: string | number;
+  budget_attempt: string | number;
+  status: SnapshotJobAttemptStatus;
+  progress: unknown;
+  result: unknown;
+  error: string | null;
+  backfilled: boolean;
+  started_at: string | Date;
+  last_heartbeat_at: string | Date;
+  completed_at: string | Date | null;
+}
+
+interface SnapshotJobEventRow extends QueryResultRow {
+  event_id: string | number;
+  job_id: string;
+  attempt: string | number | null;
+  kind: SnapshotJobEventKind;
+  status: SnapshotJobStatus;
+  attempts: string | number;
+  details: unknown;
+  progress: unknown;
+  result: unknown;
+  error: string | null;
+  next_attempt_at: string | Date;
+  started_at: string | Date | null;
+  completed_at: string | Date | null;
+  backfilled: boolean;
+  created_at: string | Date;
+}
+
 interface SnapshotReplicationScheduleRow extends QueryResultRow {
   id: string;
   workspace_id: string;
@@ -487,6 +567,13 @@ export class ConnectorCiRateLimitError extends Error {
   }
 }
 
+export class SnapshotHistoryCursorError extends Error {
+  constructor(label: string) {
+    super(`Snapshot history ${label} cursor must be an unsigned PostgreSQL BIGINT`);
+    this.name = "SnapshotHistoryCursorError";
+  }
+}
+
 function iso(value: Date | string | null): string | null {
   if (value === null) return null;
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -526,6 +613,26 @@ const SNAPSHOT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const NIGHTLY_TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/;
 const MIN_SNAPSHOT_REPLICATION_INTERVAL_MS = 60_000;
 const MAX_SNAPSHOT_REPLICATION_INTERVAL_MS = 365 * 24 * 60 * 60 * 1_000;
+const SNAPSHOT_HISTORY_CURSOR_RE = /^(?:0|[1-9][0-9]*)$/;
+const MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807n;
+
+function parseSnapshotHistoryCursor(value: string, label: string): string {
+  if (!SNAPSHOT_HISTORY_CURSOR_RE.test(value)) {
+    throw new SnapshotHistoryCursorError(label);
+  }
+  try {
+    const parsed = BigInt(value);
+    if (parsed > MAX_SIGNED_BIGINT) throw new Error("out of range");
+  } catch {
+    throw new SnapshotHistoryCursorError(label);
+  }
+  return value;
+}
+
+function boundedHistoryLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 100;
+  return Math.max(1, Math.min(500, Math.floor(value)));
+}
 
 function normalizeNightlyTime(value: string): string {
   const trimmed = value.trim();
@@ -649,6 +756,44 @@ function snapshotJobFromRow(row: SnapshotJobRow): StoredSnapshotJob {
     createdAt: iso(row.created_at)!,
     startedAt: iso(row.started_at),
     completedAt: iso(row.completed_at),
+  };
+}
+
+function snapshotJobAttemptFromRow(
+  row: SnapshotJobAttemptRow,
+): StoredSnapshotJobAttempt {
+  return {
+    jobId: row.job_id,
+    attempt: Number(row.attempt),
+    budgetAttempt: Number(row.budget_attempt),
+    status: row.status,
+    progress: asObject(row.progress) ?? {},
+    result: asObject(row.result),
+    error: row.error,
+    backfilled: row.backfilled,
+    startedAt: iso(row.started_at)!,
+    lastHeartbeatAt: iso(row.last_heartbeat_at)!,
+    completedAt: iso(row.completed_at),
+  };
+}
+
+function snapshotJobEventFromRow(row: SnapshotJobEventRow): StoredSnapshotJobEvent {
+  return {
+    eventId: String(row.event_id),
+    jobId: row.job_id,
+    attempt: row.attempt === null ? null : Number(row.attempt),
+    kind: row.kind,
+    status: row.status,
+    attempts: Number(row.attempts),
+    details: asObject(row.details) ?? {},
+    progress: asObject(row.progress) ?? {},
+    result: asObject(row.result),
+    error: row.error,
+    nextAttemptAt: iso(row.next_attempt_at)!,
+    startedAt: iso(row.started_at),
+    completedAt: iso(row.completed_at),
+    backfilled: row.backfilled,
+    createdAt: iso(row.created_at)!,
   };
 }
 
@@ -3621,6 +3766,63 @@ export class WorkspaceRepository {
       [jobId],
     );
     return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+  }
+
+  async listSnapshotJobAttempts(
+    jobId: string,
+    options: { limit?: number; before?: number | string } = {},
+  ): Promise<StoredSnapshotJobAttempt[]> {
+    const limit = boundedHistoryLimit(options.limit);
+    const before =
+      options.before === undefined
+        ? null
+        : parseSnapshotHistoryCursor(String(options.before), "before");
+    const result = await this.pool.query<SnapshotJobAttemptRow>(
+      `SELECT job_id, attempt, budget_attempt, status, progress, result, error,
+              backfilled, started_at, last_heartbeat_at, completed_at
+       FROM ce_snapshot_job_attempts
+       WHERE job_id = $1
+         AND ($2::bigint IS NULL OR attempt < $2::bigint)
+       ORDER BY attempt DESC
+       LIMIT $3`,
+      [jobId, before, limit],
+    );
+    return result.rows.map(snapshotJobAttemptFromRow);
+  }
+
+  async listSnapshotJobEvents(
+    jobId: string,
+    afterEventId: number | string = "0",
+    limit = 100,
+  ): Promise<StoredSnapshotJobEvent[]> {
+    const cursor = parseSnapshotHistoryCursor(String(afterEventId), "after");
+    const result = await this.pool.query<SnapshotJobEventRow>(
+      `SELECT event_id, job_id, attempt, kind, status, attempts, details,
+              progress, result, error, next_attempt_at, started_at,
+              completed_at, backfilled, created_at
+       FROM ce_snapshot_job_events
+       WHERE job_id = $1 AND event_id > $2::bigint
+       ORDER BY event_id ASC
+       LIMIT $3`,
+      [jobId, cursor, boundedHistoryLimit(limit)],
+    );
+    return result.rows.map(snapshotJobEventFromRow);
+  }
+
+  async getLatestSnapshotJobEvent(
+    jobId: string,
+  ): Promise<StoredSnapshotJobEvent | null> {
+    const result = await this.pool.query<SnapshotJobEventRow>(
+      `SELECT event_id, job_id, attempt, kind, status, attempts, details,
+              progress, result, error, next_attempt_at, started_at,
+              completed_at, backfilled, created_at
+       FROM ce_snapshot_job_events
+       WHERE job_id = $1
+       ORDER BY event_id DESC
+       LIMIT 1`,
+      [jobId],
+    );
+    return result.rows[0] ? snapshotJobEventFromRow(result.rows[0]) : null;
   }
 
   async listLatestSnapshotReplicationJobs(

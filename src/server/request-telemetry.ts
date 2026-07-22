@@ -140,7 +140,11 @@ export function observableRoute(pathname: string, method?: string): string {
   if (/^\/v1\/workspaces\/[^/]+\/snapshot-replication-schedules$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/snapshot-replication-schedules";
   }
-  if (/^\/v1\/workspaces\/[^/]+\/snapshot-jobs\/[^/]+\/(events|retry)$/.test(pathname)) {
+  if (
+    /^\/v1\/workspaces\/[^/]+\/snapshot-jobs\/[^/]+\/(attempts|events|retry)$/.test(
+      pathname,
+    )
+  ) {
     return pathname
       .replace(/^\/v1\/workspaces\/[^/]+/, "/v1/workspaces/{workspaceId}")
       .replace(/\/snapshot-jobs\/[^/]+\//, "/snapshot-jobs/{jobId}/");

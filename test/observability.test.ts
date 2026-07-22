@@ -95,6 +95,12 @@ describe("request telemetry", () => {
       ),
       "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/events",
     );
+    assert.equal(
+      observableRoute(
+        "/v1/workspaces/workspace-a/snapshot-jobs/job-a/attempts",
+      ),
+      "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/attempts",
+    );
 
     const telemetry = new RequestTelemetry();
     for (let index = 0; index < 250; index++) {

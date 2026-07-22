@@ -48,6 +48,11 @@ import {
 } from "./server/http-auth.js";
 import { IndexJobRunner } from "./server/index-job-runner.js";
 import { SnapshotJobRunner } from "./server/snapshot-job-runner.js";
+import {
+  PostgresSnapshotJobEventWakeup,
+  SnapshotJobEventFeed,
+  type SnapshotJobEventWakeup,
+} from "./server/snapshot-job-events.js";
 import { ConnectorWebhookProcessor } from "./server/connector-webhook.js";
 import {
   testEmbeddingConnection,
@@ -74,7 +79,10 @@ import {
   SourceAccessPolicyTargetError,
   ConnectorWebhookReplayError,
   ConnectorCiRateLimitError,
+  SnapshotHistoryCursorError,
   type StoredIndexJob,
+  type StoredSnapshotJobAttempt,
+  type StoredSnapshotJobEvent,
   type StoredSnapshotJob,
   type StoredSnapshotReplicationSchedule,
   type StoredConnectorSource,
@@ -198,6 +206,8 @@ export interface HttpServerOptions {
   snapshotReplicationRetryBaseMs?: number;
   /** Database queue and replication-schedule scan interval. */
   snapshotJobPollIntervalMs?: number;
+  /** Optional low-latency wakeup transport; durable events remain in PostgreSQL. */
+  snapshotJobEventWakeup?: SnapshotJobEventWakeup;
 }
 
 export interface HttpServerHandle {
@@ -669,6 +679,53 @@ function snapshotJobPayload(job: StoredSnapshotJob): Record<string, unknown> {
   };
 }
 
+function snapshotJobAtEvent(
+  job: StoredSnapshotJob,
+  event: StoredSnapshotJobEvent,
+): StoredSnapshotJob {
+  return {
+    ...job,
+    status: event.status,
+    progress: event.progress,
+    result: event.result,
+    error: event.error,
+    attempts: event.attempts,
+    nextAttemptAt: event.nextAttemptAt,
+    startedAt: event.startedAt,
+    completedAt: event.completedAt,
+  };
+}
+
+function snapshotJobEventPayload(
+  event: StoredSnapshotJobEvent,
+): Record<string, unknown> {
+  return {
+    id: event.eventId,
+    kind: event.kind,
+    attempt: event.attempt,
+    details: event.details,
+    backfilled: event.backfilled,
+    created_at: event.createdAt,
+  };
+}
+
+function snapshotJobAttemptPayload(
+  attempt: StoredSnapshotJobAttempt,
+): Record<string, unknown> {
+  return {
+    attempt: attempt.attempt,
+    budget_attempt: attempt.budgetAttempt,
+    status: attempt.status,
+    progress: attempt.progress,
+    result: attempt.result,
+    error: attempt.error,
+    backfilled: attempt.backfilled,
+    started_at: attempt.startedAt,
+    last_heartbeat_at: attempt.lastHeartbeatAt,
+    completed_at: attempt.completedAt,
+  };
+}
+
 function snapshotReplicationSchedulePayload(
   schedule: StoredSnapshotReplicationSchedule,
 ): Record<string, unknown> {
@@ -1054,6 +1111,9 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/events": {
         get: { summary: "Stream snapshot job state over server-sent events" },
       },
+      "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/attempts": {
+        get: { summary: "List durable snapshot job attempts" },
+      },
       "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry": {
         post: { summary: "Retry a failed snapshot job" },
       },
@@ -1143,6 +1203,10 @@ class HttpContextService {
   private readonly snapshotReplicationMaxAttempts: number;
   private readonly snapshotReplicationRetryBaseMs: number;
   private readonly snapshotJobPollIntervalMs: number;
+  private readonly snapshotJobEventWakeup: SnapshotJobEventWakeup;
+  private readonly snapshotJobEventFeed: SnapshotJobEventFeed;
+  private readonly activeEventStreamClosers = new Set<() => void>();
+  private readonly activeSnapshotEventStreams = new Set<Promise<void>>();
   private readonly mcpSessions = new Map<string, McpHttpSession>();
   private readonly mcpSessionCleanupTimer: NodeJS.Timeout;
   private pendingMcpInitializations = 0;
@@ -1190,6 +1254,7 @@ class HttpContextService {
         | "connectorPlugins"
         | "snapshotStore"
         | "snapshotReplicationTargets"
+        | "snapshotJobEventWakeup"
       >,
   ) {
     this.repository = repository;
@@ -1228,6 +1293,14 @@ class HttpContextService {
     this.snapshotReplicationMaxAttempts = options.snapshotReplicationMaxAttempts;
     this.snapshotReplicationRetryBaseMs = options.snapshotReplicationRetryBaseMs;
     this.snapshotJobPollIntervalMs = options.snapshotJobPollIntervalMs;
+    this.snapshotJobEventWakeup =
+      options.snapshotJobEventWakeup ??
+      new PostgresSnapshotJobEventWakeup({ databaseUrl: this.databaseUrl });
+    this.snapshotJobEventFeed = new SnapshotJobEventFeed({
+      history: repository,
+      wakeup: this.snapshotJobEventWakeup,
+      pollIntervalMs: options.snapshotJobPollIntervalMs,
+    });
     this.runner = new IndexJobRunner({
       repository,
       engineFor: (workspace) => this.engineFor(workspace),
@@ -1470,6 +1543,7 @@ class HttpContextService {
           100,
           60_000,
         ),
+        snapshotJobEventWakeup: options.snapshotJobEventWakeup,
         corsOrigins: normalizeCorsOrigins(
           options.corsOrigins ??
             (process.env.CONTEXTENGINE_HTTP_CORS_ORIGINS ?? "").split(","),
@@ -1483,6 +1557,8 @@ class HttpContextService {
   }
 
   async close(): Promise<void> {
+    await this.closeEventStreams();
+    await this.snapshotJobEventWakeup.close();
     clearInterval(this.mcpSessionCleanupTimer);
     await this.webhookProcessor.close();
     await this.snapshotRunner.close();
@@ -1500,6 +1576,11 @@ class HttpContextService {
     await Promise.all([...this.engines.values()].map((engine) => engine.close()));
     this.engines.clear();
     await this.repository.close();
+  }
+
+  async closeEventStreams(): Promise<void> {
+    for (const close of [...this.activeEventStreamClosers]) close();
+    await Promise.allSettled([...this.activeSnapshotEventStreams]);
   }
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -2268,6 +2349,40 @@ class HttpContextService {
         throw new HttpError(405, "Method not allowed for snapshot replication schedule");
       }
 
+      const snapshotJobAttemptMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshot-jobs\/([^/]+)\/attempts$/.exec(pathname);
+      if (request.method === "GET" && snapshotJobAttemptMatch) {
+        const workspaceId = decodeURIComponent(snapshotJobAttemptMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const jobId = decodeURIComponent(snapshotJobAttemptMatch[2]);
+        const job = await this.repository.getSnapshotJob(jobId);
+        if (!job || job.workspaceId !== workspaceId) {
+          throw new HttpError(404, "Snapshot job not found");
+        }
+        const limit = parseHistoryLimit(requestUrl.searchParams.get("limit"));
+        const before = requestUrl.searchParams.get("before");
+        let attempts: StoredSnapshotJobAttempt[];
+        try {
+          attempts = await this.repository.listSnapshotJobAttempts(job.id, {
+            limit,
+            ...(before === null ? {} : { before }),
+          });
+        } catch (error) {
+          if (error instanceof SnapshotHistoryCursorError) {
+            throw new HttpError(400, error.message);
+          }
+          throw error;
+        }
+        json(response, 200, {
+          attempts: attempts.map(snapshotJobAttemptPayload),
+          next_before:
+            attempts.length === limit
+              ? attempts[attempts.length - 1].attempt
+              : null,
+        });
+        return;
+      }
+
       const snapshotJobEventMatch =
         /^\/v1\/workspaces\/([^/]+)\/snapshot-jobs\/([^/]+)\/events$/.exec(pathname);
       if (request.method === "GET" && snapshotJobEventMatch) {
@@ -2279,7 +2394,12 @@ class HttpContextService {
         if (!job || job.workspaceId !== workspaceId) {
           throw new HttpError(404, "Snapshot job not found");
         }
-        this.streamSnapshotJobEvents(request, response, job);
+        await this.streamSnapshotJobEvents(
+          request,
+          response,
+          job,
+          parseSnapshotEventCursor(request, requestUrl),
+        );
         return;
       }
 
@@ -3705,44 +3825,219 @@ class HttpContextService {
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
-    const send = (job: StoredIndexJob): void => {
-      response.write(`event: job\ndata: ${JSON.stringify({ job: jobPayload(job) })}\n\n`);
-    };
-    send(initial);
-    const unsubscribe = this.runner.subscribe(initial.id, send);
-    const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 15_000);
-    request.on("close", () => {
-      clearInterval(heartbeat);
+    let closed = false;
+    let heartbeat: NodeJS.Timeout | null = null;
+    let unsubscribe = (): void => undefined;
+    const cleanup = (): void => {
+      if (closed) return;
+      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
       unsubscribe();
-      response.end();
-    });
+      request.off("aborted", cleanup);
+      response.off("close", cleanup);
+      response.off("error", cleanup);
+      this.activeEventStreamClosers.delete(cleanup);
+      if (!response.writableEnded) response.end();
+    };
+    const send = (job: StoredIndexJob): void => {
+      if (closed) return;
+      response.write(`event: job\ndata: ${JSON.stringify({ job: jobPayload(job) })}\n\n`);
+      if (isTerminalJobStatus(job.status)) cleanup();
+    };
+    unsubscribe = this.runner.subscribe(initial.id, send);
+    heartbeat = setInterval(() => {
+      if (!closed && response.writableLength < 64 * 1024) {
+        response.write(": keepalive\n\n");
+      }
+    }, 15_000);
+    heartbeat.unref();
+    this.activeEventStreamClosers.add(cleanup);
+    request.once("aborted", cleanup);
+    response.once("close", cleanup);
+    response.once("error", cleanup);
+    send(initial);
   }
 
-  private streamSnapshotJobEvents(
+  private async streamSnapshotJobEvents(
     request: IncomingMessage,
     response: ServerResponse,
     initial: StoredSnapshotJob,
-  ): void {
+    requestedCursor: string | null,
+  ): Promise<void> {
+    const latest = await this.repository.getLatestSnapshotJobEvent(initial.id);
+    if (
+      requestedCursor !== null &&
+      latest &&
+      BigInt(requestedCursor) > BigInt(latest.eventId)
+    ) {
+      throw new HttpError(400, "Last-Event-ID is newer than this snapshot job");
+    }
     response.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
-    const send = (job: StoredSnapshotJob): void => {
-      response.write(
-        `event: job\ndata: ${JSON.stringify({ job: snapshotJobPayload(job) })}\n\n`,
-      );
-    };
-    send(initial);
-    const unsubscribe = this.snapshotRunner.subscribe(initial.id, send);
-    const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 15_000);
-    request.on("close", () => {
-      clearInterval(heartbeat);
-      unsubscribe();
-      response.end();
+    response.write("retry: 1000\n\n");
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    this.activeEventStreamClosers.add(abort);
+    request.once("aborted", abort);
+    response.once("close", abort);
+    response.once("error", abort);
+    const task = (async (): Promise<void> => {
+      let cursor = requestedCursor ?? "0";
+      let lastStatus = initial.status;
+      const heartbeat = setInterval(() => {
+        if (
+          !controller.signal.aborted &&
+          !response.destroyed &&
+          response.writableLength < 64 * 1024
+        ) {
+          response.write(": keepalive\n\n");
+        }
+      }, 15_000);
+      heartbeat.unref();
+      try {
+        if (requestedCursor === null) {
+          if (latest) {
+            await writeSnapshotJobEvent(response, initial, latest, controller.signal);
+            cursor = latest.eventId;
+            lastStatus = latest.status;
+          } else {
+            await writeSseChunk(
+              response,
+              `event: job\ndata: ${JSON.stringify({
+                job: snapshotJobPayload(initial),
+              })}\n\n`,
+              controller.signal,
+            );
+          }
+          if (isTerminalJobStatus(lastStatus)) return;
+        }
+
+        for await (const batch of this.snapshotJobEventFeed.watch(
+          initial.id,
+          cursor,
+          controller.signal,
+        )) {
+          for (const event of batch.events) {
+            await writeSnapshotJobEvent(response, initial, event, controller.signal);
+            lastStatus = event.status;
+          }
+          if (batch.caughtUp && isTerminalJobStatus(lastStatus)) return;
+        }
+      } finally {
+        clearInterval(heartbeat);
+        if (!response.writableEnded && !response.destroyed) response.end();
+      }
+    })().catch((error: unknown) => {
+      if (!controller.signal.aborted && !response.destroyed) response.destroy();
+      if (!controller.signal.aborted) {
+        console.error(
+          "[snapshot job events] stream failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }).finally(() => {
+      controller.abort();
+      request.off("aborted", abort);
+      response.off("close", abort);
+      response.off("error", abort);
+      this.activeEventStreamClosers.delete(abort);
+      this.activeSnapshotEventStreams.delete(task);
     });
+    this.activeSnapshotEventStreams.add(task);
+    await task;
   }
+}
+
+const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n;
+
+function parseSnapshotEventCursor(
+  request: IncomingMessage,
+  requestUrl: URL,
+): string | null {
+  const queryCursor = requestUrl.searchParams.get("after_event_id");
+  const headerValue = request.headers["last-event-id"];
+  const headerCursor = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (
+    queryCursor !== null &&
+    headerCursor !== undefined &&
+    queryCursor !== headerCursor
+  ) {
+    throw new HttpError(400, "after_event_id and Last-Event-ID must match");
+  }
+  const cursor = queryCursor ?? headerCursor ?? null;
+  if (cursor === null) return null;
+  if (!/^(?:0|[1-9][0-9]*)$/.test(cursor)) {
+    throw new HttpError(400, "Last-Event-ID must be an unsigned PostgreSQL BIGINT");
+  }
+  try {
+    if (BigInt(cursor) > MAX_POSTGRES_BIGINT) throw new Error("out of range");
+  } catch {
+    throw new HttpError(400, "Last-Event-ID must be an unsigned PostgreSQL BIGINT");
+  }
+  return cursor;
+}
+
+function parseHistoryLimit(value: string | null): number {
+  if (value === null) return 100;
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    throw new HttpError(400, "limit must be an integer from 1 to 500");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > 500) {
+    throw new HttpError(400, "limit must be an integer from 1 to 500");
+  }
+  return parsed;
+}
+
+function isTerminalJobStatus(status: string): boolean {
+  return status === "succeeded" || status === "failed";
+}
+
+async function writeSnapshotJobEvent(
+  response: ServerResponse,
+  currentJob: StoredSnapshotJob,
+  event: StoredSnapshotJobEvent,
+  signal: AbortSignal,
+): Promise<void> {
+  await writeSseChunk(
+    response,
+    `id: ${event.eventId}\nevent: job\ndata: ${JSON.stringify({
+      job: snapshotJobPayload(snapshotJobAtEvent(currentJob, event)),
+      event: snapshotJobEventPayload(event),
+    })}\n\n`,
+    signal,
+  );
+}
+
+async function writeSseChunk(
+  response: ServerResponse,
+  chunk: string,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+  if (response.write(chunk)) return;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      response.off("drain", onDrain);
+      response.off("close", onClosed);
+      signal.removeEventListener("abort", onClosed);
+    };
+    const onDrain = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onClosed = (): void => {
+      cleanup();
+      reject(signal.reason ?? new Error("SSE response closed"));
+    };
+    response.once("drain", onDrain);
+    response.once("close", onClosed);
+    signal.addEventListener("abort", onClosed, { once: true });
+  });
 }
 
 function parseLineParam(value: string | null): number | undefined {
@@ -3774,14 +4069,27 @@ export async function startHttpServer(
   const displayHost =
     host === "0.0.0.0" || host === "::" ? "127.0.0.1" : address.address;
   const url = `http://${displayHost}:${address.port}`;
+  let closePromise: Promise<void> | null = null;
   return {
     url,
     server,
-    async close(): Promise<void> {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-      await service.close();
+    close(): Promise<void> {
+      closePromise ??= (async (): Promise<void> => {
+        const serverClosed = new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+        await service.closeEventStreams();
+        server.closeIdleConnections();
+        const forceClose = setTimeout(() => server.closeAllConnections(), 1_000);
+        forceClose.unref();
+        try {
+          await serverClosed;
+        } finally {
+          clearTimeout(forceClose);
+        }
+        await service.close();
+      })();
+      return closePromise;
     },
   };
 }

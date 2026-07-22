@@ -92,6 +92,7 @@ export type {
 } from "./snapshots/snapshot.js";
 export {
   WorkspaceRepository,
+  SnapshotHistoryCursorError,
   type StoredSnapshotReplicationPublication,
   WorkspaceNotFoundError,
   RevisionConflictError,
@@ -103,6 +104,15 @@ export {
   type SnapshotJobRunnerOptions,
   type SnapshotJobListener,
 } from "./server/snapshot-job-runner.js";
+export {
+  SnapshotJobEventFeed,
+  PostgresSnapshotJobEventWakeup,
+  type SnapshotJobHistoryReader,
+  type SnapshotJobEventWakeup,
+  type SnapshotJobEventFeedOptions,
+  type SnapshotJobEventBatch,
+  type PostgresSnapshotJobEventWakeupOptions,
+} from "./server/snapshot-job-events.js";
 export { migrateSqliteIndex } from "./store/migrate-sqlite.js";
 export {
   createEmbeddingProvider,
@@ -216,10 +226,14 @@ export type {
   IndexJobStatus,
   SnapshotJobOperation,
   SnapshotJobStatus,
+  SnapshotJobAttemptStatus,
+  SnapshotJobEventKind,
   SnapshotReplicationMetrics,
   SnapshotReplicationScheduleMode,
   SnapshotReplicationJobCreation,
   StoredSnapshotJob,
+  StoredSnapshotJobAttempt,
+  StoredSnapshotJobEvent,
   StoredSnapshotReplicationSchedule,
   ClaimedSnapshotJob,
   ConnectorProvider,

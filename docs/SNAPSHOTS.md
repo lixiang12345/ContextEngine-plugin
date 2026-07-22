@@ -155,7 +155,26 @@ The HTTP service keeps list and delete synchronous. Export, import, prune, and
 GC create PostgreSQL-backed jobs and return `202` immediately. The creating
 workspace owner can poll
 `GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}` or stream the same
-state from the `/events` SSE endpoint.
+state from the `/events` SSE endpoint. Schema v15 records each state transition
+as an immutable event in the same transaction as the job mutation. SSE uses
+that log across HTTP instances instead of relying on an in-process runner.
+
+An initial `/events` request returns the latest durable state. Reconnect with
+`Last-Event-ID: <decimal>` or request `?after_event_id=<decimal>` to replay every
+later event in ascending order. Each `event: job` frame keeps the existing
+`data.job` payload and adds an `id:` plus `data.event`; a succeeded or failed
+stream closes after its final frame. PostgreSQL `LISTEN/NOTIFY` is only a
+low-latency wakeup, with `CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS` polling
+as the correctness fallback. Deployments may inject another
+`SnapshotJobEventWakeup`; durable event storage remains PostgreSQL so it stays
+atomic with the job row.
+
+Owners can inspect lifetime attempts with
+`GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/attempts`. Its
+`attempt` is monotonic for the life of the job, while `budget_attempt` mirrors
+the current automatic retry budget. A v14 migration backfills only the latest
+known attempt and marks it `backfilled: true`; it does not invent unavailable
+historical attempts.
 
 `POST /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry` requeues a
 failed job. Non-replication jobs preserve their cumulative attempt count;
@@ -169,6 +188,12 @@ also aborts in-flight object-store operations. A database publication watermark
 prevents an older failed job from being retried over a newer publication even
 if the target manifest was deleted. CLI commands remain synchronous for
 scripting and maintenance workflows.
+
+Schema v15 also keeps a separate lifetime attempt sequence because an explicit
+replication retry intentionally resets the bounded `attempts` budget to zero.
+Takeover marks the prior attempt `lease_expired`; heartbeat updates the attempt
+without creating noisy events, and a stale worker's fenced update creates no
+history row.
 
 ## Replication Targets
 

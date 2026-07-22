@@ -117,3 +117,39 @@ provider: it pins raw reads to the resolved commit, validates every server
 pagination link against the API origin/path, uses ETags as immutable file
 revisions, and verifies Bitbucket Cloud's raw-body `X-Hub-Signature` webhook
 before parsing push changes.
+
+## Snapshot Event Wakeups
+
+Snapshot job history is committed atomically in PostgreSQL and is not an
+external event-store plugin point. Deployments may replace only the low-latency
+wakeup transport, for example when instances already share Redis pub/sub:
+
+```ts
+import {
+  startHttpServer,
+  type SnapshotJobEventWakeup,
+} from "contextengine-plugin";
+
+class RedisSnapshotWakeup implements SnapshotJobEventWakeup {
+  subscribe(jobId: string, listener: () => void): () => void {
+    // Subscribe to a bounded, job-scoped channel and return an unsubscribe.
+    return () => undefined;
+  }
+
+  async close(): Promise<void> {
+    // Release subscriber connections owned by this component.
+  }
+}
+
+await startHttpServer({
+  snapshotJobEventWakeup: new RedisSnapshotWakeup(),
+});
+```
+
+A wakeup may be lost or duplicated. `SnapshotJobEventFeed` always reads
+`StoredSnapshotJobEvent` rows through `SnapshotJobHistoryReader` after waking
+and also polls at the configured snapshot job interval. Implementations must
+not attach credentials or event bodies to channel names, and `close()` must be
+idempotent because the HTTP server owns the injected component lifecycle. The
+built-in `PostgresSnapshotJobEventWakeup` uses one dedicated reconnecting
+`LISTEN` connection, separate from the repository query pool.

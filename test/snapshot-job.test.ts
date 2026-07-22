@@ -131,6 +131,214 @@ describePostgres("durable snapshot jobs", () => {
     );
   });
 
+  it("persists monotonic attempt and event history across takeover and manual retry", async () => {
+    const workspace = await repository.createWorkspace({
+      name: "snapshot history",
+      sourceMode: "blob",
+      ownerPrincipalId: "owner",
+    });
+    const created = await repository.createSnapshotJob({
+      workspaceId: workspace.id,
+      principalId: "owner",
+      operation: "replicate",
+      snapshotName: "main",
+      parameters: { target_id: "region_backup" },
+    });
+    const first = await repository.claimSnapshotJob(created.id, 60_000);
+    assert.ok(first);
+    assert.ok(
+      await repository.updateSnapshotJobProgress(first.id, first.attemptToken, {
+        phase: "copying",
+        bytes: 10,
+      }),
+    );
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    const second = await repository.claimSnapshotJob(created.id, 1);
+    assert.ok(second);
+    const beforeStaleWrite = await repository.listSnapshotJobEvents(created.id);
+    assert.equal(
+      await repository.updateSnapshotJobProgress(first.id, first.attemptToken, {
+        phase: "stale",
+      }),
+      null,
+    );
+    assert.equal(
+      (await repository.listSnapshotJobEvents(created.id)).length,
+      beforeStaleWrite.length,
+    );
+    assert.ok(
+      await repository.scheduleSnapshotJobRetry(
+        second.id,
+        second.attemptToken,
+        "temporary",
+        60_000,
+      ),
+    );
+
+    const clock = new Pool({ connectionString: schemaUrl });
+    try {
+      await clock.query(
+        `UPDATE ce_snapshot_jobs
+         SET next_attempt_at = clock_timestamp() - interval '1 second'
+         WHERE id = $1`,
+        [created.id],
+      );
+    } finally {
+      await clock.end();
+    }
+    const third = await repository.claimSnapshotJob(created.id, 60_000);
+    assert.ok(third);
+    assert.ok(
+      await repository.failSnapshotJob(third.id, third.attemptToken, "terminal"),
+    );
+    const manuallyRetried = await repository.retrySnapshotJob(created.id);
+    assert.equal(manuallyRetried?.attempts, 0);
+    const fourth = await repository.claimSnapshotJob(created.id, 60_000);
+    assert.ok(fourth);
+    assert.equal(fourth.attempts, 1);
+    assert.ok(
+      await repository.completeSnapshotJob(fourth.id, fourth.attemptToken, {
+        ok: true,
+      }),
+    );
+
+    const attempts = await repository.listSnapshotJobAttempts(created.id);
+    assert.deepEqual(
+      attempts.map((attempt) => ({
+        attempt: attempt.attempt,
+        budgetAttempt: attempt.budgetAttempt,
+        status: attempt.status,
+        backfilled: attempt.backfilled,
+      })),
+      [
+        { attempt: 4, budgetAttempt: 1, status: "succeeded", backfilled: false },
+        { attempt: 3, budgetAttempt: 3, status: "failed", backfilled: false },
+        {
+          attempt: 2,
+          budgetAttempt: 2,
+          status: "retry_scheduled",
+          backfilled: false,
+        },
+        {
+          attempt: 1,
+          budgetAttempt: 1,
+          status: "lease_expired",
+          backfilled: false,
+        },
+      ],
+    );
+    assert.deepEqual(
+      (await repository.listSnapshotJobAttempts(created.id, { limit: 2 })).map(
+        (attempt) => attempt.attempt,
+      ),
+      [4, 3],
+    );
+    assert.deepEqual(
+      (
+        await repository.listSnapshotJobAttempts(created.id, {
+          before: 3,
+        })
+      ).map((attempt) => attempt.attempt),
+      [2, 1],
+    );
+
+    const events = await repository.listSnapshotJobEvents(created.id);
+    assert.deepEqual(
+      events.map((event) => ({
+        kind: event.kind,
+        attempt: event.attempt,
+        attempts: event.attempts,
+      })),
+      [
+        { kind: "queued", attempt: null, attempts: 0 },
+        { kind: "attempt_started", attempt: 1, attempts: 1 },
+        { kind: "progress", attempt: 1, attempts: 1 },
+        { kind: "lease_takeover", attempt: 2, attempts: 2 },
+        { kind: "retry_scheduled", attempt: 2, attempts: 2 },
+        { kind: "attempt_started", attempt: 3, attempts: 3 },
+        { kind: "failed", attempt: 3, attempts: 3 },
+        { kind: "manual_retry", attempt: null, attempts: 0 },
+        { kind: "attempt_started", attempt: 4, attempts: 1 },
+        { kind: "succeeded", attempt: 4, attempts: 1 },
+      ],
+    );
+    assert.deepEqual(events[3].details, { replaced_attempt: 1 });
+    assert.ok(
+      events.every(
+        (event, index) =>
+          index === 0 || BigInt(event.eventId) > BigInt(events[index - 1].eventId),
+      ),
+    );
+    assert.equal(JSON.stringify(events).includes(first.attemptToken), false);
+    assert.deepEqual(
+      (
+        await repository.listSnapshotJobEvents(
+          created.id,
+          events[5].eventId,
+        )
+      ).map((event) => event.kind),
+      ["failed", "manual_retry", "attempt_started", "succeeded"],
+    );
+    assert.equal(
+      (await repository.getLatestSnapshotJobEvent(created.id))?.eventId,
+      events[events.length - 1].eventId,
+    );
+  });
+
+  it("rolls back a job mutation when its history append fails", async () => {
+    const workspace = await repository.createWorkspace({
+      name: "snapshot history atomicity",
+      sourceMode: "blob",
+      ownerPrincipalId: "owner",
+    });
+    const job = await repository.createSnapshotJob({
+      workspaceId: workspace.id,
+      principalId: "owner",
+      operation: "export",
+      snapshotName: "main",
+    });
+    const claim = await repository.claimSnapshotJob(job.id, 60_000);
+    assert.ok(claim);
+    const constraint = `ce_reject_snapshot_progress_${randomUUID().replaceAll("-", "")}`;
+    const control = new Pool({ connectionString: schemaUrl });
+    let constraintInstalled = false;
+    try {
+      await control.query(
+        `ALTER TABLE ce_snapshot_job_events
+         ADD CONSTRAINT ${constraint}
+         CHECK (job_id <> '${job.id}' OR kind <> 'progress')`,
+      );
+      constraintInstalled = true;
+      await assert.rejects(
+        repository.updateSnapshotJobProgress(claim.id, claim.attemptToken, {
+          phase: "should-roll-back",
+        }),
+      );
+      const current = await repository.getSnapshotJob(job.id);
+      assert.deepEqual(current?.progress, { phase: "starting" });
+      assert.deepEqual(
+        (await repository.listSnapshotJobEvents(job.id)).map((event) => event.kind),
+        ["queued", "attempt_started"],
+      );
+      assert.deepEqual(
+        (await repository.listSnapshotJobAttempts(job.id))[0].progress,
+        { phase: "starting" },
+      );
+    } finally {
+      if (constraintInstalled) {
+        await control.query(
+          `ALTER TABLE ce_snapshot_job_events DROP CONSTRAINT ${constraint}`,
+        );
+      }
+      await control.end();
+    }
+    assert.equal(
+      (await repository.completeSnapshotJob(job.id, claim.attemptToken, {}))?.status,
+      "succeeded",
+    );
+  });
+
   it("pins one manifest per replication job across lease takeovers", async () => {
     const workspace = await repository.createWorkspace({
       name: "snapshot publication pin",

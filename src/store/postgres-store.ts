@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 export const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -2355,6 +2355,239 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [14],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 15) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      -- Close the v14 write window before backfill and trigger installation.
+      -- Existing workers may continue after commit; their SQL then passes
+      -- through the v15 trigger even though their binary predates history.
+      LOCK TABLE ce_snapshot_jobs IN SHARE ROW EXCLUSIVE MODE;
+
+      CREATE TABLE IF NOT EXISTS ce_snapshot_job_attempts (
+        job_id TEXT NOT NULL
+          REFERENCES ce_snapshot_jobs(id) ON DELETE CASCADE,
+        attempt INTEGER NOT NULL CHECK (attempt > 0),
+        budget_attempt INTEGER NOT NULL CHECK (budget_attempt > 0),
+        status TEXT NOT NULL
+          CHECK (status IN (
+            'running', 'succeeded', 'failed', 'retry_scheduled', 'lease_expired'
+          )),
+        progress JSONB NOT NULL DEFAULT '{}'::jsonb
+          CHECK (jsonb_typeof(progress) = 'object'),
+        result JSONB,
+        error TEXT,
+        backfilled BOOLEAN NOT NULL DEFAULT FALSE,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        completed_at TIMESTAMPTZ,
+        PRIMARY KEY (job_id, attempt),
+        CHECK (
+          (status = 'running' AND completed_at IS NULL)
+          OR (status <> 'running' AND completed_at IS NOT NULL)
+        )
+      );
+      CREATE INDEX IF NOT EXISTS ce_snapshot_job_attempts_status_idx
+        ON ce_snapshot_job_attempts(status, last_heartbeat_at)
+        WHERE status = 'running';
+      CREATE UNIQUE INDEX IF NOT EXISTS ce_snapshot_job_attempts_running_idx
+        ON ce_snapshot_job_attempts(job_id)
+        WHERE status = 'running';
+
+      CREATE TABLE IF NOT EXISTS ce_snapshot_job_events (
+        event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        job_id TEXT NOT NULL
+          REFERENCES ce_snapshot_jobs(id) ON DELETE CASCADE,
+        attempt INTEGER CHECK (attempt > 0),
+        kind TEXT NOT NULL
+          CHECK (kind IN (
+            'snapshot', 'queued', 'attempt_started', 'lease_takeover',
+            'progress', 'retry_scheduled', 'manual_retry', 'succeeded', 'failed'
+          )),
+        status TEXT NOT NULL
+          CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+        attempts INTEGER NOT NULL CHECK (attempts >= 0),
+        details JSONB NOT NULL DEFAULT '{}'::jsonb
+          CHECK (jsonb_typeof(details) = 'object'),
+        progress JSONB NOT NULL DEFAULT '{}'::jsonb
+          CHECK (jsonb_typeof(progress) = 'object'),
+        result JSONB,
+        error TEXT,
+        next_attempt_at TIMESTAMPTZ NOT NULL,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        backfilled BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        FOREIGN KEY (job_id, attempt)
+          REFERENCES ce_snapshot_job_attempts(job_id, attempt)
+      );
+      CREATE INDEX IF NOT EXISTS ce_snapshot_job_events_job_idx
+        ON ce_snapshot_job_events(job_id, event_id);
+
+      INSERT INTO ce_snapshot_job_attempts(
+        job_id, attempt, budget_attempt, status, progress, result, error, backfilled,
+        started_at, last_heartbeat_at, completed_at
+      )
+      SELECT id,
+             attempts,
+             attempts,
+             CASE status
+               WHEN 'running' THEN 'running'
+               WHEN 'succeeded' THEN 'succeeded'
+               WHEN 'failed' THEN 'failed'
+               ELSE CASE
+                 WHEN error IS NULL THEN 'failed'
+                 ELSE 'retry_scheduled'
+               END
+             END,
+             progress,
+             result,
+             error,
+             TRUE,
+             COALESCE(started_at, created_at),
+             COALESCE(locked_at, completed_at, started_at, created_at),
+             CASE
+               WHEN status = 'running' THEN NULL
+               ELSE COALESCE(completed_at, created_at)
+             END
+      FROM ce_snapshot_jobs
+      WHERE attempts > 0
+      ON CONFLICT (job_id, attempt) DO NOTHING;
+
+      INSERT INTO ce_snapshot_job_events(
+        job_id, attempt, kind, status, attempts, details, progress, result, error,
+        next_attempt_at, started_at, completed_at, backfilled
+      )
+      SELECT id, NULLIF(attempts, 0), 'snapshot', status, attempts, '{}'::jsonb,
+             progress, result, error,
+             next_attempt_at, started_at, completed_at, TRUE
+      FROM ce_snapshot_jobs;
+
+      CREATE OR REPLACE FUNCTION ce_record_snapshot_job_audit()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $ce_snapshot_job_audit$
+      DECLARE
+        audit_attempt INTEGER;
+        audit_kind TEXT;
+        audit_details JSONB := '{}'::jsonb;
+        audit_now TIMESTAMPTZ := clock_timestamp();
+      BEGIN
+        IF TG_OP = 'INSERT' THEN
+          audit_kind := 'queued';
+        ELSE
+          IF NEW.status = 'running' AND NEW.attempts > OLD.attempts THEN
+            SELECT attempt INTO audit_attempt
+            FROM ce_snapshot_job_attempts
+            WHERE job_id = NEW.id AND status = 'running'
+            ORDER BY attempt DESC
+            LIMIT 1;
+
+            IF audit_attempt IS NOT NULL THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'lease_expired',
+                  error = COALESCE(error, 'Lease expired and attempt was replaced'),
+                  completed_at = audit_now,
+                  last_heartbeat_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_details := jsonb_build_object(
+                'replaced_attempt', audit_attempt
+              );
+            END IF;
+
+            SELECT COALESCE(MAX(attempt), 0) + 1 INTO audit_attempt
+            FROM ce_snapshot_job_attempts
+            WHERE job_id = NEW.id;
+
+            INSERT INTO ce_snapshot_job_attempts(
+              job_id, attempt, budget_attempt, status, progress,
+              started_at, last_heartbeat_at
+            ) VALUES (
+              NEW.id, audit_attempt, NEW.attempts, 'running', NEW.progress,
+              audit_now, audit_now
+            );
+            audit_kind := CASE
+              WHEN OLD.status = 'running' THEN 'lease_takeover'
+              ELSE 'attempt_started'
+            END;
+          ELSIF OLD.status = 'running' THEN
+            SELECT attempt INTO audit_attempt
+            FROM ce_snapshot_job_attempts
+            WHERE job_id = NEW.id AND status = 'running'
+            ORDER BY attempt DESC
+            LIMIT 1;
+
+            IF NEW.status = 'succeeded' THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'succeeded', progress = NEW.progress,
+                  result = NEW.result, error = NEW.error,
+                  last_heartbeat_at = audit_now, completed_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'succeeded';
+            ELSIF NEW.status = 'failed' THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'failed', progress = NEW.progress,
+                  result = NEW.result, error = NEW.error,
+                  last_heartbeat_at = audit_now, completed_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'failed';
+            ELSIF NEW.status = 'queued' THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'retry_scheduled', progress = NEW.progress,
+                  result = NEW.result, error = NEW.error,
+                  last_heartbeat_at = audit_now, completed_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'retry_scheduled';
+            ELSIF NEW.progress IS DISTINCT FROM OLD.progress THEN
+              UPDATE ce_snapshot_job_attempts
+              SET progress = NEW.progress, last_heartbeat_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'progress';
+            ELSIF NEW.locked_at IS DISTINCT FROM OLD.locked_at THEN
+              UPDATE ce_snapshot_job_attempts
+              SET last_heartbeat_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+            END IF;
+          ELSIF OLD.status = 'failed' AND NEW.status = 'queued' THEN
+            audit_kind := 'manual_retry';
+          ELSIF NEW.progress IS DISTINCT FROM OLD.progress THEN
+            audit_kind := 'progress';
+          END IF;
+        END IF;
+
+        IF audit_kind IS NOT NULL THEN
+          INSERT INTO ce_snapshot_job_events(
+            job_id, attempt, kind, status, attempts, details, progress, result, error,
+            next_attempt_at, started_at, completed_at
+          ) VALUES (
+            NEW.id, audit_attempt, audit_kind, NEW.status, NEW.attempts,
+            audit_details, NEW.progress, NEW.result, NEW.error, NEW.next_attempt_at,
+            NEW.started_at, NEW.completed_at
+          );
+          PERFORM pg_notify('ce_snapshot_job_events', NEW.id);
+        END IF;
+        RETURN NEW;
+      END;
+      $ce_snapshot_job_audit$;
+
+      DROP TRIGGER IF EXISTS ce_snapshot_job_audit_trigger ON ce_snapshot_jobs;
+      CREATE TRIGGER ce_snapshot_job_audit_trigger
+        AFTER INSERT OR UPDATE ON ce_snapshot_jobs
+        FOR EACH ROW EXECUTE FUNCTION ce_record_snapshot_job_audit();
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [15],
             );
             await client.query("COMMIT");
           } catch (error) {

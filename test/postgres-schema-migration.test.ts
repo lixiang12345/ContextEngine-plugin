@@ -221,7 +221,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            ORDER BY workspace_id, blob_hash`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 14 }]);
+        assert.deepEqual(marker.rows, [{ version: 15 }]);
         const ciTokens = await schemaPool.query<{ table_name: string | null }>(
           `SELECT to_regclass('ce_connector_ci_tokens')::text AS table_name`,
         );
@@ -266,7 +266,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await admin.query<{ version: number }>(
           `SELECT version FROM ${quotedSchema}.ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 14 }]);
+        assert.deepEqual(marker.rows, [{ version: 15 }]);
 
         const mcpSessionColumns = await admin.query<{ column_name: string }>(
           `SELECT column_name
@@ -487,7 +487,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v2'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 14 }]);
+        assert.deepEqual(marker.rows, [{ version: 15 }]);
         assert.deepEqual(source.rows, [
           {
             id: "source-v2",
@@ -645,7 +645,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v3'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 14 }]);
+        assert.deepEqual(marker.rows, [{ version: 15 }]);
         assert.deepEqual(source.rows, [
           {
             status: "syncing",
@@ -672,7 +672,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
   );
 
   it(
-    "adds durable MCP, plugins, source ACL, webhook inbox, CI tokens, provenance, replication jobs, schedules, and publication pins when migrating v4 to v14",
+    "adds durable MCP, plugins, source ACL, webhook inbox, CI tokens, provenance, replication jobs, schedules, publication pins, and snapshot history when migrating v4 to v15",
     { timeout: 15_000 },
     async () => {
       const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
@@ -730,7 +730,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await schemaPool.query<{ version: number }>(
           `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 14 }]);
+        assert.deepEqual(marker.rows, [{ version: 15 }]);
         const snapshotJob = await schemaPool.query<{
           status: string;
           attempts: number;
@@ -881,6 +881,156 @@ describePostgres("PostgreSQL schema migration coordination", () => {
     },
   );
 
+  it("backfills one explicit v14 snapshot and latest-attempt summary", async () => {
+    const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
+    const quotedSchema = quoteIdentifier(schema);
+    const schemaUrl = databaseUrlForSchema(databaseUrl!, schema);
+    const admin = new Pool({ connectionString: databaseUrl! });
+    let schemaPool: Pool | undefined;
+    try {
+      await admin.query(`CREATE SCHEMA ${quotedSchema}`);
+      schemaPool = new Pool({ connectionString: schemaUrl });
+      await schemaPool.query(`
+        CREATE TABLE ce_schema_version (
+          singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+          version INTEGER NOT NULL CHECK (version > 0),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO ce_schema_version(singleton, version) VALUES (TRUE, 14);
+        CREATE TABLE ce_workspaces (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          source_mode TEXT NOT NULL,
+          local_root TEXT,
+          revision BIGINT NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO ce_workspaces(id, name, source_mode)
+        VALUES ('workspace-v14', 'V14 workspace', 'blob');
+        CREATE TABLE ce_snapshot_jobs (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+          principal_id TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          snapshot_name TEXT,
+          parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+          status TEXT NOT NULL,
+          progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+          result JSONB,
+          error TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          locked_at TIMESTAMPTZ,
+          lock_token TEXT,
+          next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+          started_at TIMESTAMPTZ,
+          completed_at TIMESTAMPTZ
+        );
+        INSERT INTO ce_snapshot_jobs(
+          id, workspace_id, principal_id, operation, snapshot_name, status,
+          progress, result, error, attempts, locked_at, lock_token,
+          started_at, completed_at
+        ) VALUES
+          ('queued-v14', 'workspace-v14', 'owner', 'export', 'main',
+           'queued', '{"phase":"queued"}', NULL, NULL, 0, NULL, NULL, NULL, NULL),
+          ('running-v14', 'workspace-v14', 'owner', 'replicate', 'main',
+           'running', '{"phase":"copying"}', NULL, NULL, 2,
+           clock_timestamp(), 'secret-attempt-token', clock_timestamp(), NULL),
+          ('succeeded-v14', 'workspace-v14', 'owner', 'import', 'main',
+           'succeeded', '{"phase":"done"}', '{"ok":true}', NULL, 1,
+           NULL, NULL, clock_timestamp(), clock_timestamp());
+      `);
+      await schemaPool.end();
+      schemaPool = undefined;
+
+      await runEnsureSchemaInFreshProcess(schemaUrl);
+      schemaPool = new Pool({ connectionString: schemaUrl });
+      const marker = await schemaPool.query<{ version: number }>(
+        `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
+      );
+      assert.deepEqual(marker.rows, [{ version: 15 }]);
+      const attempts = await schemaPool.query<{
+        job_id: string;
+        attempt: number;
+        budget_attempt: number;
+        status: string;
+        backfilled: boolean;
+      }>(
+        `SELECT job_id, attempt, budget_attempt, status, backfilled
+         FROM ce_snapshot_job_attempts
+         ORDER BY job_id`,
+      );
+      assert.deepEqual(attempts.rows, [
+        {
+          job_id: "running-v14",
+          attempt: 2,
+          budget_attempt: 2,
+          status: "running",
+          backfilled: true,
+        },
+        {
+          job_id: "succeeded-v14",
+          attempt: 1,
+          budget_attempt: 1,
+          status: "succeeded",
+          backfilled: true,
+        },
+      ]);
+      const events = await schemaPool.query<{
+        job_id: string;
+        attempt: number | null;
+        kind: string;
+        status: string;
+        attempts: number;
+        backfilled: boolean;
+        payload: string;
+      }>(
+        `SELECT job_id, attempt, kind, status, attempts, backfilled,
+                to_jsonb(events)::text AS payload
+         FROM ce_snapshot_job_events AS events
+         ORDER BY job_id`,
+      );
+      assert.deepEqual(
+        events.rows.map(({ payload: _payload, ...event }) => event),
+        [
+          {
+            job_id: "queued-v14",
+            attempt: null,
+            kind: "snapshot",
+            status: "queued",
+            attempts: 0,
+            backfilled: true,
+          },
+          {
+            job_id: "running-v14",
+            attempt: 2,
+            kind: "snapshot",
+            status: "running",
+            attempts: 2,
+            backfilled: true,
+          },
+          {
+            job_id: "succeeded-v14",
+            attempt: 1,
+            kind: "snapshot",
+            status: "succeeded",
+            attempts: 1,
+            backfilled: true,
+          },
+        ],
+      );
+      assert.ok(events.rows.every((event) => !event.payload.includes("secret-attempt-token")));
+    } finally {
+      if (schemaPool) await schemaPool.end();
+      try {
+        await admin.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      } finally {
+        await admin.end();
+      }
+    }
+  });
+
   it("deduplicates active v12 replications before installing the v13 invariant", async () => {
     const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
     const quotedSchema = quoteIdentifier(schema);
@@ -957,7 +1107,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
       const marker = await schemaPool.query<{ version: number }>(
         `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
       );
-      assert.deepEqual(marker.rows, [{ version: 14 }]);
+      assert.deepEqual(marker.rows, [{ version: 15 }]);
     } finally {
       if (schemaPool) await schemaPool.end();
       try {
@@ -982,11 +1132,11 @@ describePostgres("PostgreSQL schema migration coordination", () => {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         INSERT INTO ${quotedSchema}.ce_schema_version(singleton, version)
-        VALUES (TRUE, 15);
+        VALUES (TRUE, 16);
       `);
       await assert.rejects(
         runEnsureSchemaInFreshProcess(schemaUrl),
-        /schema version 15 is newer than this build \(14\)/,
+        /schema version 16 is newer than this build \(15\)/,
       );
     } finally {
       try {

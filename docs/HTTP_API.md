@@ -425,6 +425,8 @@ GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}
 
 GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/events
 
+GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/attempts?limit=100&before=4
+
 POST /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry
 Content-Type: application/json
 {}
@@ -450,6 +452,18 @@ count, and a low-cardinality `health`/`alert` summary. Replication failures retr
 automatically with bounded exponential backoff; configure
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` and
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` to tune the policy.
+Schema v15 appends a durable event in the same transaction as every job state
+mutation. With no cursor, `/events` emits the latest state. `Last-Event-ID` or
+`after_event_id` replays later events by decimal PostgreSQL `BIGINT` id; frames
+retain `event: job` and `data.job`, add `data.event`, and close after the latest
+terminal event. One dedicated PostgreSQL listener wakes streams across
+instances, while bounded polling through
+`CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS` recovers from dropped or duplicate
+notifications. `HttpServerOptions.snapshotJobEventWakeup` accepts another
+wakeup implementation without moving the atomic event log out of PostgreSQL.
+The attempts endpoint is owner-only, newest-first, and uses `limit` (1-500) plus
+an exclusive `before` cursor. `attempt` is the lifetime sequence;
+`budget_attempt` is the retry count for that automatic retry generation.
 Schema v14 pins the first validated source manifest for each replication job
 and publishes a monotonic sequence plus source digest into the target manifest.
 Built-in filesystem and S3 targets use conditional writes, retry CAS conflicts
@@ -759,7 +773,7 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` | JSON object of target id to filesystem or `s3://bucket/prefix` store location; credentials remain in the host environment |
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` | Automatic replication attempts per job (default 3, maximum 10) |
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` | Initial automatic retry delay (default 1000 ms, maximum 60000 ms) |
-| `CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS` | Durable snapshot job and schedule scan interval (default 2000 ms, range 100-60000 ms) |
+| `CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS` | Durable snapshot job/schedule scan and SSE fallback poll interval (default 2000 ms, range 100-60000 ms) |
 | `CONTEXTENGINE_S3_ENDPOINT` / `_FORCE_PATH_STYLE` | Optional S3-compatible service endpoint and path-style mode |
 | `CONTEXTENGINE_S3_SSE` / `_KMS_KEY_ID` | Optional `AES256` or `aws:kms` server-side encryption |
 
@@ -804,11 +818,16 @@ provenance to inbox events, schema v11 adds leased snapshot jobs, schema v12
 adds replication jobs and target status indexes, and schema v13 adds durable
 replication schedules plus the active replication uniqueness invariant. Schema
 v14 adds immutable per-job source manifest pins and monotonic publication
-sequences. Older instances reject a newer marker; drain them before issuing CI
+sequences. Schema v15 adds snapshot attempt/event history and the cross-instance
+SSE replay source. Older instances reject a newer marker; drain them before issuing CI
 credentials, accepting CI deliveries, or creating snapshot jobs/schedules. The v12 to v13
 migration fences duplicate active replication rows before creating the unique
-index; the v13 to v14 migration is additive and creates publication pins. Deploy
-new workers before enabling schedules or replication fencing.
+index; the v13 to v14 migration is additive and creates publication pins. The
+v14 to v15 migration locks snapshot job writes during backfill and trigger
+installation, so already-running v14 workers append history after commit; those
+old HTTP instances still lack durable SSE and must leave request routing before
+the new stream guarantee is advertised. Deploy new workers before enabling
+schedules, replication fencing, or cross-instance streams.
 
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former

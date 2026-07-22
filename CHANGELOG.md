@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added schema v15 durable snapshot job attempts and immutable event history.
+  Job mutations append history in the same PostgreSQL transaction, lease
+  takeover closes the replaced attempt, and a lifetime attempt sequence stays
+  monotonic even when a replication retry budget resets. Snapshot SSE now
+  replays across instances with decimal `Last-Event-ID` cursors, terminal EOF,
+  a reconnecting PostgreSQL wakeup plus polling fallback, bounded shutdown, and
+  an owner-only attempt history API. Wakeup transport is publicly pluggable;
+  PostgreSQL remains the atomic event source of truth.
 - Added schema v14 replication publication fencing with immutable per-job
   source manifest pins, decimal monotonic sequences, filesystem/S3 conditional
   writes, CAS conflict rechecks, lease-loss cancellation, idempotent/superseded
