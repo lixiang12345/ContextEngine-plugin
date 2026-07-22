@@ -278,6 +278,7 @@ program
     "passage reduction under the token cap: raw | extractive",
     "raw",
   )
+  .option("--no-rules", "skip workspace rule files (AGENTS.md, CLAUDE.md, …)")
   .option("--json", "JSON output")
   .action(
     async (
@@ -288,6 +289,7 @@ program
         topK: string;
         maxTokens?: string;
         packing?: string;
+        rules?: boolean;
         json?: boolean;
       },
     ) => {
@@ -300,6 +302,7 @@ program
         topK: Number(opts.topK) || 12,
         maxTokens: optionalPositiveInteger(opts.maxTokens),
         packing: opts.packing === "extractive" ? "extractive" : "raw",
+        includeRules: opts.rules !== false,
       });
       await engine.close();
       if (opts.json) {
@@ -319,6 +322,7 @@ program
               ? `degraded: ${trace.degradedChannels.join(",")}`
               : null,
             `files: ${trace.fileCount}`,
+            trace.rules && trace.rules.length ? `rules: ${trace.rules.length}` : null,
             trace.generationId ? `gen: ${trace.generationId.slice(0, 8)}` : null,
           ]
             .filter(Boolean)

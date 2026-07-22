@@ -23,6 +23,11 @@ import { PostgresHybridSearcher } from "./search/postgres-hybrid.js";
 import { createEmbeddingProvider } from "./embeddings/provider.js";
 import { readTextFile } from "./util/fs.js";
 import { analyzeQuery } from "./search/query-analyzer.js";
+import {
+  loadWorkspaceRules,
+  formatRulesSection,
+  type WorkspaceRule,
+} from "./rules/rules-loader.js";
 
 /**
  * High-level Context Engine API (v0.4 multi-signal retrieval).
@@ -137,6 +142,13 @@ export class ContextEngine {
     const salientTerms =
       packing === "extractive" ? buildSalientTerms(analyzed) : null;
 
+    // Repository conventions (AGENTS.md / CLAUDE.md / .augment/rules …) are
+    // grounded ahead of matching code so the agent always sees how the repo
+    // wants changes made, not just where the relevant code is. Opt-out via
+    // includeRules: false. Only the primary root is scanned.
+    const rules: WorkspaceRule[] =
+      opts.includeRules === false ? [] : loadWorkspaceRules(this.config.root);
+
     const hits = await this.search({
       query: opts.task,
       topK,
@@ -177,6 +189,19 @@ export class ContextEngine {
     let packedText = fitTextToCharBudget(headerText, headerBudget);
     let truncated =
       headerBudget !== undefined && packedText.length < headerText.length;
+
+    // Prepend workspace rules under a bounded share of the budget (at most a
+    // quarter) so conventions never crowd out the retrieved code evidence.
+    if (rules.length && !truncated) {
+      const rulesBudget =
+        charBudget === undefined
+          ? undefined
+          : Math.max(0, Math.floor(charBudget / 4) - packedText.length);
+      if (rulesBudget === undefined || rulesBudget > 0) {
+        const rulesSection = formatRulesSection(rules, rulesBudget);
+        if (rulesSection) packedText += `\n${rulesSection}\n`;
+      }
+    }
     const used: SearchHit[] = [];
 
     for (const hit of orderedHits) {
@@ -239,6 +264,9 @@ export class ContextEngine {
       concepts,
       channels,
       degradedChannels,
+      rules: rules.length
+        ? rules.map((rule) => ({ path: rule.path, scope: rule.scope }))
+        : undefined,
       candidateCount: hits.length,
       packedCount: used.length,
       fileCount: new Set(used.map((hit) => hit.chunk.path)).size,
@@ -274,6 +302,7 @@ export class ContextEngine {
       maxTokens?: number;
       sourceAccess?: import("./types.js").SourcePathPolicy;
       packing?: PackingPolicy;
+      includeRules?: boolean;
     },
   ): Promise<PackedContext> {
     return this.getTaskContext({
@@ -283,6 +312,7 @@ export class ContextEngine {
       sourceAccess: opts?.sourceAccess,
       diversify: true,
       packing: opts?.packing,
+      includeRules: opts?.includeRules,
     });
   }
 

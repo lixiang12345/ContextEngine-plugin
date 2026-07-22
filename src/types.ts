@@ -152,6 +152,12 @@ export interface TaskContextOptions {
   diversify?: boolean;
   /** Passage reduction strategy under a token budget (default `raw`). */
   packing?: PackingPolicy;
+  /**
+   * Prepend workspace rules / conventions (AGENTS.md, CLAUDE.md,
+   * .augment/rules, .cursor/rules) as a grounding preamble. Default true;
+   * pass false to omit them.
+   */
+  includeRules?: boolean;
 }
 
 export type SourceAccessEffect = "allow" | "deny";
@@ -198,6 +204,11 @@ export interface RetrievalTrace {
   truncated: boolean;
   /** Passage reduction strategy applied. */
   packing: PackingPolicy;
+  /**
+   * Workspace rules grounded into the packed context (AGENTS.md, CLAUDE.md,
+   * .augment/rules …), with their precedence scope. Absent when none apply.
+   */
+  rules?: Array<{ path: string; scope: "always" | "agent-requested" }>;
   /** Immutable index generation that served the query. */
   generationId?: string;
   /** Revision of the generation currently serving queries. */

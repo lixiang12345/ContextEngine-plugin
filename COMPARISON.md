@@ -37,6 +37,7 @@ For the detailed capability-to-code audit and staged roadmap, see
 | Non-code sources (docs, wikis, tickets) | ⚠️ provider-neutral plugin SDK and content-addressed Blobs; GitHub built in | ✅ packaged website and GitHub/GitLab/Bitbucket connectors | **Medium–High** |
 | Commit / history context | ✅ recent git log as searchable chunks | ✅ deeper Context Lineage / history products | Medium |
 | Symbol / dependency awareness | ✅ symbol table + import graph expand | ✅ deeper codebase understanding (proprietary) | Medium |
+| Rules / team knowledge | ✅ discovers `AGENTS.md`/`CLAUDE.md`/`.augment`+`.cursor/rules`, merges by always/agent-requested precedence, grounds a bounded preamble into packed context | ✅ rules with always / agent-requested precedence in the CLI | Low–Medium |
 | Team index sharing | ✅ shared PostgreSQL workspace namespaces | ✅ S3/object-store sharing and hosted team indexes | Medium–High |
 | Enterprise security / auth | ⚠️ Bearer auth, root allowlist, path/URL boundary checks | ✅ source permissions, policy controls, proof-of-possession, trust center | **High** |
 | Benchmarked agent quality lift | ⚠️ Recall/MRR/nDCG plus repeated paired PR orchestration and a 3-case fixed internal corpus; no real-model result yet | ✅ published PR benchmarks (e.g. Elasticsearch 300 PRs) | **High** |

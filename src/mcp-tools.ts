@@ -38,6 +38,12 @@ const retrievalSchema = {
     .describe(
       "Passage reduction when max_tokens is tight: 'extractive' keeps query-relevant lines, 'raw' keeps leading characters (default).",
     ),
+  include_rules: z
+    .boolean()
+    .optional()
+    .describe(
+      "Prepend workspace convention files (AGENTS.md, CLAUDE.md, .augment/rules) as a grounding preamble. Default true.",
+    ),
 };
 
 /**
@@ -55,11 +61,13 @@ export function registerCodebaseRetrievalTools(
     top_k,
     max_tokens,
     packing,
+    include_rules,
   }: {
     information_request: string;
     top_k?: number;
     max_tokens?: number;
     packing?: "raw" | "extractive";
+    include_rules?: boolean;
   }) => {
     try {
       const engine = await runtime.ensureReady();
@@ -69,6 +77,7 @@ export function registerCodebaseRetrievalTools(
         maxTokens: max_tokens,
         sourceAccess,
         packing,
+        includeRules: include_rules,
       });
       return {
         content: [{ type: "text" as const, text: packed.packedText }],

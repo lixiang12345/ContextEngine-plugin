@@ -147,6 +147,8 @@ describe("observability dashboard", () => {
     // Packed views accept a token budget and render a fill gauge against it.
     assert.match(dashboard, /id="probeMaxTokens"/);
     assert.match(dashboard, /budget-track/);
+    // Workspace rules grounded into the pack are surfaced in the trace panel.
+    assert.match(dashboard, /var ruleChips/);
     assert.doesNotMatch(dashboard, /<script[^>]+src=/i);
     assert.doesNotMatch(dashboard, /<link[^>]+href=["']https?:/i);
 

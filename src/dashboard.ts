@@ -1249,6 +1249,10 @@ export function observabilityDashboardHtml(): string {
     var conceptChips = (trace.concepts || []).slice(0, 12).map(function (name) {
       return "<span class=\"trace-chip\">" + escapeHtml(name) + "</span>";
     }).join("");
+    var ruleChips = (trace.rules || []).map(function (rule) {
+      var tone = rule.scope === "always" ? "" : " warn";
+      return "<span class=\"trace-chip" + tone + "\" title=\"" + escapeHtml(rule.path) + " (" + escapeHtml(rule.scope) + ")\">" + escapeHtml(rule.path) + "</span>";
+    }).join("");
     var candidateCount = trace.candidateCount == null ? trace.candidate_count : trace.candidateCount;
     var packedCount = trace.packedCount == null ? trace.packed_count : trace.packedCount;
     var fileCount = trace.fileCount == null ? trace.file_count : trace.fileCount;
@@ -1269,6 +1273,7 @@ export function observabilityDashboardHtml(): string {
     }
     items.push(["Channels", "<div class=\"trace-chips\">" + (channelChips || "<span class=\"section-note\">none</span>") + "</div>"]);
     if (conceptChips) items.push(["Understood", "<div class=\"trace-chips\">" + conceptChips + "</div>"]);
+    if (ruleChips) items.push(["Rules", "<div class=\"trace-chips\">" + ruleChips + "</div>"]);
     if (degradedChips) items.push(["Degraded", "<div class=\"trace-chips\">" + degradedChips + "</div>"]);
     if (generationId) items.push(["Generation", "<span class=\"mono\">" + escapeHtml(String(generationId).slice(0, 12)) + "</span>"]);
     panel.className = "trace-panel visible";

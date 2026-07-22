@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { ContextEngine } from "../src/engine";
 import type { SearchHit, SearchOptions } from "../src/types";
 
@@ -14,9 +17,10 @@ class StubContextEngine extends ContextEngine {
       indexedRevision?: string;
       pendingRevision?: string;
     },
+    root = "/repo",
   ) {
     super({
-      root: "/repo",
+      root,
       dataDir: "/tmp/contextengine-test",
       maxFileBytes: 1_000_000,
       maxChunkChars: 20_000,
@@ -319,5 +323,53 @@ describe("context packing", () => {
     assert.match(extractive.packedText, /refundHandler\(req\)/);
     assert.ok(extractive.trace);
     assert.ok(extractive.trace.fileCount >= 2);
+  });
+
+  test("prepends workspace rules and records them in the trace", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ce-rules-pack-"));
+    try {
+      writeFileSync(
+        path.join(root, "AGENTS.md"),
+        "# Conventions\n\nAlways validate input at the boundary.\n",
+      );
+      const engine = new StubContextEngine(
+        [hit("a", "src/a.ts", "export const a = 1;", 1)],
+        undefined,
+        root,
+      );
+
+      const result = await engine.getTaskContext({ task: "a", topK: 1 });
+
+      assert.match(result.packedText, /# Workspace rules/);
+      assert.match(result.packedText, /validate input at the boundary/);
+      assert.ok(result.trace?.rules);
+      assert.equal(result.trace.rules[0].path, "AGENTS.md");
+      assert.equal(result.trace.rules[0].scope, "always");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("omits workspace rules when includeRules is false", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ce-rules-off-"));
+    try {
+      writeFileSync(path.join(root, "AGENTS.md"), "# Conventions\n\nRule body.\n");
+      const engine = new StubContextEngine(
+        [hit("a", "src/a.ts", "export const a = 1;", 1)],
+        undefined,
+        root,
+      );
+
+      const result = await engine.getTaskContext({
+        task: "a",
+        topK: 1,
+        includeRules: false,
+      });
+
+      assert.doesNotMatch(result.packedText, /# Workspace rules/);
+      assert.equal(result.trace?.rules, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

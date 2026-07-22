@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added a workspace rules layer that grounds packed context in repository
+  conventions the way Augment loads team knowledge. `getTaskContext` discovers
+  `AGENTS.md`, `CLAUDE.md`, and `.augment/rules` / `.cursor/rules` entries,
+  merges them by precedence (root convention files always apply; directory
+  rules default to agent-requested, honoring an `alwaysApply` frontmatter flag),
+  and prepends a bounded rules preamble (at most a quarter of the token budget)
+  ahead of the retrieved code. The applied rules and their scope are recorded in
+  `RetrievalTrace.rules` and surfaced across the CLI (`context`, `--no-rules`),
+  HTTP (`include_rules`), MCP (`include_rules`), and the dashboard trace panel.
+  Opt out with `includeRules: false`. No rule files means no behavior change.
+
 - Updated `COMPARISON.md` to reflect shipped capability: added honest
   "Context curation / packing" and "Retrieval transparency" rows to the feature
   table, and corrected the roadmap so extractive packing with explicit token

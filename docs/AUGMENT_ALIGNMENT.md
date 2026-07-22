@@ -26,7 +26,7 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 | 历史和关系 | 官方宣传 commit history、codebase patterns、服务依赖和跨 repo 关系 | git commit chunks、symbol/import graph expansion | 中到高：缺跨仓库关系图和更深的 lineage |
 | Connectors | 官方提供 GitHub/GitLab/Bitbucket、网站、webhook、GitHub Actions、S3，以及 custom indexer/client/store | provider-neutral `SourceConnectorPlugin`、内置四类来源、source-scoped CI trigger/provenance、可插拔 team snapshot store、复制目标、持久调度、filesystem/S3 CAS、attempt/event 审计和异步 HTTP 管理 API | 低：缺托管安装 API与目标 probe/容量能力 |
 | SDK / 自定义来源 | `DirectContext` 可把 API、数据库、memory、磁盘内容加入索引并保存状态 | TypeScript `ContextEngine` API；输入主要是本地树或 HTTP Blob | 中到高 |
-| 规则和团队知识 | CLI 支持 `AGENTS.md`、`CLAUDE.md`、`.augment/rules`、用户规则和 agent-requested 规则 | 仓库可读取代码/文档，但没有规则解析、优先级和持久化 memory 层 | 高 |
+| 规则和团队知识 | CLI 支持 `AGENTS.md`、`CLAUDE.md`、`.augment/rules`、用户规则和 agent-requested 规则 | 已实现 workspace 规则加载器：发现 `AGENTS.md`/`CLAUDE.md`/`.augment/rules`/`.cursor/rules`，按 always/agent-requested 优先级合并，作为有界前言注入 `getTaskContext`（CLI/MCP/HTTP `include_rules` 可关，trace 记录来源与 scope）；仍缺用户级规则与持久化 memory 层 | 中：核心规则 grounding 已具备 |
 | 权限 | Auggie/Cosmos 支持 allow/deny、脚本或 webhook policy、工具级匹配和审计语义 | API Key/OIDC principal、workspace ACL、schema v7 source/path ACL、local-root allowlist、模型 URL SSRF 防护、路径边界校验 | 中到高：缺 connector 权限快照、外部策略 webhook 和完整审计流 |
 | 自动更新 | Remote default branch 随 push 更新；Connectors 提供 webhook/GitHub Actions | 本地 watcher、签名 GitHub/GitLab/Bitbucket push webhook、可安装 source-scoped CI workflow、CI provenance 与 HTTP sync/index jobs | 低：缺托管安装 API |
 | 团队索引共享 | 官方文档给出 S3 store/team sharing | 可共享 PostgreSQL workspace；版本化 snapshot 支持 content-addressed gzip、checksum、atomic generation import、filesystem/S3-compatible store、list/delete、retention prune/GC、复制目标、数据库时钟调度、吞吐/延迟/告警、source manifest pin、目标单调 CAS、attempt history 与可重放跨实例 SSE，以及带 claim/lease/fencing 的 owner 异步 HTTP jobs | 低：缺容量探测与大规模压测 |
@@ -88,7 +88,7 @@ Augment 产品页中的“数十万文件”“更少 token 仍达到相近 solv
 
 - source-level ACL（repo/path/document）已在检索、file read、MCP 三层强制执行；继续增加 provider permission snapshot 和审计事件。
 - 为来源保存 connector identity、commit/cursor、权限快照和可验证 provenance；拒绝只在 UI 层过滤。
-- 增加 `.augment/rules` 类规则加载器与 `AGENTS.md` 层级合并，明确 always/agent-requested 优先级。
+- 已实现 `.augment/rules`/`.cursor/rules` 规则加载器与 `AGENTS.md`/`CLAUDE.md` 层级合并，明确 always/agent-requested 优先级，并作为有界前言注入打包上下文；下一步增加用户级规则与持久化 memory 层。
 - 提供对象存储 index snapshot/import，支持团队共享但不泄露原始代码。
 
 ## 官方参考链接
