@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added the analyzer's understood concepts (identifiers and expanded query
+  terms) to the retrieval trace as `RetrievalTrace.concepts`, surfaced as an
+  "Understood" chip row in the dashboard trace panel and a `concepts:` field in
+  the `context` CLI summary — the "understood:" breakdown of what the engine
+  extracted from the query. Also fixed the dashboard token-budget gauge, which
+  never rendered because `renderTrace` did not accept the requested budget.
 - Added a max-tokens control and a token-budget gauge to the dashboard retrieval
   probe. Packed views can now set an explicit output cap so the `raw` and
   `extractive` policies can be exercised from the UI, and the trace panel renders

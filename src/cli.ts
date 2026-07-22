@@ -311,6 +311,9 @@ program
       const traceLine = trace
         ? [
             `intent: ${trace.intent}`,
+            trace.concepts.length
+              ? `understood: ${trace.concepts.slice(0, 6).join(", ")}`
+              : null,
             trace.channels.length ? `channels: ${trace.channels.join("+")}` : null,
             trace.degradedChannels.length
               ? `degraded: ${trace.degradedChannels.join(",")}`

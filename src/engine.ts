@@ -227,8 +227,16 @@ export class ContextEngine {
         ),
       ),
     ];
+    const concepts = [
+      ...new Set(
+        [...analyzed.identifiers, ...analyzed.expandedTerms]
+          .map((term) => term.trim())
+          .filter((term) => term.length >= 2),
+      ),
+    ].slice(0, 12);
     const trace: RetrievalTrace = {
       intent: analyzed.intent,
+      concepts,
       channels,
       degradedChannels,
       candidateCount: hits.length,

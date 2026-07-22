@@ -176,6 +176,12 @@ export interface SourcePathPolicy {
 export interface RetrievalTrace {
   /** Query intent classified by the analyzer (symbol/path/concept/...). */
   intent: string;
+  /**
+   * Salient concepts the analyzer extracted from the query — identifiers and
+   * expanded terms the retrieval channels actually keyed on. Surfaces "what the
+   * engine understood" for a query without exposing internal scoring.
+   */
+  concepts: string[];
   /** Retrieval channels that produced a score on at least one candidate. */
   channels: string[];
   /** Channels that were unavailable and forced a degraded result. */

@@ -1237,7 +1237,7 @@ export function observabilityDashboardHtml(): string {
     return "<div class=\"channel-chips\">" + chips.join("") + "</div>";
   }
 
-  function renderTrace(trace) {
+  function renderTrace(trace, tokenBudget) {
     var panel = byId("probeTrace");
     if (!trace) { panel.className = "trace-panel"; panel.innerHTML = ""; return; }
     var channelChips = (trace.channels || []).map(function (name) {
@@ -1246,18 +1246,29 @@ export function observabilityDashboardHtml(): string {
     var degradedChips = (trace.degradedChannels || trace.degraded_channels || []).map(function (name) {
       return "<span class=\"trace-chip warn\">" + escapeHtml(name) + "</span>";
     }).join("");
+    var conceptChips = (trace.concepts || []).slice(0, 12).map(function (name) {
+      return "<span class=\"trace-chip\">" + escapeHtml(name) + "</span>";
+    }).join("");
     var candidateCount = trace.candidateCount == null ? trace.candidate_count : trace.candidateCount;
     var packedCount = trace.packedCount == null ? trace.packed_count : trace.packedCount;
     var fileCount = trace.fileCount == null ? trace.file_count : trace.fileCount;
     var generationId = trace.generationId || trace.generation_id;
+    var estTokens = Number(trace.estimatedTokens == null ? trace.estimated_tokens : trace.estimatedTokens) || 0;
     var items = [
       ["Intent", escapeHtml(trace.intent || "--")],
       ["Packing", escapeHtml(trace.packing || "raw")],
       ["Candidates", number(candidateCount) + " → " + number(packedCount) + " packed"],
       ["Files", number(fileCount)],
-      ["Est. tokens", number(trace.estimatedTokens == null ? trace.estimated_tokens : trace.estimatedTokens) + (trace.truncated ? " · capped" : "")],
-      ["Channels", "<div class=\"trace-chips\">" + (channelChips || "<span class=\"section-note\">none</span>") + "</div>"],
     ];
+    if (tokenBudget && tokenBudget > 0) {
+      var pct = Math.min(100, Math.round((estTokens / tokenBudget) * 100));
+      var tone = pct >= 100 ? " over" : pct >= 80 ? " near" : "";
+      items.push(["Token budget", number(estTokens) + " / " + number(tokenBudget) + (trace.truncated ? " · capped" : "") + "<div class=\"budget-track\"><div class=\"budget-fill" + tone + "\" style=\"width:" + pct + "%\"></div></div>"]);
+    } else {
+      items.push(["Est. tokens", number(estTokens) + (trace.truncated ? " · capped" : "")]);
+    }
+    items.push(["Channels", "<div class=\"trace-chips\">" + (channelChips || "<span class=\"section-note\">none</span>") + "</div>"]);
+    if (conceptChips) items.push(["Understood", "<div class=\"trace-chips\">" + conceptChips + "</div>"]);
     if (degradedChips) items.push(["Degraded", "<div class=\"trace-chips\">" + degradedChips + "</div>"]);
     if (generationId) items.push(["Generation", "<span class=\"mono\">" + escapeHtml(String(generationId).slice(0, 12)) + "</span>"]);
     panel.className = "trace-panel visible";

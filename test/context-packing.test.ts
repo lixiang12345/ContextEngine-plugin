@@ -222,7 +222,10 @@ describe("context packing", () => {
       indexedAt: "2026-07-20T12:00:00.000Z",
     });
 
-    const result = await engine.getTaskContext({ task: "traced", topK: 1 });
+    const result = await engine.getTaskContext({
+      task: "resolveUserSession authentication",
+      topK: 1,
+    });
 
     assert.ok(result.trace);
     assert.equal(result.trace.generationId, "generation-7");
@@ -234,6 +237,9 @@ describe("context packing", () => {
     assert.deepEqual([...result.trace.channels].sort(), ["fts", "semantic"]);
     assert.deepEqual(result.trace.degradedChannels, ["graph"]);
     assert.equal(result.trace.estimatedTokens, result.estimatedTokens);
+    // Concepts mirror the analyzer's "understood" list (identifiers + terms).
+    assert.ok(Array.isArray(result.trace.concepts));
+    assert.ok(result.trace.concepts.includes("resolveUserSession"));
   });
 
   test("extractive packing keeps query-salient lines a raw cap would drop", async () => {
