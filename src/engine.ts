@@ -136,6 +136,7 @@ export class ContextEngine {
       query: opts.task,
       topK,
       pathPrefix: opts.pathPrefix,
+      sourceAccess: opts.sourceAccess,
       mode: "auto",
       diversify: opts.diversify !== false,
       includeCommits: analyzed.prefersCommits ? true : undefined,
@@ -226,12 +227,14 @@ export class ContextEngine {
     opts?: {
       topK?: number;
       maxTokens?: number;
+      sourceAccess?: import("./types.js").SourcePathPolicy;
     },
   ): Promise<PackedContext> {
     return this.getTaskContext({
       task: informationRequest,
       topK: opts?.topK ?? 14,
       maxTokens: opts?.maxTokens,
+      sourceAccess: opts?.sourceAccess,
       diversify: true,
     });
   }

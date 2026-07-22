@@ -3,6 +3,11 @@ import { Pool, type PoolClient, type QueryResultRow } from "pg";
 import { PostgresStore } from "../store/postgres-store.js";
 import { languageForPath } from "../util/fs.js";
 import { sha256 } from "../util/hash.js";
+import type {
+  SourceAccessEffect,
+  SourcePathPolicy,
+  SourcePathRule,
+} from "../types.js";
 
 export type WorkspaceSourceMode = "blob" | "local";
 export type SyncOperation = "upsert" | "delete" | "rename";
@@ -132,6 +137,13 @@ export interface StoredSourceDocument {
   rootAlias: string;
 }
 
+export interface StoredSourceAccessPolicy extends SourcePathPolicy {
+  workspaceId: string;
+  principalId: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
 export interface StoredIndexJob {
   id: string;
   workspaceId: string;
@@ -225,6 +237,16 @@ interface McpSessionRow extends QueryResultRow {
   updated_at: string | Date;
 }
 
+interface SourceAccessPolicyRow extends QueryResultRow {
+  workspace_id: string;
+  principal_id: string;
+  default_access: SourceAccessEffect;
+  updated_by: string;
+  updated_at: string | Date;
+  path_prefix: string | null;
+  effect: SourceAccessEffect | null;
+}
+
 type AdvisoryLockClient = PoolClient;
 
 export class WorkspaceNotFoundError extends Error {
@@ -259,6 +281,13 @@ export class SyncPlanExpiredError extends Error {
   constructor(message = "Sync session has expired") {
     super(message);
     this.name = "SyncPlanExpiredError";
+  }
+}
+
+export class SourceAccessPolicyTargetError extends Error {
+  constructor() {
+    super("Source access policy principal must have workspace access");
+    this.name = "SourceAccessPolicyTargetError";
   }
 }
 
@@ -382,6 +411,59 @@ export function workspacePermissionAllows(
   required: WorkspacePermission,
 ): boolean {
   return actual !== null && permissionRank[actual] >= permissionRank[required];
+}
+
+export function sourcePathAllowed(
+  policy: SourcePathPolicy | null | undefined,
+  sourcePath: string,
+): boolean {
+  if (!policy) return true;
+  let selected: SourcePathRule | null = null;
+  for (const rule of policy.rules) {
+    if (
+      sourcePath !== rule.pathPrefix &&
+      !sourcePath.startsWith(`${rule.pathPrefix}/`)
+    ) {
+      continue;
+    }
+    if (
+      !selected ||
+      rule.pathPrefix.length > selected.pathPrefix.length ||
+      (rule.pathPrefix.length === selected.pathPrefix.length &&
+        rule.effect === "deny")
+    ) {
+      selected = rule;
+    }
+  }
+  return (selected?.effect ?? policy.defaultAccess) === "allow";
+}
+
+function sourceAccessPoliciesFromRows(
+  rows: readonly SourceAccessPolicyRow[],
+): StoredSourceAccessPolicy[] {
+  const policies = new Map<string, StoredSourceAccessPolicy>();
+  for (const row of rows) {
+    const key = `${row.workspace_id}\0${row.principal_id}`;
+    let policy = policies.get(key);
+    if (!policy) {
+      policy = {
+        workspaceId: row.workspace_id,
+        principalId: row.principal_id,
+        defaultAccess: row.default_access,
+        rules: [],
+        updatedBy: row.updated_by,
+        updatedAt: iso(row.updated_at)!,
+      };
+      policies.set(key, policy);
+    }
+    if (row.path_prefix && row.effect) {
+      (policy.rules as SourcePathRule[]).push({
+        pathPrefix: row.path_prefix,
+        effect: row.effect,
+      });
+    }
+  }
+  return [...policies.values()];
 }
 
 function decodeText(content: Buffer): string | null {
@@ -813,6 +895,121 @@ export class WorkspaceRepository {
   ): Promise<boolean> {
     const result = await this.pool.query(
       `DELETE FROM ce_workspace_acl
+       WHERE workspace_id = $1 AND principal_id = $2
+       RETURNING workspace_id`,
+      [workspaceId, principalId],
+    );
+    return Boolean(result.rows[0]);
+  }
+
+  async getSourceAccessPolicy(
+    workspaceId: string,
+    principalId: string,
+  ): Promise<StoredSourceAccessPolicy | null> {
+    const result = await this.pool.query<SourceAccessPolicyRow>(
+      `SELECT policy.workspace_id, policy.principal_id, policy.default_access,
+              policy.updated_by, policy.updated_at,
+              rule.path_prefix, rule.effect
+       FROM ce_source_access_policies AS policy
+       LEFT JOIN ce_source_access_rules AS rule
+         ON rule.workspace_id = policy.workspace_id
+        AND rule.principal_id = policy.principal_id
+       WHERE policy.workspace_id = $1 AND policy.principal_id = $2
+       ORDER BY rule.path_prefix`,
+      [workspaceId, principalId],
+    );
+    return sourceAccessPoliciesFromRows(result.rows)[0] ?? null;
+  }
+
+  async listSourceAccessPolicies(
+    workspaceId: string,
+  ): Promise<StoredSourceAccessPolicy[]> {
+    await this.requireWorkspace(workspaceId);
+    const result = await this.pool.query<SourceAccessPolicyRow>(
+      `SELECT policy.workspace_id, policy.principal_id, policy.default_access,
+              policy.updated_by, policy.updated_at,
+              rule.path_prefix, rule.effect
+       FROM ce_source_access_policies AS policy
+       LEFT JOIN ce_source_access_rules AS rule
+         ON rule.workspace_id = policy.workspace_id
+        AND rule.principal_id = policy.principal_id
+       WHERE policy.workspace_id = $1
+       ORDER BY policy.principal_id, rule.path_prefix`,
+      [workspaceId],
+    );
+    return sourceAccessPoliciesFromRows(result.rows);
+  }
+
+  async setSourceAccessPolicy(input: {
+    workspaceId: string;
+    principalId: string;
+    defaultAccess: SourceAccessEffect;
+    rules: readonly SourcePathRule[];
+    updatedBy: string;
+  }): Promise<StoredSourceAccessPolicy> {
+    if (input.rules.length > 256) {
+      throw new Error("Source access policy cannot exceed 256 rules");
+    }
+    const prefixes = new Set<string>();
+    for (const rule of input.rules) {
+      if (prefixes.has(rule.pathPrefix)) {
+        throw new Error("Source access policy path prefixes must be unique");
+      }
+      prefixes.add(rule.pathPrefix);
+    }
+    await this.withTransaction(async (client) => {
+      const member = await client.query(
+        `SELECT 1 FROM ce_workspace_acl
+         WHERE workspace_id = $1 AND principal_id = $2
+         FOR UPDATE`,
+        [input.workspaceId, input.principalId],
+      );
+      if (!member.rows[0]) throw new SourceAccessPolicyTargetError();
+      await client.query(
+        `INSERT INTO ce_source_access_policies(
+           workspace_id, principal_id, default_access, updated_by
+         ) VALUES ($1, $2, $3, $4)
+         ON CONFLICT(workspace_id, principal_id) DO UPDATE
+         SET default_access = excluded.default_access,
+             updated_by = excluded.updated_by,
+             updated_at = now()`,
+        [
+          input.workspaceId,
+          input.principalId,
+          input.defaultAccess,
+          input.updatedBy,
+        ],
+      );
+      await client.query(
+        `DELETE FROM ce_source_access_rules
+         WHERE workspace_id = $1 AND principal_id = $2`,
+        [input.workspaceId, input.principalId],
+      );
+      if (input.rules.length) {
+        await client.query(
+          `INSERT INTO ce_source_access_rules(
+             workspace_id, principal_id, path_prefix, effect
+           )
+           SELECT $1, $2, rule.path_prefix, rule.effect
+           FROM unnest($3::text[], $4::text[]) AS rule(path_prefix, effect)`,
+          [
+            input.workspaceId,
+            input.principalId,
+            input.rules.map((rule) => rule.pathPrefix),
+            input.rules.map((rule) => rule.effect),
+          ],
+        );
+      }
+    });
+    return (await this.getSourceAccessPolicy(input.workspaceId, input.principalId))!;
+  }
+
+  async removeSourceAccessPolicy(
+    workspaceId: string,
+    principalId: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      `DELETE FROM ce_source_access_policies
        WHERE workspace_id = $1 AND principal_id = $2
        RETURNING workspace_id`,
       [workspaceId, principalId],

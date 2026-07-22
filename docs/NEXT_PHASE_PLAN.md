@@ -4,10 +4,10 @@
 
 起始基线：`3420ddf` (`main`)
 
-当前数据库：PostgreSQL schema v6
+当前数据库：PostgreSQL schema v7
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `159/159` 通过。
+全量测试 `162/162` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -21,6 +21,12 @@ discovery/JWKS、显式算法白名单、issuer/audience/lifetime/key-use 校验
 限频刷新、稳定 issuer+subject principal 和显式 operator group 映射。现有 API Key
 继续可用；OIDC-only 部署自动启用 workspace ACL。全量 PostgreSQL 回归和
 OIDC HTTP/MCP token-rotation 集成测试已通过，下一阶段进入 source-level ACL。
+
+Phase 3 状态（2026-07-22）：schema v7 已加入 source/path policy 与最长前缀优先
+规则；管理 API、PostgreSQL lexical/semantic/symbol/path/graph 查询、`/file`、
+`/context` 和 Remote MCP 已共用同一策略。活跃 MCP session 的下一次工具调用会重新
+读取策略。全量回归、schema 迁移与活跃 MCP session 撤权测试已通过，下一阶段进入
+connector webhook/SDK 扩展。
 
 ## 1. 目标
 
@@ -187,8 +193,9 @@ Phase 1 完成后按以下顺序继续，避免在身份与隔离基础不稳时
 1. **OAuth/OIDC（已完成）**：issuer/audience/JWKS 校验、key
    rotation、subject/group 映射，兼容现有 API key；禁止从未验证的 token claim
    直接授予 operator。
-2. **source-level ACL**：repo/path/document 权限在 retrieval、file read、MCP 三层强制
-   执行，并保存 connector permission snapshot 与 provenance。
+2. **source-level ACL（路径策略已实现）**：repo/path/document 权限已在 retrieval、
+   file read、MCP 三层强制执行；后续 connector 阶段继续补 provider permission
+   snapshot 与 provenance。
 3. **connector SDK + webhook**：抽象 `listChanges/readBlob/commitCursor/watch`，增加
    GitLab、静态网站和签名 webhook；事件 idempotency 与 cursor commit 必须原子化。
 4. **PR 评测扩容**：公共多仓库 corpus、受控真实模型重复实验、token/tool-call/P95 与

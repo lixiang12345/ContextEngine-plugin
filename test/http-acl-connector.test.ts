@@ -37,6 +37,12 @@ describePostgres("principal ACL and GitHub connector", () => {
     "}",
     "",
   ].join("\n");
+  const githubPrivateContent = [
+    "export function privateBillingCredential() {",
+    "  return 'source-acl-must-hide-this';",
+    "}",
+    "",
+  ].join("\n");
   const schema = `ce_acl_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const adminDatabase = new Pool({ connectionString: databaseUrl! });
   let mockGitHub: Server;
@@ -74,6 +80,12 @@ describePostgres("principal ACL and GitHub connector", () => {
                 sha: "github-blob-1",
                 size: Buffer.byteLength(githubContent),
               },
+              {
+                type: "blob",
+                path: "private/billing-credential.ts",
+                sha: "github-private-blob-1",
+                size: Buffer.byteLength(githubPrivateContent),
+              },
             ],
           }),
         );
@@ -85,6 +97,16 @@ describePostgres("principal ACL and GitHub connector", () => {
             encoding: "base64",
             content: Buffer.from(githubContent).toString("base64"),
             size: Buffer.byteLength(githubContent),
+          }),
+        );
+        return;
+      }
+      if (request.url?.includes("/git/blobs/github-private-blob-1")) {
+        response.end(
+          JSON.stringify({
+            encoding: "base64",
+            content: Buffer.from(githubPrivateContent).toString("base64"),
+            size: Buffer.byteLength(githubPrivateContent),
           }),
         );
         return;
@@ -285,7 +307,10 @@ describePostgres("principal ACL and GitHub connector", () => {
       changed_paths: string[];
     };
     assert.equal(syncPayload.noop, false);
-    assert.deepEqual(syncPayload.changed_paths, ["src/connector-permission.ts"]);
+    assert.deepEqual(syncPayload.changed_paths, [
+      "private/billing-credential.ts",
+      "src/connector-permission.ts",
+    ]);
     await waitForJob("alice", syncPayload.index_job.id);
 
     const filePath = "src%2Fconnector-permission.ts";
@@ -309,6 +334,17 @@ describePostgres("principal ACL and GitHub connector", () => {
     assert.equal(repeatedPayload.noop, true);
     assert.equal(repeatedPayload.index_job, null);
 
+    const policyWithoutWorkspaceAccess = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/source-acl/bob`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ default_access: "deny", rules: [] }),
+      },
+    );
+    assert.equal(policyWithoutWorkspaceAccess.status, 409);
+
     const granted = await request(
       "alice",
       `/v1/workspaces/${workspaceId}/acl/bob`,
@@ -319,10 +355,54 @@ describePostgres("principal ACL and GitHub connector", () => {
       },
     );
     assert.equal(granted.status, 200);
+    const sourcePolicy = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/source-acl/bob`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          default_access: "deny",
+          rules: [{ path_prefix: "src", effect: "allow" }],
+        }),
+      },
+    );
+    assert.equal(sourcePolicy.status, 200);
     assert.equal(
       (await request("bob", `/v1/workspaces/${workspaceId}/file?path=${filePath}`)).status,
       200,
     );
+    assert.equal(
+      (
+        await request(
+          "bob",
+          `/v1/workspaces/${workspaceId}/file?path=private%2Fbilling-credential.ts`,
+        )
+      ).status,
+      404,
+    );
+    const hiddenSearch = await request(
+      "bob",
+      `/v1/workspaces/${workspaceId}/search`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: "privateBillingCredential", mode: "bm25" }),
+      },
+    );
+    assert.equal(hiddenSearch.status, 200);
+    assert.doesNotMatch(await hiddenSearch.text(), /privateBillingCredential/);
+    const hiddenContext = await request(
+      "bob",
+      `/v1/workspaces/${workspaceId}/context`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "privateBillingCredential" }),
+      },
+    );
+    assert.equal(hiddenContext.status, 200);
+    assert.doesNotMatch(await hiddenContext.text(), /source-acl-must-hide-this/);
     assert.equal(
       (
         await request(
@@ -370,6 +450,55 @@ describePostgres("principal ACL and GitHub connector", () => {
     const bobSession = bobMcp.headers.get("mcp-session-id");
     assert.ok(bobSession);
 
+    const hiddenMcp = await request("bob", `/v1/workspaces/${workspaceId}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": bobSession! },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "codebase-retrieval",
+          arguments: { information_request: "privateBillingCredential", top_k: 10 },
+        },
+      }),
+    });
+    assert.equal(hiddenMcp.status, 200);
+    assert.doesNotMatch(await hiddenMcp.text(), /source-acl-must-hide-this/);
+
+    const replacedPolicy = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/source-acl/bob`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          default_access: "allow",
+          rules: [{ path_prefix: "src", effect: "deny" }],
+        }),
+      },
+    );
+    assert.equal(replacedPolicy.status, 200);
+    const revokedDuringSession = await request(
+      "bob",
+      `/v1/workspaces/${workspaceId}/mcp`,
+      {
+        method: "POST",
+        headers: { ...mcpHeaders, "mcp-session-id": bobSession! },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "codebase-retrieval",
+            arguments: { information_request: "connectorPermission", top_k: 10 },
+          },
+        }),
+      },
+    );
+    assert.equal(revokedDuringSession.status, 200);
+    assert.doesNotMatch(await revokedDuringSession.text(), /repository-reader/);
+
     const bobReusesAlice = await request("bob", `/v1/workspaces/${workspaceId}/mcp`, {
       method: "POST",
       headers: { ...mcpHeaders, "mcp-session-id": aliceSession! },
@@ -381,6 +510,12 @@ describePostgres("principal ACL and GitHub connector", () => {
       method: "DELETE",
     });
     assert.equal(revoked.status, 200);
+    const policiesAfterRevoke = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/source-acl`,
+    );
+    assert.equal(policiesAfterRevoke.status, 200);
+    assert.doesNotMatch(await policiesAfterRevoke.text(), /"principal_id":"bob"/);
     assert.equal(
       (await request("bob", `/v1/workspaces/${workspaceId}/file?path=${filePath}`)).status,
       404,
@@ -388,7 +523,7 @@ describePostgres("principal ACL and GitHub connector", () => {
     const revokedMcp = await request("bob", `/v1/workspaces/${workspaceId}/mcp`, {
       method: "POST",
       headers: { ...mcpHeaders, "mcp-session-id": bobSession! },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }),
     });
     assert.equal(revokedMcp.status, 404);
 

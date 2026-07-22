@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Pool } from "pg";
-import { WorkspaceRepository } from "../src/server/workspace-repository.js";
+import {
+  sourcePathAllowed,
+  WorkspaceRepository,
+} from "../src/server/workspace-repository.js";
 
 type SourceRow = {
   path: string;
@@ -124,6 +127,34 @@ describe("WorkspaceRepository source decoding", () => {
       await repository.readSourceFile("workspace", "src/binary.ts"),
       null,
     );
+  });
+});
+
+describe("source path policy", () => {
+  it("uses the most-specific prefix and defaults when no rule matches", () => {
+    const policy = {
+      defaultAccess: "allow" as const,
+      rules: [
+        { pathPrefix: "private", effect: "deny" as const },
+        { pathPrefix: "private/public", effect: "allow" as const },
+        { pathPrefix: "private/public/internal", effect: "deny" as const },
+      ],
+    };
+    assert.equal(sourcePathAllowed(policy, "src/index.ts"), true);
+    assert.equal(sourcePathAllowed(policy, "private/secret.ts"), false);
+    assert.equal(sourcePathAllowed(policy, "private/public/readme.md"), true);
+    assert.equal(
+      sourcePathAllowed(policy, "private/public/internal/credential.ts"),
+      false,
+    );
+  });
+
+  it("can deny every source with an empty deny-by-default policy", () => {
+    assert.equal(
+      sourcePathAllowed({ defaultAccess: "deny", rules: [] }, "src/index.ts"),
+      false,
+    );
+    assert.equal(sourcePathAllowed(undefined, "src/index.ts"), true);
   });
 });
 

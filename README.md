@@ -313,7 +313,9 @@ Core endpoints are workspace create/list, `/sync/plan`, `PUT /blobs/{sha256}`,
 Multi-principal Bearer keys or verified OAuth/OIDC JWT access tokens can enforce
 `reader`, `writer`, and `owner` permissions per workspace. OIDC principals remain
 stable across token rotation, and only server-configured group mappings can grant
-operator access. A read-only GitHub connector can attach one
+operator access. Owners can additionally apply default allow/deny source policies
+with nested path-prefix rules; the same policy is enforced by search, context,
+file reads, and Remote MCP. A read-only GitHub connector can attach one
 repository to an empty Blob workspace, synchronize it incrementally, and expose
 source status in the dashboard. See `CONTEXTENGINE_HTTP_API_KEYS`,
 `CONTEXTENGINE_OIDC_ISSUER`, `CONTEXTENGINE_GITHUB_TOKEN`, and the authentication,

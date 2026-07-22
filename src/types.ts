@@ -113,6 +113,8 @@ export interface SearchOptions {
   query: string;
   topK?: number;
   pathPrefix?: string;
+  /** Server-enforced source visibility policy; omitted means unrestricted. */
+  sourceAccess?: SourcePathPolicy;
   language?: string;
   /** Prefer semantic if available; falls back to BM25. */
   mode?: "auto" | "bm25" | "semantic" | "hybrid";
@@ -135,8 +137,23 @@ export interface TaskContextOptions {
   /** Optional caller-controlled cap for the returned packed context. */
   maxTokens?: number;
   pathPrefix?: string;
+  /** Server-enforced source visibility policy; omitted means unrestricted. */
+  sourceAccess?: SourcePathPolicy;
   /** Use MMR diversification (default true). */
   diversify?: boolean;
+}
+
+export type SourceAccessEffect = "allow" | "deny";
+
+export interface SourcePathRule {
+  pathPrefix: string;
+  effect: SourceAccessEffect;
+}
+
+/** Most-specific path rule wins; equal-specificity deny wins. */
+export interface SourcePathPolicy {
+  defaultAccess: SourceAccessEffect;
+  rules: readonly SourcePathRule[];
 }
 
 export interface PackedContext {

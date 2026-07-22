@@ -52,6 +52,7 @@ export {
   WorkspaceNotFoundError,
   RevisionConflictError,
   MissingBlobError,
+  sourcePathAllowed,
 } from "./server/workspace-repository.js";
 export { migrateSqliteIndex } from "./store/migrate-sqlite.js";
 export {
@@ -127,6 +128,9 @@ export type {
   EmbeddingsConfig,
   IndexProgress,
   IndexRoot,
+  SourceAccessEffect,
+  SourcePathPolicy,
+  SourcePathRule,
 } from "./types.js";
 export type {
   VirtualIndexOptions,
@@ -152,6 +156,7 @@ export type {
   StoredConnectorFile,
   StoredConnectorSource,
   StoredSourceDocument,
+  StoredSourceAccessPolicy,
   StoredWorkspace,
   SyncChange,
   SyncOperation,

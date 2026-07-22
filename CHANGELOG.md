@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added schema v7 source/path ACL policies with most-specific prefix precedence,
+  owner-managed HTTP APIs, SQL-level filtering across lexical/semantic/graph
+  retrieval, direct file-read enforcement, and live policy re-resolution for
+  every Remote MCP tool call.
 - Added composable OAuth 2.0/OIDC JWT authentication alongside existing API
   keys, with exact issuer/audience and lifetime validation, explicit algorithm
   allowlists, HTTPS discovery/JWKS caching and rotation refresh, stable

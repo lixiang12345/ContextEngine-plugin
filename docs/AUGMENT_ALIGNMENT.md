@@ -27,7 +27,7 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 | Connectors | 官方提供 GitHub/GitLab/Bitbucket、网站、webhook、GitHub Actions、S3，以及 custom indexer/client/store | provider-neutral `SourceConnectorPlugin`、GitHub 内置、租约化增量同步与 HTTP Blob pipeline | 中到高：缺内置 GitLab/Bitbucket/网站和 webhook |
 | SDK / 自定义来源 | `DirectContext` 可把 API、数据库、memory、磁盘内容加入索引并保存状态 | TypeScript `ContextEngine` API；输入主要是本地树或 HTTP Blob | 中到高 |
 | 规则和团队知识 | CLI 支持 `AGENTS.md`、`CLAUDE.md`、`.augment/rules`、用户规则和 agent-requested 规则 | 仓库可读取代码/文档，但没有规则解析、优先级和持久化 memory 层 | 高 |
-| 权限 | Auggie/Cosmos 支持 allow/deny、脚本或 webhook policy、工具级匹配和审计语义 | API Key/OIDC principal、workspace ACL、local-root allowlist、模型 URL SSRF 防护、路径边界校验 | 高：缺来源/路径级 ACL、connector 权限快照和策略审计 |
+| 权限 | Auggie/Cosmos 支持 allow/deny、脚本或 webhook policy、工具级匹配和审计语义 | API Key/OIDC principal、workspace ACL、schema v7 source/path ACL、local-root allowlist、模型 URL SSRF 防护、路径边界校验 | 中到高：缺 connector 权限快照、外部策略 webhook 和完整审计流 |
 | 自动更新 | Remote default branch 随 push 更新；Connectors 提供 webhook/GitHub Actions | 本地 watcher 和 HTTP sync/index jobs | 中：缺 Git provider webhook/CI 集成 |
 | 团队索引共享 | 官方文档给出 S3 store/team sharing | 可共享 PostgreSQL 数据库 workspace | 中：缺对象存储快照、跨区域复制和 GC 策略 |
 | 评测 | Augment 公开过端到端 PR 评测和 token/tool-call 叙述 | 有 Recall/MRR/nDCG、多仓库脚本、重复成对 `eval-pr` 和 3 个固定历史任务 | 高：缺公共大样本 corpus、受控真实模型结果和可比结论 |
@@ -48,7 +48,7 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 ## 本机可复现实测
 
 截至 2026-07-22，本仓库 `npm run build` 通过，带 PostgreSQL 的完整测试为
-**159/159**；`contextengine eval --self` 在当前索引上为 8/8，Recall/MRR/nDCG
+**162/162**；`contextengine eval --self` 在当前索引上为 8/8，Recall/MRR/nDCG
 和 Top-1/3/5 均为 1.0，平均延迟 2.14 秒、P95 4.17 秒。Docker Compose 的
 HTTP 与 PostgreSQL 容器均为 healthy，Remote MCP 已实测 initialize、tools/list、
 `codebase-retrieval`、DELETE 会话链路。当前配置的 embedding/reranker 探测均返回
@@ -85,7 +85,7 @@ Augment 产品页中的“数十万文件”“更少 token 仍达到相近 solv
 
 ### P2：企业上下文
 
-- 引入 source-level ACL（repo/path/document）并在检索、file read、MCP 三层强制执行。
+- source-level ACL（repo/path/document）已在检索、file read、MCP 三层强制执行；继续增加 provider permission snapshot 和审计事件。
 - 为来源保存 connector identity、commit/cursor、权限快照和可验证 provenance；拒绝只在 UI 层过滤。
 - 增加 `.augment/rules` 类规则加载器与 `AGENTS.md` 层级合并，明确 always/agent-requested 优先级。
 - 提供对象存储 index snapshot/import，支持团队共享但不泄露原始代码。

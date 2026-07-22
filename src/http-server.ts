@@ -63,16 +63,18 @@ import {
   RevisionConflictError,
   SyncPlanConflictError,
   SyncPlanExpiredError,
+  SourceAccessPolicyTargetError,
   type StoredIndexJob,
   type StoredConnectorSource,
   type StoredWorkspace,
   type WorkspacePermission,
   WorkspaceNotFoundError,
   WorkspaceRepository,
+  sourcePathAllowed,
   workspacePermissionAllows,
   type SyncChange,
 } from "./server/workspace-repository.js";
-import type { SearchHit } from "./types.js";
+import type { SearchHit, SourcePathPolicy } from "./types.js";
 import type { IndexGenerationStatus } from "./store/postgres-store.js";
 import { sha256 } from "./util/hash.js";
 
@@ -297,6 +299,13 @@ const httpApiKeysSchema = z.array(
 );
 const workspacePermissionSchema = z.object({
   permission: z.enum(["reader", "writer", "owner"]),
+});
+const sourceAccessPolicySchema = z.object({
+  default_access: z.enum(["allow", "deny"]),
+  rules: z.array(z.object({
+    path_prefix: z.string().min(1).max(4096),
+    effect: z.enum(["allow", "deny"]),
+  })).max(256).default([]),
 });
 function readBoolean(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(value?.trim() ?? "");
@@ -661,6 +670,14 @@ function errorPayload(error: unknown): {
       payload: { error: { code: "sync_plan_expired", message: error.message } },
     };
   }
+  if (error instanceof SourceAccessPolicyTargetError) {
+    return {
+      status: 409,
+      payload: {
+        error: { code: "source_acl_target_invalid", message: error.message },
+      },
+    };
+  }
   const message = error instanceof Error ? error.message : String(error);
   return {
     status: 500,
@@ -744,6 +761,13 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/acl/{principalId}": {
         put: { summary: "Grant or update a workspace permission" },
         delete: { summary: "Revoke a workspace permission" },
+      },
+      "/v1/workspaces/{workspaceId}/source-acl": {
+        get: { summary: "List principal source/path access policies" },
+      },
+      "/v1/workspaces/{workspaceId}/source-acl/{principalId}": {
+        put: { summary: "Replace a principal source/path access policy" },
+        delete: { summary: "Remove a principal source/path access policy" },
       },
       "/v1/workspaces/{workspaceId}/sources": {
         get: { summary: "List connector sources and synchronization state" },
@@ -1096,6 +1120,11 @@ class HttpContextService {
             principals: true,
             workspace_acl: this.aclEnabled,
             permissions: ["reader", "writer", "owner"],
+            source_acl: {
+              enabled: true,
+              effects: ["allow", "deny"],
+              precedence: "longest-path-prefix",
+            },
             current_principal: {
               principal_id: principal.principalId,
               role: principal.role,
@@ -1482,6 +1511,74 @@ class HttpContextService {
         return;
       }
 
+      const sourceAclListMatch =
+        /^\/v1\/workspaces\/([^/]+)\/source-acl$/.exec(pathname);
+      if (request.method === "GET" && sourceAclListMatch) {
+        const workspaceId = decodeURIComponent(sourceAclListMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const policies = await this.repository.listSourceAccessPolicies(workspaceId);
+        json(response, 200, {
+          policies: policies.map((policy) => ({
+            principal_id: policy.principalId,
+            default_access: policy.defaultAccess,
+            rules: policy.rules.map((rule) => ({
+              path_prefix: rule.pathPrefix,
+              effect: rule.effect,
+            })),
+            updated_by: policy.updatedBy,
+            updated_at: policy.updatedAt,
+          })),
+        });
+        return;
+      }
+
+      const sourceAclMemberMatch =
+        /^\/v1\/workspaces\/([^/]+)\/source-acl\/([^/]+)$/.exec(pathname);
+      if (
+        sourceAclMemberMatch &&
+        (request.method === "PUT" || request.method === "DELETE")
+      ) {
+        const workspaceId = decodeURIComponent(sourceAclMemberMatch[1]);
+        const memberId = decodeURIComponent(sourceAclMemberMatch[2]).trim();
+        if (!memberId || memberId.length > 200 || /[\u0000-\u001f\u007f]/.test(memberId)) {
+          throw new HttpError(400, "principalId is invalid");
+        }
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        if (request.method === "DELETE") {
+          await this.repository.removeSourceAccessPolicy(workspaceId, memberId);
+          json(response, 200, { ok: true });
+          return;
+        }
+        const input = sourceAccessPolicySchema.parse(
+          await readJsonBody(request, 128 * 1024),
+        );
+        const rules = input.rules.map((rule) => ({
+          pathPrefix: normalizedRelativePath(rule.path_prefix),
+          effect: rule.effect,
+        }));
+        if (new Set(rules.map((rule) => rule.pathPrefix)).size !== rules.length) {
+          throw new HttpError(400, "Source ACL path prefixes must be unique");
+        }
+        const policy = await this.repository.setSourceAccessPolicy({
+          workspaceId,
+          principalId: memberId,
+          defaultAccess: input.default_access,
+          rules,
+          updatedBy: principal.principalId,
+        });
+        json(response, 200, {
+          principal_id: policy.principalId,
+          default_access: policy.defaultAccess,
+          rules: policy.rules.map((rule) => ({
+            path_prefix: rule.pathPrefix,
+            effect: rule.effect,
+          })),
+          updated_by: policy.updatedBy,
+          updated_at: policy.updatedAt,
+        });
+        return;
+      }
+
       const sourcesMatch = /^\/v1\/workspaces\/([^/]+)\/sources$/.exec(pathname);
       if (request.method === "GET" && sourcesMatch) {
         const workspaceId = decodeURIComponent(sourcesMatch[1]);
@@ -1772,10 +1869,12 @@ class HttpContextService {
           })
           .parse(await readJsonBody(request, 128 * 1024));
         const engine = await this.requireIndexedEngine(workspace);
+        const sourceAccess = await this.sourceAccessPolicy(principal, workspace.id);
         const hits = await engine.search({
           query: input.query,
           topK: input.top_k,
           pathPrefix: input.path_prefix,
+          sourceAccess,
           language: input.language,
           mode: input.mode,
           expandGraph: input.expand_graph,
@@ -1814,11 +1913,13 @@ class HttpContextService {
         const task = input.task ?? input.information_request ?? input.informationRequest;
         if (!task) throw new HttpError(400, "task or information_request is required");
         const engine = await this.requireIndexedEngine(workspace);
+        const sourceAccess = await this.sourceAccessPolicy(principal, workspace.id);
         const packed = await engine.getTaskContext({
           task,
           topK: input.top_k ?? 14,
           maxTokens: input.max_tokens,
           pathPrefix: input.path_prefix,
+          sourceAccess,
           diversify: true,
         });
         const index = await engine.indexStatus();
@@ -1844,6 +1945,10 @@ class HttpContextService {
         const sourcePath = normalizedRelativePath(
           requestUrl.searchParams.get("path") ?? "",
         );
+        const sourceAccess = await this.sourceAccessPolicy(principal, workspace.id);
+        if (!sourcePathAllowed(sourceAccess, sourcePath)) {
+          throw new HttpError(404, `File not found or binary: ${sourcePath}`);
+        }
         const startLine = parseLineParam(requestUrl.searchParams.get("start_line"));
         const endLine = parseLineParam(requestUrl.searchParams.get("end_line"));
         const file =
@@ -1998,7 +2103,10 @@ class HttpContextService {
             return this.requireIndexedEngine(workspace);
           },
         },
-        { includeLegacyAlias: false },
+        {
+          includeLegacyAlias: false,
+          resolveSourceAccess: () => this.sourceAccessPolicy(principal, workspaceId),
+        },
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => sessionIdForTransport,
@@ -2092,7 +2200,10 @@ class HttpContextService {
           return this.requireIndexedEngine(workspace);
         },
       },
-      { includeLegacyAlias: false },
+      {
+        includeLegacyAlias: false,
+        resolveSourceAccess: () => this.sourceAccessPolicy(principal, workspaceId),
+      },
     );
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -2225,7 +2336,10 @@ class HttpContextService {
           return this.requireIndexedEngine(workspace);
         },
       },
-      { includeLegacyAlias: false },
+      {
+        includeLegacyAlias: false,
+        resolveSourceAccess: () => this.sourceAccessPolicy(principal, workspaceId),
+      },
     );
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -2363,6 +2477,16 @@ class HttpContextService {
       throw new HttpError(404, "Workspace not found");
     }
     return this.repository.requireWorkspace(workspaceId);
+  }
+
+  private sourceAccessPolicy(
+    principal: HttpPrincipal,
+    workspaceId: string,
+  ): Promise<SourcePathPolicy | undefined> {
+    if (principal.admin) return Promise.resolve(undefined);
+    return this.repository
+      .getSourceAccessPolicy(workspaceId, principal.principalId)
+      .then((policy) => policy ?? undefined);
   }
 
   private resolveLocalRoot(input: string): string {

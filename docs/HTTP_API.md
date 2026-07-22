@@ -152,6 +152,37 @@ caller is a regular user unless a value in the configured groups claim exactly
 matches `CONTEXTENGINE_OIDC_OPERATOR_GROUPS`. Token-provided `role`, `admin`, or
 unconfigured group claims never grant operator access.
 
+### Source and path access policies
+
+Workspace owners can restrict an existing workspace member to source paths:
+
+```http
+PUT /v1/workspaces/{workspaceId}/source-acl/{principalId}
+Content-Type: application/json
+
+{
+  "default_access": "deny",
+  "rules": [
+    {"path_prefix":"src/public","effect":"allow"},
+    {"path_prefix":"src/public/internal","effect":"deny"}
+  ]
+}
+```
+
+`GET /v1/workspaces/{workspaceId}/source-acl` lists policies and
+`DELETE /v1/workspaces/{workspaceId}/source-acl/{principalId}` removes one,
+restoring the backward-compatible unrestricted default for that workspace
+member. Removing the member's workspace ACL entry cascades its source policy.
+The target must already have workspace access, and each policy is limited to 256
+normalized relative path prefixes.
+
+The most-specific matching prefix wins; an exact-length deny wins a tie. If no
+rule matches, `default_access` is used. Operators bypass source policies. The
+policy is pushed into PostgreSQL lexical, semantic, path/symbol, and graph
+queries, checked before direct file reads, and resolved again for every Remote
+MCP tool call. It is not a UI-only result filter, and changing a policy affects
+an existing MCP session on its next call.
+
 ### Read-only source connectors
 
 The built-in GitHub plugin attaches a repository to an empty Blob workspace:
@@ -477,6 +508,12 @@ instances can finish GitHub work after migration, but they cannot handle a new
 plugin provider and refuse to restart once the v6 marker is committed. Drain
 v5 connector traffic before attaching non-GitHub providers; route plugin
 creation and synchronization only to v6 instances.
+
+Schema v7 adds source access policies and rules. Version 6 instances reject the
+new marker on restart and do not enforce path policies, so drain every v6 HTTP
+reader before creating a source policy. The migration is additive and existing
+workspace members remain unrestricted until an owner explicitly creates a
+policy.
 
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former

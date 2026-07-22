@@ -227,6 +227,7 @@ export class PostgresHybridSearcher {
     const candidateLimit = Math.max(topK * 16, 128);
     const filter: StoreSearchFilter = {
       pathPrefix: opts.pathPrefix,
+      sourceAccess: opts.sourceAccess,
       language: opts.language,
       includeCommits: opts.includeCommits,
     };

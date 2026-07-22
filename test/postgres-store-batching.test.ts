@@ -96,4 +96,31 @@ describe("PostgresStore batched writes", () => {
     assert.equal(queries.length, 1);
     assert.match(queries[0].text, /WITH deleted_imports/);
   });
+
+  it("pushes most-specific source ACL evaluation into retrieval SQL", async () => {
+    const { store, queries } = capturingStore();
+
+    await store.ftsSearch("billing credential", 20, {
+      sourceAccess: {
+        defaultAccess: "allow",
+        rules: [
+          { pathPrefix: "private", effect: "deny" },
+          { pathPrefix: "private/public", effect: "allow" },
+        ],
+      },
+    });
+
+    assert.equal(queries.length, 1);
+    assert.match(queries[0].text, /unnest\(\$3::text\[\], \$4::text\[\]\)/);
+    assert.match(queries[0].text, /ORDER BY length\(rule\.path_prefix\) DESC/);
+    assert.match(queries[0].text, /CASE rule\.effect WHEN 'deny' THEN 1/);
+    assert.deepEqual(queries[0].values, [
+      "workspace",
+      "billing | credential",
+      ["private", "private/public"],
+      ["deny", "allow"],
+      "allow",
+      20,
+    ]);
+  });
 });

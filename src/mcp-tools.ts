@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ContextEngine } from "./engine.js";
+import type { SourcePathPolicy } from "./types.js";
 
 /** The canonical Augment-compatible name plus the pre-0.4 alias. */
 export const CONTEXT_RETRIEVAL_TOOL_NAMES = [
@@ -16,6 +17,8 @@ export interface RetrievalMcpRuntime {
 export interface RetrievalToolOptions {
   /** Expose the legacy underscore alias for older MCP clients. */
   includeLegacyAlias?: boolean;
+  /** Resolve current source visibility for every tool call (revocation-safe). */
+  resolveSourceAccess?: () => Promise<SourcePathPolicy | undefined>;
 }
 
 const retrievalDescription =
@@ -52,9 +55,11 @@ export function registerCodebaseRetrievalTools(
   }) => {
     try {
       const engine = await runtime.ensureReady();
+      const sourceAccess = await options.resolveSourceAccess?.();
       const packed = await engine.codebaseRetrieval(information_request, {
         topK: top_k ?? 14,
         maxTokens: max_tokens,
+        sourceAccess,
       });
       return {
         content: [{ type: "text" as const, text: packed.packedText }],

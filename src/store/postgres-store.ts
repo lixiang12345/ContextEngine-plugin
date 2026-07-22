@@ -2,13 +2,13 @@ import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg
 import pgvector from "pgvector/pg";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { CodeChunk, IndexStats } from "../types.js";
+import type { CodeChunk, IndexStats, SourcePathPolicy } from "../types.js";
 import { extractSymbolNames } from "../chunker/code-chunker.js";
 import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -16,6 +16,7 @@ const GENERATION_GC_BATCH = 8;
 
 export interface StoreSearchFilter {
   pathPrefix?: string;
+  sourceAccess?: SourcePathPolicy;
   language?: string;
   includeCommits?: boolean;
 }
@@ -1814,6 +1815,49 @@ export class PostgresStore {
             throw error;
           }
         }
+        if (schemaVersion < 7) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_source_access_policies (
+        workspace_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        default_access TEXT NOT NULL CHECK (default_access IN ('allow', 'deny')),
+        updated_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (workspace_id, principal_id),
+        FOREIGN KEY (workspace_id, principal_id)
+          REFERENCES ce_workspace_acl(workspace_id, principal_id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS ce_source_access_rules (
+        workspace_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        path_prefix TEXT NOT NULL,
+        effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (workspace_id, principal_id, path_prefix),
+        FOREIGN KEY (workspace_id, principal_id)
+          REFERENCES ce_source_access_policies(workspace_id, principal_id)
+          ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS ce_source_access_rules_principal_idx
+        ON ce_source_access_rules(principal_id, workspace_id);
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [7],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
         if (setIndexVersion && this.workspaceId) {
           await client.query(
             `INSERT INTO ce_meta(workspace_id, key, value)
@@ -1842,8 +1886,27 @@ export class PostgresStore {
         .replace(/\/+$/, "");
       params.push(prefix);
       conditions.push(
-        `(${alias}.path = $${params.length} OR ${alias}.path LIKE $${params.length} || '/%')`,
+        `(${alias}.path = $${params.length} OR left(${alias}.path, length($${params.length}) + 1) = $${params.length} || '/')`,
       );
+    }
+    if (filter?.sourceAccess) {
+      const prefixes = filter.sourceAccess.rules.map((rule) => rule.pathPrefix);
+      const effects = filter.sourceAccess.rules.map((rule) => rule.effect);
+      params.push(prefixes, effects, filter.sourceAccess.defaultAccess);
+      const prefixesParam = params.length - 2;
+      const effectsParam = params.length - 1;
+      const defaultParam = params.length;
+      conditions.push(`COALESCE((
+        SELECT rule.effect
+        FROM unnest($${prefixesParam}::text[], $${effectsParam}::text[])
+          AS rule(path_prefix, effect)
+        WHERE ${alias}.path = rule.path_prefix
+           OR left(${alias}.path, length(rule.path_prefix) + 1)
+                = rule.path_prefix || '/'
+        ORDER BY length(rule.path_prefix) DESC,
+                 CASE rule.effect WHEN 'deny' THEN 1 ELSE 0 END DESC
+        LIMIT 1
+      ), $${defaultParam}::text) = 'allow'`);
     }
     if (filter?.language) {
       params.push(filter.language);
