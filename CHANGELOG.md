@@ -17,6 +17,9 @@
   SHA-256-only persistence, expiration/revocation, per-source rate limits,
   durable idempotent `/ci/sync`, and provider-neutral GitHub Actions/GitLab
   CI/Bitbucket Pipelines documentation.
+- Added schema v10 CI provenance metadata with strict provider/run/ref/commit/
+  repository validation, terminal audit results, and installable GitHub Actions,
+  GitLab CI, and Bitbucket Pipelines templates via `ci-template`.
 - Added schema v8 persistent connector webhook events, a provider-neutral signed
   webhook contract, GitHub HMAC-SHA256 push handling, delivery/body replay
   protection, database-clock worker recovery, bounded retries, and attempt

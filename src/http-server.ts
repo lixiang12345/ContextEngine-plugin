@@ -216,6 +216,20 @@ const createConnectorCiTokenSchema = z.object({
   expires_in_days: z.number().int().min(1).max(365).default(90),
 });
 
+const ciProvenanceValue = (maxLength: number) => z
+  .string()
+  .trim()
+  .min(1)
+  .max(maxLength)
+  .regex(/^[^\u0000-\u001f\u007f]+$/, "control characters are not allowed");
+const ciProvenanceSchema = z.object({
+  provider: z.enum(["github-actions", "gitlab-ci", "bitbucket-pipelines"]).optional(),
+  run_id: ciProvenanceValue(120).optional(),
+  ref: ciProvenanceValue(300).optional(),
+  commit: ciProvenanceValue(128).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  repository: ciProvenanceValue(300).optional(),
+}).strict();
+
 function embeddingConfigurationUpdate(
   input: z.infer<typeof embeddingConfigurationSchema>,
 ): EmbeddingConfigurationUpdate {
@@ -2287,14 +2301,18 @@ class HttpContextService {
       throw new HttpError(400, "X-ContextEngine-Delivery is required and invalid");
     }
     const body = await readRequestBody(request, 32 * 1024);
+    let metadata: Record<string, unknown> | null = null;
     if (body.length) {
       try {
         const parsed: unknown = JSON.parse(body.toString("utf8"));
-        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-          throw new Error();
+        const validated = ciProvenanceSchema.safeParse(parsed);
+        if (!validated.success) {
+          throw new HttpError(400, "CI trigger provenance is invalid", validated.error.flatten());
         }
-      } catch {
-        throw new HttpError(400, "CI trigger body must be a JSON object");
+        metadata = Object.keys(validated.data).length ? validated.data : null;
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        throw new HttpError(400, "CI trigger body must be valid JSON provenance");
       }
     }
     let queued: Awaited<ReturnType<WorkspaceRepository["authenticateCiTokenAndEnqueue"]>>;
@@ -2303,6 +2321,7 @@ class HttpContextService {
         tokenHash: sha256(token),
         deliveryId: delivery,
         bodyHash: sha256(body),
+        metadata,
       });
     } catch (error) {
       if (error instanceof ConnectorWebhookReplayError) {

@@ -242,9 +242,10 @@ Bearer credential; it requires `X-Hub-Signature-256`, `X-GitHub-Delivery`, and
 `X-GitHub-Event`. HMAC is checked against the bounded raw body before JSON is
 parsed. Only non-deleted pushes matching the source's configured ref are queued.
 
-The schema v8 inbox stores only source id, delivery id, body hash, status,
-attempt count, bounded error, and result metadata—never the raw payload or
-webhook secret. Re-delivering identical bytes is idempotent. Reusing one delivery
+The schema v10 inbox stores source id, delivery id, body hash, status, attempt
+count, bounded error, validated CI provenance when present, and result
+metadata—never the raw payload, CI credential, or webhook secret. Re-delivering
+identical bytes is idempotent. Reusing one delivery
 id with different bytes returns `409`, including concurrent races. Workers claim
 events with PostgreSQL `SKIP LOCKED`, recover expired processing claims using the
 database clock, fence terminal writes by attempt number, and retry failures with
@@ -303,7 +304,7 @@ Authorization: Bearer ceci_<secret>
 X-ContextEngine-Delivery: <provider-run-id>
 Content-Type: application/json
 
-{}
+{"provider":"github-actions","run_id":"12345","ref":"main","commit":"abc123","repository":"acme/tools"}
 ```
 
 Tokens are stored only as SHA-256 hashes, expire in 1–365 days, can be listed
@@ -313,6 +314,21 @@ Each token is limited to 20 active credentials and 60 deliveries per ten
 minutes; delivery/body replay conflicts return `409`. The durable webhook inbox
 then uses the normal connector lease, cursor fencing, retry, and index-job
 pipeline. This endpoint intentionally does not accept a workspace-wide API key.
+The optional provenance object is strict and bounded: `provider` must be
+`github-actions`, `gitlab-ci`, or `bitbucket-pipelines`; `run_id`, `ref`,
+`commit`, and `repository` are short printable strings. Unknown fields and
+control characters are rejected. The validated object is stored in the durable
+webhook event and copied to the terminal result as `ci_provenance` for audit.
+
+Installable workflow files can be printed with the packaged CLI:
+
+```bash
+contextengine ci-template github > .github/workflows/contextengine-sync.yml
+contextengine ci-template gitlab > .contextengine-sync.yml
+contextengine ci-template bitbucket > bitbucket-pipelines-contextengine.yml
+```
+Each template uses the provider run identity for `X-ContextEngine-Delivery` and
+submits provider, run, ref, commit, and repository provenance.
 
 Minimal provider-neutral CI step:
 
@@ -676,6 +692,10 @@ Schema v8 adds the connector webhook inbox. Version 7 instances reject this
 marker on restart and cannot claim events. Drain v7 HTTP instances before
 enabling webhook delivery; schema v8 workers can safely share the inbox and use
 `SKIP LOCKED` plus connector leases across instances.
+
+Schema v9 adds source-scoped CI credentials, and schema v10 adds optional
+validated provenance to inbox events. Older instances reject either newer
+marker; drain them before issuing CI credentials or accepting CI deliveries.
 
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former

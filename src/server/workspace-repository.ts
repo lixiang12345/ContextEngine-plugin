@@ -141,6 +141,7 @@ export interface StoredConnectorWebhookEvent {
   nextAttemptAt: string;
   lockedAt: string | null;
   lastError: string | null;
+  metadata: Record<string, unknown> | null;
   result: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
@@ -289,6 +290,7 @@ interface ConnectorWebhookEventRow extends QueryResultRow {
   next_attempt_at: string | Date;
   locked_at: string | Date | null;
   last_error: string | null;
+  metadata: unknown;
   result: unknown;
   created_at: string | Date;
   updated_at: string | Date;
@@ -486,6 +488,7 @@ function webhookEventFromRow(
     nextAttemptAt: iso(row.next_attempt_at)!,
     lockedAt: iso(row.locked_at),
     lastError: row.last_error,
+    metadata: asObject(row.metadata),
     result: asObject(row.result),
     createdAt: iso(row.created_at)!,
     updatedAt: iso(row.updated_at)!,
@@ -1380,6 +1383,7 @@ export class WorkspaceRepository {
     tokenHash: string;
     deliveryId: string;
     bodyHash: string;
+    metadata: Record<string, unknown> | null;
   }): Promise<{
     token: StoredConnectorCiToken;
     workspaceId: string;
@@ -1423,11 +1427,11 @@ export class WorkspaceRepository {
       }
       const inserted = await client.query(
         `INSERT INTO ce_connector_webhook_events(
-           source_id, event_id, provider, body_hash
-         ) VALUES ($1, $2, 'ci', $3)
+           source_id, event_id, provider, body_hash, metadata
+         ) VALUES ($1, $2, 'ci', $3, $4::jsonb)
          ON CONFLICT(source_id, event_id) DO NOTHING
          RETURNING source_id`,
-        [row.source_id, eventId, input.bodyHash],
+        [row.source_id, eventId, input.bodyHash, JSON.stringify(input.metadata)],
       );
       const persisted = await client.query<{ body_hash: string }>(
         `SELECT body_hash FROM ce_connector_webhook_events
@@ -1478,7 +1482,7 @@ export class WorkspaceRepository {
        RETURNING event.source_id, event.event_id, event.provider,
                  event.body_hash, event.status, event.attempts,
                  event.next_attempt_at, event.locked_at, event.last_error,
-                 event.result, event.created_at, event.updated_at,
+                 event.metadata, event.result, event.created_at, event.updated_at,
                  event.completed_at`,
       [Math.max(1, Math.min(64, Math.floor(limit))), processingLeaseMs],
     );
@@ -1544,7 +1548,7 @@ export class WorkspaceRepository {
   ): Promise<StoredConnectorWebhookEvent | null> {
     const result = await this.pool.query<ConnectorWebhookEventRow>(
       `SELECT source_id, event_id, provider, body_hash, status, attempts,
-              next_attempt_at, locked_at, last_error, result, created_at,
+              next_attempt_at, locked_at, last_error, metadata, result, created_at,
               updated_at, completed_at
        FROM ce_connector_webhook_events
        WHERE source_id = $1 AND event_id = $2`,

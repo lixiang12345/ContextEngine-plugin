@@ -3,6 +3,7 @@ import { Command } from "commander";
 import path from "node:path";
 import { loadDotEnv, resolveEngineConfig } from "./config.js";
 import { ContextEngine } from "./engine.js";
+import { renderCiTemplate, type CiTemplateProvider } from "./ci/templates.js";
 
 loadDotEnv();
 
@@ -14,6 +15,17 @@ program
     "Portable Context Engine for AI coding agents — index, search, and pack codebase context.",
   )
   .version("0.4.0");
+
+program
+  .command("ci-template")
+  .description("Print an installable CI workflow for a source sync trigger")
+  .argument("<provider>", "github | gitlab | bitbucket")
+  .action((provider: string) => {
+    if (!(["github", "gitlab", "bitbucket"] as const).includes(provider as CiTemplateProvider)) {
+      throw new Error(`Unsupported CI provider: ${provider}`);
+    }
+    process.stdout.write(renderCiTemplate(provider as CiTemplateProvider));
+  });
 
 program
   .command("index")

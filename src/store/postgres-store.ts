@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -1924,6 +1924,26 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [9],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 10) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      ALTER TABLE ce_connector_webhook_events
+        ADD COLUMN IF NOT EXISTS metadata JSONB;
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [10],
             );
             await client.query("COMMIT");
           } catch (error) {

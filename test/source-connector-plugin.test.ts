@@ -415,16 +415,50 @@ describePostgres("source connector plugin contract", () => {
       },
       body,
     });
-    const accepted = await trigger("ci-delivery-1");
+    const provenance = {
+      provider: "github-actions",
+      run_id: "12345",
+      ref: "main",
+      commit: "abc123def456",
+      repository: "acme/tools",
+    };
+    const accepted = await trigger("ci-delivery-1", JSON.stringify(provenance));
     assert.equal(accepted.status, 202);
     assert.deepEqual(
       ((await accepted.json()) as { accepted: number; duplicates: number }).accepted,
       1,
     );
-    const duplicate = await trigger("ci-delivery-1");
+    let ciEvent: { status: string; metadata: unknown; result: unknown } | undefined;
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const result = await admin.query<{ status: string; metadata: unknown; result: unknown }>(
+        `SELECT status, metadata, result
+         FROM ${quoteIdentifier(schema)}.ce_connector_webhook_events
+         WHERE source_id = $1 AND event_id = $2`,
+        [memorySourceId, `ci:${payload.metadata.id}:ci-delivery-1`],
+      );
+      ciEvent = result.rows[0];
+      if (ciEvent?.status === "succeeded") break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(ciEvent?.status, "succeeded");
+    assert.deepEqual(ciEvent?.metadata, provenance);
+    assert.deepEqual((ciEvent?.result as Record<string, unknown>).ci_provenance, provenance);
+
+    const duplicate = await trigger("ci-delivery-1", JSON.stringify(provenance));
     assert.equal(duplicate.status, 202);
     assert.equal(((await duplicate.json()) as { duplicates: number }).duplicates, 1);
-    assert.equal((await trigger("ci-delivery-1", '{"changed":true}')).status, 409);
+    assert.equal(
+      (await trigger("ci-delivery-1", '{"provider":"gitlab-ci"}')).status,
+      409,
+    );
+    assert.equal(
+      (await trigger("ci-invalid-field", '{"provider":"github-actions","extra":true}')).status,
+      400,
+    );
+    assert.equal(
+      (await trigger("ci-invalid-commit", '{"commit":"bad commit"}')).status,
+      400,
+    );
 
     const revoked = await request(
       `/v1/workspaces/${memoryWorkspaceId}/sources/${memorySourceId}/ci-tokens/${payload.metadata.id}`,

@@ -72,11 +72,15 @@ export class ConnectorWebhookProcessor {
       if (!source) continue;
       try {
         const sync = await this.coordinator.sync(source.workspaceId, source.id);
+        const provenance = event.metadata
+          ? { ci_provenance: event.metadata }
+          : {};
         await this.repository.completeConnectorWebhookEvent(
           source.id,
           event.eventId,
           event.attempts,
           {
+            ...provenance,
             noop: sync.noop,
             revision: sync.revision,
             changed_paths: sync.changedPaths,
