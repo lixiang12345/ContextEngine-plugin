@@ -47,6 +47,8 @@ export interface SourceConnectorPlugin {
   listFiles(
     config: Readonly<Record<string, unknown>>,
     previousCursor: Readonly<Record<string, unknown>> | null,
+    /** Core-owned prior metadata; useful for avoiding repeated upstream stat calls. */
+    previousFiles?: readonly ConnectorFileSnapshot[],
   ): Promise<ConnectorSnapshot>;
   readFile(
     config: Readonly<Record<string, unknown>>,

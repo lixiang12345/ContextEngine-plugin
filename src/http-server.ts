@@ -23,6 +23,8 @@ import {
   GitHubConnectorClient,
 } from "./connectors/github.js";
 import { GitHubSourceConnector } from "./connectors/github-plugin.js";
+import { GitLabConnectorClient } from "./connectors/gitlab.js";
+import { GitLabSourceConnector } from "./connectors/gitlab-plugin.js";
 import { WebsiteSourceConnector } from "./connectors/website.js";
 import {
   SourceConnectorError,
@@ -106,6 +108,11 @@ export interface HttpServerOptions {
   githubApiBaseUrl?: string;
   githubTimeoutMs?: number;
   githubWebhookSecret?: string;
+  gitlabToken?: string;
+  gitlabApiBaseUrl?: string;
+  gitlabTimeoutMs?: number;
+  gitlabWebhookSigningToken?: string;
+  gitlabWebhookSecret?: string;
   /** Trusted deployments only: permit the built-in website connector to crawl private networks. */
   websiteAllowPrivateNetwork?: boolean;
   websiteTimeoutMs?: number;
@@ -890,6 +897,7 @@ class HttpContextService {
         | "mcpSessionStore"
         | "disableEmbeddings"
         | "githubTimeoutMs"
+        | "gitlabTimeoutMs"
         | "websiteAllowPrivateNetwork"
         | "websiteTimeoutMs"
         | "webhookPollIntervalMs"
@@ -902,6 +910,10 @@ class HttpContextService {
         | "githubToken"
         | "githubApiBaseUrl"
         | "githubWebhookSecret"
+        | "gitlabToken"
+        | "gitlabApiBaseUrl"
+        | "gitlabWebhookSigningToken"
+        | "gitlabWebhookSecret"
         | "connectorPlugins"
       >,
   ) {
@@ -943,8 +955,17 @@ class HttpContextService {
       apiBaseUrl: options.githubApiBaseUrl,
       timeoutMs: options.githubTimeoutMs,
     });
+    const gitlab = new GitLabConnectorClient({
+      token: options.gitlabToken,
+      apiBaseUrl: options.gitlabApiBaseUrl,
+      timeoutMs: options.gitlabTimeoutMs,
+    });
     this.connectorRegistry = new SourceConnectorRegistry([
       new GitHubSourceConnector(github, options.githubWebhookSecret),
+      new GitLabSourceConnector(gitlab, {
+        signingToken: options.gitlabWebhookSigningToken,
+        secretToken: options.gitlabWebhookSecret,
+      }),
       new WebsiteSourceConnector({
         allowPrivateNetwork: options.websiteAllowPrivateNetwork,
         timeoutMs: options.websiteTimeoutMs,
@@ -956,7 +977,9 @@ class HttpContextService {
       runner: this.runner,
       connectors: this.connectorRegistry,
       maxBlobBytes: options.maxBlobBytes,
-      secrets: options.githubToken ? [options.githubToken] : [],
+      secrets: [options.githubToken, options.gitlabToken].filter(
+        (secret): secret is string => Boolean(secret),
+      ),
     });
     this.webhookProcessor = new ConnectorWebhookProcessor({
       repository,
@@ -1051,6 +1074,22 @@ class HttpContextService {
         githubWebhookSecret:
           options.githubWebhookSecret ??
           (process.env.CONTEXTENGINE_GITHUB_WEBHOOK_SECRET?.trim() || undefined),
+        gitlabToken:
+          options.gitlabToken ?? (process.env.CONTEXTENGINE_GITLAB_TOKEN?.trim() || undefined),
+        gitlabApiBaseUrl:
+          options.gitlabApiBaseUrl ??
+          (process.env.CONTEXTENGINE_GITLAB_API_BASE_URL?.trim() || undefined),
+        gitlabTimeoutMs: positiveOption(
+          options.gitlabTimeoutMs ??
+            numberFromEnv(process.env.CONTEXTENGINE_GITLAB_TIMEOUT_MS, 30_000),
+          "gitlabTimeoutMs",
+        ),
+        gitlabWebhookSigningToken:
+          options.gitlabWebhookSigningToken ??
+          (process.env.CONTEXTENGINE_GITLAB_WEBHOOK_SIGNING_TOKEN?.trim() || undefined),
+        gitlabWebhookSecret:
+          options.gitlabWebhookSecret ??
+          (process.env.CONTEXTENGINE_GITLAB_WEBHOOK_SECRET?.trim() || undefined),
         websiteAllowPrivateNetwork:
           options.websiteAllowPrivateNetwork ??
           readBoolean(process.env.CONTEXTENGINE_WEBSITE_ALLOW_PRIVATE_NETWORK),

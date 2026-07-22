@@ -50,7 +50,7 @@ Most coding agents explore large repos with repeated `grep` / `find` tool calls.
 | Watch mode | Debounced incremental re-index |
 | MCP | `codebase-retrieval` (Augment-compatible; `codebase_retrieval` legacy alias) + search/file/index tools |
 | HTTP | Authenticated workspace sync, index jobs, retrieval, and SSE progress |
-| Source plugins | Provider-neutral read-only connector SDK; GitHub + static websites built in |
+| Source plugins | Provider-neutral read-only connector SDK; GitHub + GitLab + static websites built in |
 | Eval | Recall/MRR/nDCG plus repeated paired PR runs and a fixed historical corpus |
 
 **Honest comparison with Augment:** [COMPARISON.md](./COMPARISON.md) · **Design:** [ARCHITECTURE.md](./ARCHITECTURE.md)
@@ -315,15 +315,16 @@ Multi-principal Bearer keys or verified OAuth/OIDC JWT access tokens can enforce
 stable across token rotation, and only server-configured group mappings can grant
 operator access. Owners can additionally apply default allow/deny source policies
 with nested path-prefix rules; the same policy is enforced by search, context,
-file reads, and Remote MCP. Read-only GitHub and static website connectors can
+file reads, and Remote MCP. Read-only GitHub, GitLab, and static website connectors can
 attach external content to an empty Blob workspace and synchronize it
 incrementally. The website crawler enforces HTTPS/public-network, same-origin,
 path-prefix, robots, redirect, page-count, depth, and byte limits. Signed GitHub
-push webhooks can persistently and idempotently trigger the same leased
+or GitLab push webhooks can persistently and idempotently trigger the same leased
 synchronization pipeline. See
 `CONTEXTENGINE_HTTP_API_KEYS`,
 `CONTEXTENGINE_OIDC_ISSUER`, `CONTEXTENGINE_GITHUB_TOKEN`,
-`CONTEXTENGINE_GITHUB_WEBHOOK_SECRET`, `CONTEXTENGINE_WEBSITE_TIMEOUT_MS`, and the authentication,
+`CONTEXTENGINE_GITHUB_WEBHOOK_SECRET`, `CONTEXTENGINE_GITLAB_TOKEN`,
+`CONTEXTENGINE_GITLAB_WEBHOOK_SIGNING_TOKEN`, `CONTEXTENGINE_WEBSITE_TIMEOUT_MS`, and the authentication,
 connector, and ACL routes in the HTTP API guide.
 Embedded hosts can register additional providers through `connectorPlugins`;
 see [docs/PLUGINS.md](./docs/PLUGINS.md).

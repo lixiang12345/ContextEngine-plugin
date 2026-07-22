@@ -187,11 +187,19 @@ export class ConnectorSyncCoordinator {
     let committed = false;
     try {
       const config = started.config;
-      const [workspace, previousFiles, rawSnapshot] = await Promise.all([
+      const [workspace, previousFiles] = await Promise.all([
         this.repository.requireWorkspace(workspaceId),
         this.repository.listConnectorFiles(sourceId),
-        connector.listFiles(config, started.cursor),
       ]);
+      const rawSnapshot = await connector.listFiles(
+        config,
+        started.cursor,
+        previousFiles.map((file) => ({
+          path: file.path,
+          revision: file.remoteRevision,
+          bytes: file.bytes,
+        })),
+      );
       const snapshot = validatedSnapshot(rawSnapshot);
       const rootAlias = connector.rootAlias(config).trim();
       if (!rootAlias || rootAlias.length > 100 || /[\u0000-\u001f\u007f]/.test(rootAlias)) {

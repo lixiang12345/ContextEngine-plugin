@@ -50,7 +50,7 @@ npx contextengine-plugin context "Add logging to payment requests"
 | Watch 模式 | 防抖增量重建索引 |
 | MCP | 主工具 `codebase-retrieval`（兼容 Augment；`codebase_retrieval` 为旧别名）+ 搜索 / 文件 / 索引 |
 | HTTP | 带鉴权的工作区同步、索引任务、检索与 SSE 进度 |
-| Source 插件 | Provider-neutral 只读 Connector SDK；内置 GitHub + 静态网站 |
+| Source 插件 | Provider-neutral 只读 Connector SDK；内置 GitHub + GitLab + 静态网站 |
 | 评测 | Recall/MRR/nDCG + 重复成对 PR 运行 + 固定历史 corpus |
 
 **与 Augment 的对比：** [COMPARISON.md](./COMPARISON.md) · **架构：** [ARCHITECTURE.md](./ARCHITECTURE.md)
@@ -298,12 +298,13 @@ HTTP 服务内置 `/dashboard` 可观测控制台，与 `/v1/*` 共用 Bearer AP
 服务端明确配置的用户组映射才能授予 Operator 权限。Owner 还可以配置默认
 allow/deny 与嵌套路径前缀规则；Search、Context、File Read 和 Remote MCP 共用同一
 套数据面策略。
-只读 GitHub 与静态网站 Connector 可将外部内容绑定到空 Blob 工作区并进行增量
+只读 GitHub、GitLab 与静态网站 Connector 可将外部内容绑定到空 Blob 工作区并进行增量
 同步。网站抓取器强制 HTTPS/公网、同源、路径前缀、robots、重定向、页面数、深度与
-字节上限。经过签名验证的 GitHub Push Webhook 可通过持久、幂等的事件 inbox 触发
+字节上限。经过签名验证的 GitHub/GitLab Push Webhook 可通过持久、幂等的事件 inbox 触发
 同一套带租约同步流程。配置方式见 `CONTEXTENGINE_HTTP_API_KEYS`、
 `CONTEXTENGINE_OIDC_ISSUER`、`CONTEXTENGINE_GITHUB_TOKEN`、
-`CONTEXTENGINE_GITHUB_WEBHOOK_SECRET`、`CONTEXTENGINE_WEBSITE_TIMEOUT_MS` 和 HTTP API 文档中的
+`CONTEXTENGINE_GITHUB_WEBHOOK_SECRET`、`CONTEXTENGINE_GITLAB_TOKEN`、
+`CONTEXTENGINE_GITLAB_WEBHOOK_SIGNING_TOKEN`、`CONTEXTENGINE_WEBSITE_TIMEOUT_MS` 和 HTTP API 文档中的
 认证、Connector/ACL 路由。
 宿主可以通过 `connectorPlugins` 注册其他来源，详见
 [docs/PLUGINS.md](./docs/PLUGINS.md)。

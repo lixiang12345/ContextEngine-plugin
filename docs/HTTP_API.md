@@ -251,6 +251,35 @@ database clock, fence terminal writes by attempt number, and retry failures with
 bounded exponential backoff. A crash after connector commit but before event
 completion safely retries through the connector cursor and becomes a noop.
 
+The built-in GitLab plugin uses the same source route and accepts a
+namespace/project path:
+
+```http
+POST /v1/workspaces/{workspaceId}/sources/gitlab
+Content-Type: application/json
+
+{"project":"acme/tools","ref":"main"}
+
+POST /v1/workspaces/{workspaceId}/sources/{sourceId}/sync
+```
+
+The client resolves the branch/tag to an immutable commit SHA, walks the
+recursive repository tree with bounded pagination, obtains changed-file sizes
+with GitLab's `HEAD repository/files` metadata endpoint, and reads only blobs
+that fit the core Blob limit. It validates every path, commit/blob SHA, declared
+size and base64 payload; GitLab API errors are bounded and redact
+`CONTEXTENGINE_GITLAB_TOKEN`. Core-provided prior file metadata lets unchanged
+blobs skip repeat HEAD requests without inflating the connector cursor.
+
+Configure `CONTEXTENGINE_GITLAB_WEBHOOK_SIGNING_TOKEN` for GitLab's Standard
+Webhooks HMAC-SHA256 format (`webhook-id`, `webhook-timestamp`,
+`webhook-signature`). Signatures cover `{webhook-id}.{timestamp}.{raw body}`,
+must be recent, and are checked before JSON parsing. During migration,
+`CONTEXTENGINE_GITLAB_WEBHOOK_SECRET` accepts the legacy constant-time
+`X-Gitlab-Token` header when no signing header is present. Both adapters emit
+the same durable, idempotent inbox flow; deleted pushes and non-push events are
+ignored after authentication.
+
 Embedded deployments can register additional providers with the public
 `SourceConnectorPlugin` contract. Providers are advertised by
 `GET /v1/capabilities` and use the same
@@ -534,6 +563,11 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_WEBHOOK_MAX_ATTEMPTS` | Terminal failure threshold; default 5 |
 | `CONTEXTENGINE_WEBSITE_ALLOW_PRIVATE_NETWORK` | Trusted deployment override for private-network/plain-HTTP website crawling; default off |
 | `CONTEXTENGINE_WEBSITE_TIMEOUT_MS` | Per-request website crawl timeout; default 15000 ms |
+| `CONTEXTENGINE_GITLAB_TOKEN` | Optional GitLab API `PRIVATE-TOKEN`; never returned or stored in source config |
+| `CONTEXTENGINE_GITLAB_API_BASE_URL` | GitLab REST API base (default `https://gitlab.com/api/v4`; HTTP only for loopback) |
+| `CONTEXTENGINE_GITLAB_TIMEOUT_MS` | Per-request GitLab API timeout; default 30000 ms |
+| `CONTEXTENGINE_GITLAB_WEBHOOK_SIGNING_TOKEN` | GitLab Standard Webhooks `whsec_...` signing token |
+| `CONTEXTENGINE_GITLAB_WEBHOOK_SECRET` | Legacy `X-Gitlab-Token` migration secret; minimum 16 characters |
 
 The service uses `CONTEXTENGINE_DATABASE_URL` and the existing embedding/rerank
 configuration described in the root README.

@@ -6,6 +6,10 @@
   DNS pinning, same-origin/path-prefix and robots enforcement, bounded redirects,
   pages/depth/bytes, searchable HTML-to-text conversion, validator-based
   incremental cursors, and HTTP/PostgreSQL end-to-end coverage.
+- Added a bounded GitLab source connector with ref-to-commit resolution,
+  paginated tree walking, metadata HEAD sizing, validated Blob reads, token
+  redaction, Standard Webhooks HMAC-SHA256 verification, legacy token migration,
+  durable webhook integration, and HTTP/PostgreSQL end-to-end coverage.
 - Added schema v8 persistent connector webhook events, a provider-neutral signed
   webhook contract, GitHub HMAC-SHA256 push handling, delivery/body replay
   protection, database-clock worker recovery, bounded retries, and attempt

@@ -4,7 +4,7 @@ ContextEngine exposes a provider-neutral, read-only source connector contract.
 Plugins enumerate immutable file revisions and read their bytes; the core owns
 leases, hashing, incremental diff, Blob persistence, workspace revisions, index
 jobs and promotion. This keeps third-party providers inside the same consistency
-and authorization boundaries as the built-in GitHub and static website
+and authorization boundaries as the built-in GitHub, GitLab, and static website
 connectors.
 
 ## Contract
@@ -75,6 +75,9 @@ uses `POST /v1/workspaces/{workspaceId}/sources/{sourceId}/sync`.
   duplicate paths, invalid revisions, invalid sizes and snapshots above 20,000
   files.
 - `readFile` must return the exact byte count declared by `listFiles`.
+- The core passes prior file path/revision/size metadata as the optional third
+  `listFiles` argument, allowing plugins to avoid repeated upstream stat calls
+  without storing a large duplicate cursor.
 - A file revision must identify immutable bytes. Reusing a revision for changed
   content breaks incremental synchronization.
 - Plugins are trusted process code, not dynamically uploaded scripts. Register
@@ -102,3 +105,9 @@ shows how a provider can validate source-specific configuration, maintain an
 incremental cursor, expose immutable synthetic files, and keep network policy in
 the plugin while core synchronization remains provider-neutral. Its private
 network override is intended only for explicitly trusted deployments.
+
+`GitLabSourceConnector` is the repository-provider reference implementation. It
+resolves refs to immutable commits, paginates tree entries, uses file metadata
+HEAD requests for sizes, validates bounded base64 blobs, and supports GitLab's
+Standard Webhooks signing token plus constant-time legacy token migration. API
+credentials belong to server-level client configuration, never source JSON.
