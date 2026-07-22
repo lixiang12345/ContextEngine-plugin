@@ -10,6 +10,19 @@ import {
 import { analyzeQuery } from "../src/search/query-analyzer.js";
 import type { CodeChunk } from "../src/types.js";
 
+function chunk(partial: Partial<CodeChunk> & { path: string }): CodeChunk {
+  return {
+    id: partial.id ?? partial.path,
+    path: partial.path,
+    language: partial.language ?? "typescript",
+    startLine: partial.startLine ?? 1,
+    endLine: partial.endLine ?? (partial.content ? partial.content.split("\n").length : 1),
+    content: partial.content ?? "",
+    symbol: partial.symbol,
+    hash: partial.hash ?? "h",
+  };
+}
+
 describe("rerank", () => {
   it("boosts exact symbol matches", () => {
     const q = analyzeQuery("processPayment");
@@ -96,6 +109,44 @@ describe("rerank", () => {
 
     assert.ok(featureScore(impl, q) > featureScore(docs, q));
     assert.ok(featureScore(impl, q) > featureScore(test, q));
+  });
+
+  it("demotes deprecated/legacy code unless the query asks for it", () => {
+    const q = analyzeQuery("processPayment charge order handler");
+    const active = chunk({
+      path: "src/payments/process.ts",
+      content: "export function processPayment(order) { return charge(order); }",
+      symbol: "processPayment",
+    });
+    const legacyPath = chunk({
+      path: "src/legacy/process.ts",
+      content: "export function processPayment(order) { return charge(order); }",
+      symbol: "processPayment",
+    });
+    const markedDeprecated = chunk({
+      path: "src/payments/old-process.ts",
+      content: "/** @deprecated use process.ts */\nexport function processPayment(order) { return charge(order); }",
+      symbol: "processPayment",
+    });
+    assert.ok(featureScore(active, q) > featureScore(legacyPath, q));
+    assert.ok(featureScore(active, q) > featureScore(markedDeprecated, q));
+  });
+
+  it("keeps deprecated code when the query is explicitly about legacy code", () => {
+    const q = analyzeQuery("legacy deprecated processPayment handler");
+    const active = chunk({
+      path: "src/payments/process.ts",
+      content: "export function processPayment(order) { return charge(order); }",
+      symbol: "processPayment",
+    });
+    const legacyPath = chunk({
+      path: "src/legacy/process.ts",
+      content: "export function processPayment(order) { return charge(order); }",
+      symbol: "processPayment",
+    });
+    // With explicit legacy intent, the path penalty is waived so the legacy
+    // file is not pushed below the active one purely for living in legacy/.
+    assert.ok(featureScore(legacyPath, q) >= featureScore(active, q) - 0.01);
   });
 
   it("preferImplementation tie-breaks toward source files", () => {

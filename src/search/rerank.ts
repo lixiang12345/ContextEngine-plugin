@@ -96,6 +96,17 @@ const DOC_QUERY =
 const TEST_QUERY =
   /\b(test|tests|spec|fixture|fixtures|mock|mocks|benchmark|bench|example|examples|demo)\b/i;
 
+const DEPRECATED_QUERY =
+  /\b(deprecat\w*|legacy|obsolete|old|outdated|superseded|removed)\b/i;
+
+/** Clearly retired code by path convention (legacy/, deprecated/, .old.*, vendor/). */
+const DEPRECATED_PATH =
+  /(^|\/)(legacy|deprecated|deprecate|obsolete|vendor|third[_-]?party)(\/|$)|\.(old|bak|orig|deprecated)\.[cm]?[jt]sx?$|[._-]old(\.|\/|$)/i;
+
+/** In-source deprecation markers near the top of a chunk. */
+const DEPRECATED_MARKER =
+  /@deprecated\b|#\s*\[deprecated|\bDEPRECATED\b|std::deprecated|\bObsolete\b/;
+
 /**
  * Code-aware feature score — implementation-first ranking.
  * Higher is better.
@@ -196,6 +207,14 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
   }
   if (/\.d\.ts$/i.test(chunk.path) || /(^|\/)typings?(\/|$)/i.test(chunk.path)) {
     score -= 0.85;
+  }
+
+  // Active-vs-deprecated: demote clearly retired code (legacy/ or deprecated/
+  // paths, @deprecated markers) unless the query is explicitly asking for it.
+  // Mirrors the test/docs guards so intent to find legacy code is respected.
+  if (!DEPRECATED_QUERY.test(q.raw)) {
+    if (DEPRECATED_PATH.test(chunk.path)) score -= 1.25;
+    else if (DEPRECATED_MARKER.test(chunk.content.slice(0, 600))) score -= 0.7;
   }
 
   // Primary source trees

@@ -27,7 +27,7 @@ For the detailed capability-to-code audit and staged roadmap, see
 |------------|----------------------|------------------------|--------------|
 | MCP for Claude Code / Cursor / Zed | ✅ stdio MCP, `codebase-retrieval`, default live watcher | ✅ local + hosted MCP with multi-client setup | Low–Medium |
 | Remote MCP over HTTP | ✅ workspace-scoped Streamable HTTP, Bearer auth, bounded session lifecycle | ✅ hosted/connector HTTP MCP with OAuth/API key and deployment options | **Medium** |
-| Hybrid lexical + semantic search | ✅ PostgreSQL FTS + pgvector + symbol + path + RRF + feature rerank | ✅ specialized semantic retrieval | **Medium** (model still theirs) |
+| Hybrid lexical + semantic search | ✅ PostgreSQL FTS + pgvector + symbol + path + RRF + feature rerank (implementation-first, active-vs-deprecated aware) | ✅ specialized semantic retrieval | **Medium** (model still theirs) |
 | Context curation / packing | ✅ MMR diversity + token budget + pluggable `raw`/`extractive` policy (extractive keeps query-salient lines across passages) | ✅ "compresses context without losing critical information" | Low–Medium |
 | Retrieval transparency | ✅ per-response trace (intent, understood concepts, contributing/degraded channels, candidate→packed counts, token budget, generation) across CLI/HTTP/dashboard/eval | ✅ product UI shows intent, match-type confidence, coverage, token usage | Low |
 | Code-native embeddings | ⚠️ BYO OpenAI-compatible; two-stage rerank | ✅ **paired / trained retrieval models** for code | **High** |

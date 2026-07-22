@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added an active-vs-deprecated ranking signal to the feature scorer. Clearly
+  retired code — `legacy/`, `deprecated/`, `vendor/` paths, `.old`/`.bak`
+  filenames, and `@deprecated`/`Obsolete` markers — is demoted so current
+  implementations rank first, unless the query is explicitly about legacy or
+  deprecated code (mirrors the existing test/docs intent guards).
 - Added a workspace rules layer that grounds packed context in repository
   conventions the way Augment loads team knowledge. `getTaskContext` discovers
   `AGENTS.md`, `CLAUDE.md`, and `.augment/rules` / `.cursor/rules` entries,
