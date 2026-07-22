@@ -10,6 +10,9 @@
   paginated tree walking, metadata HEAD sizing, validated Blob reads, token
   redaction, Standard Webhooks HMAC-SHA256 verification, legacy token migration,
   durable webhook integration, and HTTP/PostgreSQL end-to-end coverage.
+- Added a Bitbucket Cloud source connector with commit-pinned paginated source
+  traversal, same-origin next-link validation, ETag/size metadata, bounded raw
+  reads, token redaction, HMAC `repo:push` webhooks, and HTTP/PostgreSQL tests.
 - Added schema v8 persistent connector webhook events, a provider-neutral signed
   webhook contract, GitHub HMAC-SHA256 push handling, delivery/body replay
   protection, database-clock worker recovery, bounded retries, and attempt

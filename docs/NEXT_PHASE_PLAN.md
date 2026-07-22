@@ -7,7 +7,7 @@
 当前数据库：PostgreSQL schema v8
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `180/180` 通过。
+全量测试 `185/185` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -44,6 +44,12 @@ Phase 6 状态（2026-07-22）：已实现内置 GitLab connector。它将 branc
 校验，支持 GitLab Standard Webhooks `whsec_` HMAC、时间戳防重放、legacy token
 迁移和持久 inbox；HTTP/PostgreSQL 覆盖首次同步、删除、搜索和签名 webhook refresh。
 下一步补 Bitbucket provider 与 GitHub/GitLab CI adapter。
+
+Phase 7 状态（2026-07-22）：已实现内置 Bitbucket Cloud connector。它将 ref 固定为
+commit，沿官方分页 `next` 遍历 source 目录，使用同源校验的分页链接、ETag/size
+metadata 和 commit-pinned raw reads；`repo:push` 使用 X-Hub-Signature HMAC、原始
+body 和 X-Request-UUID，HTTP/PostgreSQL 覆盖首次同步、删除、搜索与 webhook refresh。
+下一步实现 GitHub/GitLab/Bitbucket CI adapter。
 
 ## 1. 目标
 
@@ -213,8 +219,8 @@ Phase 1 完成后按以下顺序继续，避免在身份与隔离基础不稳时
 2. **source-level ACL（路径策略已实现）**：repo/path/document 权限已在 retrieval、
    file read、MCP 三层强制执行；后续 connector 阶段继续补 provider permission
    snapshot 与 provenance。
-3. **connector SDK + webhook（签名 webhook/inbox、GitHub/GitLab/website 已实现）**：
-   增加 Bitbucket provider 与 CI adapter；事件
+3. **connector SDK + webhook（签名 webhook/inbox、GitHub/GitLab/Bitbucket/website 已实现）**：
+   增加 CI adapter；事件
    idempotency 已由 schema v8 inbox 与现有 cursor/lease 共同保证。
 4. **PR 评测扩容**：公共多仓库 corpus、受控真实模型重复实验、token/tool-call/P95 与
    测试结果的可复现报告。

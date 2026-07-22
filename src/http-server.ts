@@ -25,6 +25,8 @@ import {
 import { GitHubSourceConnector } from "./connectors/github-plugin.js";
 import { GitLabConnectorClient } from "./connectors/gitlab.js";
 import { GitLabSourceConnector } from "./connectors/gitlab-plugin.js";
+import { BitbucketConnectorClient } from "./connectors/bitbucket.js";
+import { BitbucketSourceConnector } from "./connectors/bitbucket-plugin.js";
 import { WebsiteSourceConnector } from "./connectors/website.js";
 import {
   SourceConnectorError,
@@ -113,6 +115,10 @@ export interface HttpServerOptions {
   gitlabTimeoutMs?: number;
   gitlabWebhookSigningToken?: string;
   gitlabWebhookSecret?: string;
+  bitbucketToken?: string;
+  bitbucketApiBaseUrl?: string;
+  bitbucketTimeoutMs?: number;
+  bitbucketWebhookSecret?: string;
   /** Trusted deployments only: permit the built-in website connector to crawl private networks. */
   websiteAllowPrivateNetwork?: boolean;
   websiteTimeoutMs?: number;
@@ -898,6 +904,7 @@ class HttpContextService {
         | "disableEmbeddings"
         | "githubTimeoutMs"
         | "gitlabTimeoutMs"
+        | "bitbucketTimeoutMs"
         | "websiteAllowPrivateNetwork"
         | "websiteTimeoutMs"
         | "webhookPollIntervalMs"
@@ -914,6 +921,9 @@ class HttpContextService {
         | "gitlabApiBaseUrl"
         | "gitlabWebhookSigningToken"
         | "gitlabWebhookSecret"
+        | "bitbucketToken"
+        | "bitbucketApiBaseUrl"
+        | "bitbucketWebhookSecret"
         | "connectorPlugins"
       >,
   ) {
@@ -960,12 +970,18 @@ class HttpContextService {
       apiBaseUrl: options.gitlabApiBaseUrl,
       timeoutMs: options.gitlabTimeoutMs,
     });
+    const bitbucket = new BitbucketConnectorClient({
+      token: options.bitbucketToken,
+      apiBaseUrl: options.bitbucketApiBaseUrl,
+      timeoutMs: options.bitbucketTimeoutMs,
+    });
     this.connectorRegistry = new SourceConnectorRegistry([
       new GitHubSourceConnector(github, options.githubWebhookSecret),
       new GitLabSourceConnector(gitlab, {
         signingToken: options.gitlabWebhookSigningToken,
         secretToken: options.gitlabWebhookSecret,
       }),
+      new BitbucketSourceConnector(bitbucket, options.bitbucketWebhookSecret),
       new WebsiteSourceConnector({
         allowPrivateNetwork: options.websiteAllowPrivateNetwork,
         timeoutMs: options.websiteTimeoutMs,
@@ -977,7 +993,7 @@ class HttpContextService {
       runner: this.runner,
       connectors: this.connectorRegistry,
       maxBlobBytes: options.maxBlobBytes,
-      secrets: [options.githubToken, options.gitlabToken].filter(
+        secrets: [options.githubToken, options.gitlabToken, options.bitbucketToken].filter(
         (secret): secret is string => Boolean(secret),
       ),
     });
@@ -1090,6 +1106,20 @@ class HttpContextService {
         gitlabWebhookSecret:
           options.gitlabWebhookSecret ??
           (process.env.CONTEXTENGINE_GITLAB_WEBHOOK_SECRET?.trim() || undefined),
+        bitbucketToken:
+          options.bitbucketToken ??
+          (process.env.CONTEXTENGINE_BITBUCKET_TOKEN?.trim() || undefined),
+        bitbucketApiBaseUrl:
+          options.bitbucketApiBaseUrl ??
+          (process.env.CONTEXTENGINE_BITBUCKET_API_BASE_URL?.trim() || undefined),
+        bitbucketTimeoutMs: positiveOption(
+          options.bitbucketTimeoutMs ??
+            numberFromEnv(process.env.CONTEXTENGINE_BITBUCKET_TIMEOUT_MS, 30_000),
+          "bitbucketTimeoutMs",
+        ),
+        bitbucketWebhookSecret:
+          options.bitbucketWebhookSecret ??
+          (process.env.CONTEXTENGINE_BITBUCKET_WEBHOOK_SECRET?.trim() || undefined),
         websiteAllowPrivateNetwork:
           options.websiteAllowPrivateNetwork ??
           readBoolean(process.env.CONTEXTENGINE_WEBSITE_ALLOW_PRIVATE_NETWORK),

@@ -68,6 +68,9 @@ export {
 } from "./connectors/gitlab-plugin.js";
 export type { GitLabConnectorClientOptions } from "./connectors/gitlab.js";
 export type { GitLabWebhookOptions } from "./connectors/gitlab-plugin.js";
+export { BitbucketConnectorClient, BitbucketConnectorError } from "./connectors/bitbucket.js";
+export { BitbucketSourceConnector } from "./connectors/bitbucket-plugin.js";
+export type { BitbucketConnectorClientOptions } from "./connectors/bitbucket.js";
 export {
   WebsiteConnectorError,
   WebsiteSourceConnector,

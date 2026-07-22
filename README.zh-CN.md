@@ -50,7 +50,7 @@ npx contextengine-plugin context "Add logging to payment requests"
 | Watch 模式 | 防抖增量重建索引 |
 | MCP | 主工具 `codebase-retrieval`（兼容 Augment；`codebase_retrieval` 为旧别名）+ 搜索 / 文件 / 索引 |
 | HTTP | 带鉴权的工作区同步、索引任务、检索与 SSE 进度 |
-| Source 插件 | Provider-neutral 只读 Connector SDK；内置 GitHub + GitLab + 静态网站 |
+| Source 插件 | Provider-neutral 只读 Connector SDK；内置 GitHub + GitLab + Bitbucket + 静态网站 |
 | 评测 | Recall/MRR/nDCG + 重复成对 PR 运行 + 固定历史 corpus |
 
 **与 Augment 的对比：** [COMPARISON.md](./COMPARISON.md) · **架构：** [ARCHITECTURE.md](./ARCHITECTURE.md)
@@ -304,7 +304,8 @@ allow/deny 与嵌套路径前缀规则；Search、Context、File Read 和 Remote
 同一套带租约同步流程。配置方式见 `CONTEXTENGINE_HTTP_API_KEYS`、
 `CONTEXTENGINE_OIDC_ISSUER`、`CONTEXTENGINE_GITHUB_TOKEN`、
 `CONTEXTENGINE_GITHUB_WEBHOOK_SECRET`、`CONTEXTENGINE_GITLAB_TOKEN`、
-`CONTEXTENGINE_GITLAB_WEBHOOK_SIGNING_TOKEN`、`CONTEXTENGINE_WEBSITE_TIMEOUT_MS` 和 HTTP API 文档中的
+`CONTEXTENGINE_GITLAB_WEBHOOK_SIGNING_TOKEN`、`CONTEXTENGINE_BITBUCKET_TOKEN`、
+`CONTEXTENGINE_WEBSITE_TIMEOUT_MS` 和 HTTP API 文档中的
 认证、Connector/ACL 路由。
 宿主可以通过 `connectorPlugins` 注册其他来源，详见
 [docs/PLUGINS.md](./docs/PLUGINS.md)。

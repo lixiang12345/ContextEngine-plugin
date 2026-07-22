@@ -280,6 +280,28 @@ must be recent, and are checked before JSON parsing. During migration,
 the same durable, idempotent inbox flow; deleted pushes and non-push events are
 ignored after authentication.
 
+The built-in Bitbucket Cloud plugin uses workspace/repository slugs:
+
+```http
+POST /v1/workspaces/{workspaceId}/sources/bitbucket
+Content-Type: application/json
+
+{"workspace":"acme","repository":"tools","ref":"main"}
+
+POST /v1/workspaces/{workspaceId}/sources/{sourceId}/sync
+```
+
+The client resolves the ref to a commit SHA, walks Bitbucket's paginated source
+directories, follows only same-origin API `next` links, obtains file ETags and
+sizes with bounded HEAD requests, and reads raw file bytes pinned to that
+commit. An unchanged commit reuses the previous file metadata without tree
+walk/stat calls. Redirects, unsafe paths, missing ETags, oversized bodies and
+token-bearing pagination links fail closed. Configure
+`CONTEXTENGINE_BITBUCKET_WEBHOOK_SECRET` for `repo:push`: Bitbucket's
+`X-Hub-Signature: sha256=<hex>` HMAC covers the raw body and is verified before
+JSON parsing; `X-Request-UUID` provides durable delivery identity and branch
+changes are matched against the source ref.
+
 Embedded deployments can register additional providers with the public
 `SourceConnectorPlugin` contract. Providers are advertised by
 `GET /v1/capabilities` and use the same
@@ -568,6 +590,10 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_GITLAB_TIMEOUT_MS` | Per-request GitLab API timeout; default 30000 ms |
 | `CONTEXTENGINE_GITLAB_WEBHOOK_SIGNING_TOKEN` | GitLab Standard Webhooks `whsec_...` signing token |
 | `CONTEXTENGINE_GITLAB_WEBHOOK_SECRET` | Legacy `X-Gitlab-Token` migration secret; minimum 16 characters |
+| `CONTEXTENGINE_BITBUCKET_TOKEN` | Optional Bitbucket Cloud Bearer token; never returned or stored in source config |
+| `CONTEXTENGINE_BITBUCKET_API_BASE_URL` | Bitbucket API base (default `https://api.bitbucket.org/2.0`; HTTP only for loopback) |
+| `CONTEXTENGINE_BITBUCKET_TIMEOUT_MS` | Per-request Bitbucket API timeout; default 30000 ms |
+| `CONTEXTENGINE_BITBUCKET_WEBHOOK_SECRET` | Bitbucket `repo:push` HMAC secret; minimum 16 characters |
 
 The service uses `CONTEXTENGINE_DATABASE_URL` and the existing embedding/rerank
 configuration described in the root README.

@@ -111,3 +111,9 @@ resolves refs to immutable commits, paginates tree entries, uses file metadata
 HEAD requests for sizes, validates bounded base64 blobs, and supports GitLab's
 Standard Webhooks signing token plus constant-time legacy token migration. API
 credentials belong to server-level client configuration, never source JSON.
+
+`BitbucketSourceConnector` demonstrates a cursor-safe paginated directory
+provider: it pins raw reads to the resolved commit, validates every server
+pagination link against the API origin/path, uses ETags as immutable file
+revisions, and verifies Bitbucket Cloud's raw-body `X-Hub-Signature` webhook
+before parsing push changes.
