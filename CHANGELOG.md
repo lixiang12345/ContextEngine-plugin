@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Added an optional `--trace` mode to `contextengine eval`. Each case captures a
+  reproducible retrieval trace (intent, contributing channels, degraded channels,
+  packed tokens, serving generation) and the report gains a `traceSummary`:
+  per-channel case counts, distinct degraded channels, mean packed tokens, and
+  the index generations that served the run. IR metrics (recall/MRR/nDCG) stay on
+  the same code path, so enabling trace mode never changes them.
+- Surfaced the packing policy and retrieval trace over HTTP and the dashboard.
+  `POST /v1/workspaces/{id}/context` accepts a `packing` input and returns the
+  applied `packing` plus the full `trace`; the dashboard retrieval probe adds a
+  View selector (ranked hits vs packed raw/extractive) that renders the packed
+  context and a trace panel (intent, channels, candidate→packed counts, tokens,
+  generation).
 - Added a reproducible retrieval trace on every packed response
   (`PackedContext.trace`). It records the query intent, the retrieval channels
   that contributed, degraded channels, candidate/packed/file counts, estimated

@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import type { ContextEngine } from "../engine.js";
+import type { RetrievalTrace } from "../types.js";
 
 export interface EvalCase {
   id: string;
@@ -7,6 +8,15 @@ export interface EvalCase {
   expectPaths: string[];
   expectSymbols?: string[];
   topK?: number;
+}
+
+export interface EvalOptions {
+  /**
+   * Capture a reproducible retrieval trace per case (intent, channels,
+   * generation/revision, packed tokens). Adds one `getTaskContext` pack per
+   * case so runs stay diffable across retrieval changes.
+   */
+  trace?: boolean;
 }
 
 export interface EvalCaseResult {
@@ -26,6 +36,8 @@ export interface EvalCaseResult {
   top3Hit: boolean;
   top5Hit: boolean;
   passed: boolean;
+  /** Reproducible retrieval trace, present only when trace mode is enabled. */
+  trace?: RetrievalTrace;
 }
 
 export interface EvalReport {
@@ -41,6 +53,19 @@ export interface EvalReport {
   top3Accuracy: number;
   top5Accuracy: number;
   cases: EvalCaseResult[];
+  /** Present only in trace mode: aggregate retrieval-trace summary. */
+  traceSummary?: EvalTraceSummary;
+}
+
+export interface EvalTraceSummary {
+  /** Channels observed across cases → number of cases each contributed to. */
+  channelCaseCounts: Record<string, number>;
+  /** Distinct degraded channels observed across all cases. */
+  degradedChannels: string[];
+  /** Mean packed-context token estimate across traced cases. */
+  meanPackedTokens: number;
+  /** Distinct index generations that served the traced cases. */
+  generations: string[];
 }
 
 function dcg(rels: number[]): number {
@@ -86,6 +111,7 @@ function percentile(values: number[], percentileValue: number): number {
 export async function runEval(
   engine: ContextEngine,
   cases: EvalCase[],
+  options: EvalOptions = {},
 ): Promise<EvalReport> {
   const results: EvalCaseResult[] = [];
 
@@ -100,6 +126,17 @@ export async function runEval(
       diversify: true,
     });
     const latencyMs = Math.max(0, performance.now() - started);
+
+    // Optional: capture a reproducible retrieval trace by packing the same
+    // query. Kept out of the IR-metric path so recall/MRR/nDCG are unchanged.
+    let trace: RetrievalTrace | undefined;
+    if (options.trace) {
+      const packed = await engine.getTaskContext({
+        task: c.query,
+        topK,
+      });
+      trace = packed.trace;
+    }
     const hitPaths = hits.map((h) => h.chunk.path);
     const hitSymbols = hits
       .map((h) => h.chunk.symbol?.toLowerCase())
@@ -146,6 +183,7 @@ export async function runEval(
       top3Hit,
       top5Hit,
       passed,
+      trace,
     });
   }
 
@@ -166,6 +204,35 @@ export async function runEval(
     top3Accuracy: results.filter((result) => result.top3Hit).length / n,
     top5Accuracy: results.filter((result) => result.top5Hit).length / n,
     cases: results,
+    traceSummary: options.trace ? summarizeTraces(results) : undefined,
+  };
+}
+
+/** Aggregate per-case traces into a diffable retrieval-trace summary. */
+function summarizeTraces(results: EvalCaseResult[]): EvalTraceSummary {
+  const channelCaseCounts: Record<string, number> = {};
+  const degradedChannels = new Set<string>();
+  const generations = new Set<string>();
+  let packedTokenSum = 0;
+  let traced = 0;
+
+  for (const result of results) {
+    const trace = result.trace;
+    if (!trace) continue;
+    traced++;
+    packedTokenSum += trace.estimatedTokens;
+    for (const channel of trace.channels) {
+      channelCaseCounts[channel] = (channelCaseCounts[channel] ?? 0) + 1;
+    }
+    for (const channel of trace.degradedChannels) degradedChannels.add(channel);
+    if (trace.generationId) generations.add(trace.generationId);
+  }
+
+  return {
+    channelCaseCounts,
+    degradedChannels: [...degradedChannels],
+    meanPackedTokens: traced ? packedTokenSum / traced : 0,
+    generations: [...generations],
   };
 }
 

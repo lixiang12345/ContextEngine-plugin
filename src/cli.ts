@@ -484,6 +484,10 @@ program
   .option("-c, --cases <file>", "JSON file of eval cases")
   .option("--self", "run built-in self-eval against this repo's sources")
   .option("--reindex", "reindex before eval")
+  .option(
+    "--trace",
+    "capture a reproducible retrieval trace per case and an aggregate summary",
+  )
   .action(
     async (opts: {
       root: string;
@@ -491,6 +495,7 @@ program
       cases?: string;
       self?: boolean;
       reindex?: boolean;
+      trace?: boolean;
     }) => {
       const { readFileSync } = await import("node:fs");
       const {
@@ -512,7 +517,7 @@ program
       } else {
         cases = [];
       }
-      const report = await runEval(engine, cases);
+      const report = await runEval(engine, cases, { trace: Boolean(opts.trace) });
       await engine.close();
       console.log(JSON.stringify(report, null, 2));
       if (report.failed > 0) process.exitCode = 1;

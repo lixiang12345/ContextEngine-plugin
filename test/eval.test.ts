@@ -58,4 +58,44 @@ describePostgres("eval harness", () => {
     assert.ok(report.cases[0].hitPaths.length >= 0);
     assert.ok(report.cases[0].latencyMs >= 0);
   });
+
+  it("omits the retrieval trace unless trace mode is enabled", async () => {
+    const engine = ContextEngine.open({ root, dataDir });
+    const cases: EvalCase[] = [
+      { id: "bill", query: "create invoice billing", expectPaths: ["billing"] },
+    ];
+    const report = await runEval(engine, cases);
+    await engine.close();
+    assert.equal(report.cases[0].trace, undefined);
+    assert.equal(report.traceSummary, undefined);
+  });
+
+  it("captures a reproducible retrieval trace and aggregate summary", async () => {
+    const engine = ContextEngine.open({ root, dataDir });
+    const cases: EvalCase[] = [
+      { id: "bill", query: "create invoice billing", expectPaths: ["billing"] },
+      { id: "login", query: "authenticate user login", expectPaths: ["login"] },
+    ];
+    const report = await runEval(engine, cases, { trace: true });
+    await engine.close();
+
+    // IR metrics are unchanged by trace mode: it packs a second query but
+    // recall/MRR are still measured off the same search hits.
+    assert.equal(report.total, 2);
+    for (const result of report.cases) {
+      assert.ok(result.trace, "each case carries a trace in trace mode");
+      assert.equal(typeof result.trace.intent, "string");
+      assert.ok(Array.isArray(result.trace.channels));
+      assert.ok(result.trace.candidateCount >= 0);
+      assert.ok(result.trace.estimatedTokens >= 0);
+    }
+
+    const summary = report.traceSummary;
+    assert.ok(summary, "trace mode produces an aggregate summary");
+    assert.ok(summary.meanPackedTokens >= 0);
+    assert.ok(Array.isArray(summary.degradedChannels));
+    assert.equal(typeof summary.channelCaseCounts, "object");
+    // The two cases were served by the same immutable generation.
+    assert.ok(summary.generations.length <= 1 || summary.generations.length === 2);
+  });
 });

@@ -73,7 +73,7 @@ Augment 产品页中的“数十万文件”“更少 token 仍达到相近 solv
 
 - 固定版本的多语言、多仓库 golden query suite；每次 CI 输出 Recall@k、MRR、nDCG、Top-1/3/5、P50/P95。
 - 将 3 个内部历史任务扩展为公开、多仓库、固定 commit 的 PR task corpus，并在相同 agent、模型、提示词、预算和重复次数下运行 baseline/context 成对实验。
-- 已完成：`PackedContext.trace` 为每个响应记录 intent、contributing channel、degraded channel、candidate/packed/file 计数、packed token estimate、packing policy 以及 generation/indexed/source/pending revision 与 indexed_at，形成可比较的 retrieval trace（`context --json` 与 MCP JSON 均可读取，`context` 摘要行也会打印）。下一步把该 trace 落进 eval 报告做跨运行对比。
+- 已完成：`PackedContext.trace` 为每个响应记录 intent、contributing channel、degraded channel、candidate/packed/file 计数、packed token estimate、packing policy 以及 generation/indexed/source/pending revision 与 indexed_at，形成可比较的 retrieval trace（`context --json` 与 MCP JSON 均可读取，`context` 摘要行也会打印）。`eval --trace` 现把该 trace 落进每个 case 并汇总成 `traceSummary`（channel 命中 case 计数、degraded channel、平均 packed token、涉及的 generation），使跨运行对比可复现。下一步：把 traceSummary 纳入 CI 输出与历史归档。
 - 把字符预算升级成可插拔的 packing policy：`raw` 与 `extractive` 已实现（`extractive` 在预算收紧时保留查询相关行、省略无关行，CLI `--packing` 与 MCP `packing` 参数已贯通）；`model-summary` 仍待实现，默认仍使用无外部模型的 hard cap。
 - 增加失败注入测试：模型超时、索引 promotion 中断、旧 generation reader、重复 webhook、Blob 重放。
 
