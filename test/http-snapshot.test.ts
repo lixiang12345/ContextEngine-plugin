@@ -101,6 +101,7 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       },
       snapshotReplicationMaxAttempts: 3,
       snapshotReplicationRetryBaseMs: 10,
+      snapshotJobPollIntervalMs: 100,
     });
   });
 
@@ -230,10 +231,108 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       404,
     );
     assert.equal(
+      (
+        await request(
+          "bob",
+          `/v1/workspaces/${aliceWorkspace}/snapshot-replication-schedules`,
+        )
+      ).status,
+      404,
+    );
+    assert.equal(
       ((exportJob.result as { snapshot: { counts: { files: number } } })
         .snapshot.counts.files),
       0,
     );
+    const schedulePath =
+      `/v1/workspaces/${aliceWorkspace}/snapshots/team-main` +
+      "/replication-schedules/region-backup";
+    const scheduledPolicy = await request("alice", schedulePath, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "interval", interval_ms: 60_000 }),
+    });
+    assert.equal(scheduledPolicy.status, 200);
+    const schedule = (await scheduledPolicy.json()) as {
+      schedule: {
+        id: string;
+        enabled: boolean;
+        next_scheduled_at: string;
+      };
+    };
+    assert.equal(schedule.schedule.enabled, true);
+    assert.ok(Date.parse(schedule.schedule.next_scheduled_at) > Date.now());
+    const invalidNightly = await request(
+      "alice",
+      `/v1/workspaces/${aliceWorkspace}/snapshots/team-main/replication-schedules/flaky`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          mode: "nightly",
+          nightly_at: "23:30",
+          timezone: "Not/AZone",
+        }),
+      },
+    );
+    assert.equal(invalidNightly.status, 400);
+    const unknownScheduleTarget = await request(
+      "alice",
+      `/v1/workspaces/${aliceWorkspace}/snapshots/team-main/replication-schedules/unknown`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "interval", interval_ms: 60_000 }),
+      },
+    );
+    assert.equal(unknownScheduleTarget.status, 404);
+    await admin.query(
+      `UPDATE ${quoteIdentifier(schema)}.ce_snapshot_replication_schedules
+       SET next_scheduled_at = clock_timestamp() - interval '1 second'
+       WHERE id = $1`,
+      [schedule.schedule.id],
+    );
+    let scheduledJobId: string | null = null;
+    const scheduleDeadline = Date.now() + 5_000;
+    while (!scheduledJobId) {
+      const list = await request(
+        "alice",
+        `/v1/workspaces/${aliceWorkspace}/snapshot-replication-schedules`,
+      );
+      assert.equal(list.status, 200);
+      scheduledJobId = ((await list.json()) as {
+        schedules: Array<{ id: string; last_job_id: string | null }>;
+      }).schedules.find((entry) => entry.id === schedule.schedule.id)?.last_job_id ?? null;
+      if (scheduledJobId) break;
+      if (Date.now() >= scheduleDeadline) {
+        throw new Error("scheduled replication was not materialized");
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    const scheduledJob = await waitSnapshotJob(
+      "alice",
+      aliceWorkspace,
+      scheduledJobId,
+    );
+    assert.equal(scheduledJob.status, "succeeded", scheduledJob.error ?? undefined);
+    const pausedPolicy = await request("alice", schedulePath, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(pausedPolicy.status, 200);
+    assert.equal(
+      ((await pausedPolicy.json()) as {
+        schedule: { enabled: boolean; next_scheduled_at: string | null };
+      }).schedule.next_scheduled_at,
+      null,
+    );
+    const resumedPolicy = await request("alice", schedulePath, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(resumedPolicy.status, 200);
     const replicated = await request(
       "alice",
       `/v1/workspaces/${aliceWorkspace}/snapshots/team-main/replicate`,
@@ -256,6 +355,14 @@ describePostgres("owner-managed snapshot HTTP API", () => {
     );
     assert.equal(replicationJob.status, "succeeded", replicationJob.error ?? undefined);
     assert.equal(replicationJob.result?.target_id, "region-backup");
+    assert.equal(typeof replicationJob.result?.artifact_bytes, "number");
+    assert.ok((replicationJob.result?.artifact_bytes as number) > 0);
+    assert.equal(typeof replicationJob.result?.transfer_duration_ms, "number");
+    assert.ok((replicationJob.result?.transfer_duration_ms as number) >= 1);
+    assert.equal(
+      typeof replicationJob.result?.transfer_throughput_bytes_per_second,
+      "number",
+    );
     assert.ok(
       (await replicaStore.list()).some((key) => key.endsWith("/snapshots/team-main/manifest.json")),
     );
@@ -314,8 +421,14 @@ describePostgres("owner-managed snapshot HTTP API", () => {
           failed: number;
           retries: number;
           average_duration_ms: number | null;
+          total_artifact_bytes: number;
+          average_throughput_bytes_per_second: number | null;
+          consecutive_failures: number;
           replication_lag_ms: number | null;
         };
+        health: string;
+        alert: Record<string, unknown> | null;
+        schedules: Array<{ id: string; enabled: boolean }>;
         replications: Array<{ status: string; snapshot_name: string }>;
       }>;
     };
@@ -340,14 +453,65 @@ describePostgres("owner-managed snapshot HTTP API", () => {
         },
         {
           id: "region-backup", configured: true, status: "succeeded", snapshot: "team-main",
-          succeeded: 1, failed: 0, retries: 0,
+          succeeded: 2, failed: 0, retries: 0,
         },
       ],
     );
     for (const target of targets.targets.filter((entry) => entry.metrics.succeeded)) {
       assert.ok(target.metrics.average_duration_ms !== null);
       assert.ok(target.metrics.replication_lag_ms !== null);
+      assert.ok(target.metrics.total_artifact_bytes > 0);
+      assert.ok(target.metrics.average_throughput_bytes_per_second !== null);
     }
+    const scheduledTarget = targets.targets.find((target) => target.id === "region-backup")!;
+    assert.equal(scheduledTarget.health, "healthy");
+    assert.equal(scheduledTarget.alert, null);
+    assert.deepEqual(
+      scheduledTarget.schedules.map(({ id, enabled }) => ({ id, enabled })),
+      [{ id: schedule.schedule.id, enabled: true }],
+    );
+    const deletedSchedule = await request("alice", schedulePath, { method: "DELETE" });
+    assert.equal(deletedSchedule.status, 200);
+    assert.deepEqual(await deletedSchedule.json(), { deleted: true });
+    for (let index = 0; index < 2; index += 1) {
+      const failed = await request(
+        "alice",
+        `/v1/workspaces/${aliceWorkspace}/snapshots/team-main/replicate`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ target_id: "offline" }),
+        },
+      );
+      assert.equal(failed.status, 202);
+      const failedJobId = ((await failed.json()) as { job: { id: string } }).job.id;
+      assert.equal(
+        (await waitSnapshotJob("alice", aliceWorkspace, failedJobId)).status,
+        "failed",
+      );
+    }
+    const alertingTargets = (await (
+      await request(
+        "alice",
+        `/v1/workspaces/${aliceWorkspace}/snapshot-replication-targets`,
+      )
+    ).json()) as {
+      targets: Array<{
+        id: string;
+        health: string;
+        alert: { code: string; count: number } | null;
+      }>;
+    };
+    const alertingOffline = alertingTargets.targets.find(
+      (target) => target.id === "offline",
+    )!;
+    assert.equal(alertingOffline.health, "unhealthy");
+    assert.equal(alertingOffline.alert?.code, "consecutive_replication_failures");
+    assert.equal(alertingOffline.alert?.count, 3);
+    assert.equal(
+      typeof (alertingOffline.alert as { last_failed_at?: string }).last_failed_at,
+      "string",
+    );
     const unknownTarget = await request(
       "alice",
       `/v1/workspaces/${aliceWorkspace}/snapshots/team-main/replicate`,

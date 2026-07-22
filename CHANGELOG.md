@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added schema v13 durable snapshot replication schedules with manual,
+  interval, and IANA-timezone nightly policies, database-clock pause/resume,
+  cross-instance `SKIP LOCKED` materialization, active-job deduplication, and
+  owner-managed HTTP APIs.
+- Added durable replication transfer metrics and target health summaries:
+  artifact bytes, effective throughput, database-clock lag, consecutive
+  failures, and bounded alert metadata without credentials or raw store paths.
+- Added schema v11/v12 leased snapshot jobs and named replication targets with
+  restart recovery, attempt-token fencing, bounded exponential retry, verified
+  artifact copying, manifest-last publication, and workspace-prefixed stores.
 - Added a production-oriented static website source connector with public-HTTPS
   DNS pinning, same-origin/path-prefix and robots enforcement, bounded redirects,
   pages/depth/bytes, searchable HTML-to-text conversion, validator-based

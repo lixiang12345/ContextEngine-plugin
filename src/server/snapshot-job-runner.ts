@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { performance } from "node:perf_hooks";
 import type { SnapshotObjectStore } from "../snapshots/object-store.js";
 import {
   exportIndexSnapshot,
@@ -24,10 +25,14 @@ export interface SnapshotJobRunnerOptions {
     targetId: string,
   ): SnapshotObjectStore;
   hasReplicationTarget?(targetId: string): boolean;
+  /** Target ids available in this process; used to avoid creating jobs that
+   * no local worker can execute while still allowing another instance to do so. */
+  replicationTargetIds?(): readonly string[];
   onImportCompleted?(workspaceId: string): Promise<void>;
   leaseMs?: number;
   replicationMaxAttempts?: number;
   replicationRetryBaseMs?: number;
+  pollIntervalMs?: number;
 }
 
 export class SnapshotJobRunner {
@@ -36,14 +41,17 @@ export class SnapshotJobRunner {
   private readonly storeFor: SnapshotJobRunnerOptions["storeFor"];
   private readonly replicationTargetFor?: SnapshotJobRunnerOptions["replicationTargetFor"];
   private readonly hasReplicationTarget?: SnapshotJobRunnerOptions["hasReplicationTarget"];
+  private readonly replicationTargetIds?: SnapshotJobRunnerOptions["replicationTargetIds"];
   private readonly onImportCompleted?: SnapshotJobRunnerOptions["onImportCompleted"];
   private readonly leaseMs: number;
   private readonly replicationMaxAttempts: number;
   private readonly replicationRetryBaseMs: number;
+  private readonly pollIntervalMs: number;
   private readonly events = new EventEmitter();
   private readonly queue: string[] = [];
   private readonly queued = new Set<string>();
   private drainPromise: Promise<void> | null = null;
+  private scanPromise: Promise<void> | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private closed = false;
 
@@ -53,6 +61,7 @@ export class SnapshotJobRunner {
     this.storeFor = options.storeFor;
     this.replicationTargetFor = options.replicationTargetFor;
     this.hasReplicationTarget = options.hasReplicationTarget;
+    this.replicationTargetIds = options.replicationTargetIds;
     this.onImportCompleted = options.onImportCompleted;
     this.leaseMs = options.leaseMs ?? 5 * 60_000;
     this.replicationMaxAttempts = Math.max(
@@ -63,19 +72,21 @@ export class SnapshotJobRunner {
       10,
       Math.min(60_000, Math.floor(options.replicationRetryBaseMs ?? 1_000)),
     );
+    this.pollIntervalMs = Math.max(
+      100,
+      Math.min(
+        60_000,
+        Math.floor(
+          options.pollIntervalMs ??
+            Math.max(1_000, Math.min(10_000, Math.floor(this.leaseMs / 3))),
+        ),
+      ),
+    );
   }
 
   async start(): Promise<void> {
     await this.scan();
-    const pollMs = Math.max(1_000, Math.min(10_000, Math.floor(this.leaseMs / 3)));
-    this.pollTimer = setInterval(() => {
-      void this.scan().catch((error: unknown) => {
-        console.error(
-          "[snapshot jobs] queue scan failed:",
-          error instanceof Error ? error.message : String(error),
-        );
-      });
-    }, pollMs);
+    this.pollTimer = setInterval(() => this.triggerScan(), this.pollIntervalMs);
     this.pollTimer.unref();
   }
 
@@ -96,10 +107,38 @@ export class SnapshotJobRunner {
     this.closed = true;
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
+    await this.scanPromise;
     await this.drainPromise;
   }
 
+  private triggerScan(): void {
+    if (this.closed || this.scanPromise) return;
+    this.scanPromise = this.scan()
+      .catch((error: unknown) => {
+        console.error(
+          "[snapshot jobs] queue scan failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      })
+      .finally(() => {
+        this.scanPromise = null;
+      });
+  }
+
   private async scan(): Promise<void> {
+    if (this.replicationTargetIds && this.replicationTargetFor) {
+      try {
+        const scheduled = await this.repository.scheduleDueSnapshotReplicationJobs(
+          this.replicationTargetIds(),
+        );
+        for (const job of scheduled) this.enqueue(job.id);
+      } catch (error) {
+        console.error(
+          "[snapshot jobs] replication schedule scan failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     const jobs = await this.repository.listQueuedSnapshotJobs(this.leaseMs);
     for (const job of jobs) {
       if (this.canRun(job)) this.enqueue(job.id);
@@ -226,16 +265,31 @@ export class SnapshotJobRunner {
         throw new Error("Snapshot replication targets are not configured");
       }
       await this.progress(job, "replicating");
+      const transferStartedAt = performance.now();
       const result = await replicateIndexSnapshot({
         name: job.snapshotName,
         source: store,
         target: this.replicationTargetFor(job.workspaceId, targetId),
       });
+      // Keep transfer measurements with the durable result so aggregate
+      // metrics remain available after a worker restarts or another instance
+      // claims the job. A one millisecond floor avoids an infinite rate for
+      // tiny local artifacts while preserving sub-millisecond work as 1 ms.
+      const transferDurationMs = Math.max(
+        1,
+        Math.round(performance.now() - transferStartedAt),
+      );
+      const artifactBytes = result.manifest.artifact.bytes;
       return {
         target_id: targetId,
         snapshot: result.manifest,
         manifest_key: result.manifestKey,
         artifact_key: result.artifactKey,
+        artifact_bytes: artifactBytes,
+        transfer_duration_ms: transferDurationMs,
+        transfer_throughput_bytes_per_second: Math.round(
+          (artifactBytes * 1000) / transferDurationMs,
+        ),
       };
     }
     await this.progress(job, "garbage_collecting");

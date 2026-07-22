@@ -83,6 +83,18 @@ describe("request telemetry", () => {
       observableRoute("/v1/observability/overview"),
       "/v1/observability/overview",
     );
+    assert.equal(
+      observableRoute(
+        "/v1/workspaces/workspace-a/snapshots/main/replication-schedules/region-backup",
+      ),
+      "/v1/workspaces/{workspaceId}/snapshots/{name}/replication-schedules/{targetId}",
+    );
+    assert.equal(
+      observableRoute(
+        "/v1/workspaces/workspace-a/snapshot-jobs/job-a/events",
+      ),
+      "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/events",
+    );
 
     const telemetry = new RequestTelemetry();
     for (let index = 0; index < 250; index++) {

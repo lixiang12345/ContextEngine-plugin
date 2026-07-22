@@ -399,6 +399,18 @@ Content-Type: application/json
 
 GET /v1/workspaces/{workspaceId}/snapshot-replication-targets
 
+GET /v1/workspaces/{workspaceId}/snapshot-replication-schedules
+
+PUT /v1/workspaces/{workspaceId}/snapshots/{name}/replication-schedules/{targetId}
+Content-Type: application/json
+{"mode":"interval","interval_ms":3600000}
+
+PATCH /v1/workspaces/{workspaceId}/snapshots/{name}/replication-schedules/{targetId}
+Content-Type: application/json
+{"enabled":false}
+
+DELETE /v1/workspaces/{workspaceId}/snapshots/{name}/replication-schedules/{targetId}
+
 DELETE /v1/workspaces/{workspaceId}/snapshots/{name}
 
 POST /v1/workspaces/{workspaceId}/snapshots:prune
@@ -432,10 +444,19 @@ or `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` as a JSON object mapping stable
 target ids to store locations. Credentials are never persisted in PostgreSQL;
 target status is derived from the latest durable replication jobs and includes
 queued/running/succeeded/failed counts, retry count, average duration, last
-success/failure timestamps, and replication lag. Replication failures retry
+success/failure timestamps, database-clock replication lag, artifact byte totals,
+largest/average artifact size, effective transfer throughput, consecutive failure
+count, and a low-cardinality `health`/`alert` summary. Replication failures retry
 automatically with bounded exponential backoff; configure
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` and
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` to tune the policy.
+Owners can persist one policy per workspace/target/snapshot. `manual` disables
+automatic runs; `interval` requires `interval_ms` from 60 seconds through 365
+days; `nightly` requires `nightly_at` (`HH:MM[:SS]`) and an IANA `timezone`.
+Policies are claimed with PostgreSQL row locks and create an idempotent
+replication job; independent HTTP instances therefore cannot materialize the
+same due policy twice. `PATCH` pauses or resumes a policy, and target stores
+remain process-injected so credentials never enter the database.
 
 ### 2. Plan a file manifest change
 
@@ -726,6 +747,7 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` | JSON object of target id to filesystem or `s3://bucket/prefix` store location; credentials remain in the host environment |
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` | Automatic replication attempts per job (default 3, maximum 10) |
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` | Initial automatic retry delay (default 1000 ms, maximum 60000 ms) |
+| `CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS` | Durable snapshot job and schedule scan interval (default 2000 ms, range 100-60000 ms) |
 | `CONTEXTENGINE_S3_ENDPOINT` / `_FORCE_PATH_STYLE` | Optional S3-compatible service endpoint and path-style mode |
 | `CONTEXTENGINE_S3_SSE` / `_KMS_KEY_ID` | Optional `AES256` or `aws:kms` server-side encryption |
 
@@ -766,10 +788,13 @@ enabling webhook delivery; schema v8 workers can safely share the inbox and use
 `SKIP LOCKED` plus connector leases across instances.
 
 Schema v9 adds source-scoped CI credentials, schema v10 adds optional validated
-provenance to inbox events, schema v11 adds leased snapshot jobs, and schema v12
-adds replication jobs and target status indexes. Older
+provenance to inbox events, schema v11 adds leased snapshot jobs, schema v12
+adds replication jobs and target status indexes, and schema v13 adds durable
+replication schedules plus the active replication uniqueness invariant. Older
 instances reject a newer marker; drain them before issuing CI credentials,
-accepting CI deliveries, or creating snapshot jobs.
+accepting CI deliveries, or creating snapshot jobs/schedules. The v12 to v13
+migration fences duplicate active replication rows before creating the unique
+index; deploy new workers before enabling schedules.
 
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former

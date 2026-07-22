@@ -76,6 +76,7 @@ import {
   ConnectorCiRateLimitError,
   type StoredIndexJob,
   type StoredSnapshotJob,
+  type StoredSnapshotReplicationSchedule,
   type StoredConnectorSource,
   type StoredConnectorCiToken,
   type StoredWorkspace,
@@ -108,6 +109,7 @@ const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_MCP_MAX_SESSIONS = 128;
 const DEFAULT_SNAPSHOT_REPLICATION_MAX_ATTEMPTS = 3;
 const DEFAULT_SNAPSHOT_REPLICATION_RETRY_BASE_MS = 1_000;
+const DEFAULT_SNAPSHOT_JOB_POLL_INTERVAL_MS = 2_000;
 const MAX_BATCH_BLOBS = 16;
 const snapshotNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/);
 const snapshotPruneSchema = z.object({
@@ -121,6 +123,32 @@ const snapshotReplicationTargetIdSchema = z
 const snapshotReplicationSchema = z
   .object({ target_id: snapshotReplicationTargetIdSchema })
   .strict();
+const snapshotReplicationScheduleSchema = z.union([
+  z.object({
+    mode: z.literal("manual"),
+  }).strict(),
+  z.object({
+    mode: z.literal("interval"),
+    interval_ms: z.number().int().min(60_000).max(31_536_000_000),
+    enabled: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    mode: z.literal("nightly"),
+    nightly_at: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/),
+    timezone: z.string().trim().min(1).max(64).refine((timezone) => {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format();
+        return true;
+      } catch {
+        return false;
+      }
+    }, "timezone must be a valid IANA time zone"),
+    enabled: z.boolean().optional(),
+  }).strict(),
+]);
+const snapshotReplicationSchedulePatchSchema = z.object({
+  enabled: z.boolean(),
+}).strict();
 
 export interface HttpServerOptions {
   host?: string;
@@ -168,6 +196,8 @@ export interface HttpServerOptions {
     | Readonly<Record<string, SnapshotObjectStore>>;
   snapshotReplicationMaxAttempts?: number;
   snapshotReplicationRetryBaseMs?: number;
+  /** Database queue and replication-schedule scan interval. */
+  snapshotJobPollIntervalMs?: number;
 }
 
 export interface HttpServerHandle {
@@ -420,6 +450,17 @@ function boundedPositiveOption(value: number, name: string, max: number): number
   return normalized;
 }
 
+function rangedPositiveOption(
+  value: number,
+  name: string,
+  min: number,
+  max: number,
+): number {
+  const normalized = boundedPositiveOption(value, name, max);
+  if (normalized < min) throw new Error(`${name} must be at least ${min}`);
+  return normalized;
+}
+
 function mcpSessionStoreFromEnv(value: string | undefined): McpSessionStoreKind {
   const normalized = value?.trim().toLowerCase() || "postgres";
   if (normalized === "postgres" || normalized === "memory") return normalized;
@@ -604,12 +645,18 @@ function jobPayload(job: StoredIndexJob): Record<string, unknown> {
 
 function snapshotJobPayload(job: StoredSnapshotJob): Record<string, unknown> {
   const targetId = job.parameters.target_id;
+  const scheduleId = job.parameters.schedule_id;
+  const trigger = job.parameters.trigger;
+  const scheduledFor = job.parameters.scheduled_for;
   return {
     id: job.id,
     workspace_id: job.workspaceId,
     operation: job.operation,
     snapshot_name: job.snapshotName,
     target_id: typeof targetId === "string" ? targetId : null,
+    schedule_id: typeof scheduleId === "string" ? scheduleId : null,
+    trigger: typeof trigger === "string" ? trigger : null,
+    scheduled_for: typeof scheduledFor === "string" ? scheduledFor : null,
     status: job.status,
     progress: job.progress,
     result: job.result,
@@ -619,6 +666,28 @@ function snapshotJobPayload(job: StoredSnapshotJob): Record<string, unknown> {
     created_at: job.createdAt,
     started_at: job.startedAt,
     completed_at: job.completedAt,
+  };
+}
+
+function snapshotReplicationSchedulePayload(
+  schedule: StoredSnapshotReplicationSchedule,
+): Record<string, unknown> {
+  return {
+    id: schedule.id,
+    workspace_id: schedule.workspaceId,
+    target_id: schedule.targetId,
+    snapshot_name: schedule.snapshotName,
+    mode: schedule.mode,
+    interval_ms: schedule.intervalMs,
+    nightly_at: schedule.nightlyAt,
+    timezone: schedule.timezone,
+    enabled: schedule.enabled,
+    next_scheduled_at: schedule.nextScheduledAt,
+    last_scheduled_at: schedule.lastScheduledAt,
+    last_job_id: schedule.lastJobId,
+    created_by: schedule.createdBy,
+    created_at: schedule.createdAt,
+    updated_at: schedule.updatedAt,
   };
 }
 
@@ -961,6 +1030,15 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/snapshots/{name}/replicate": {
         post: { summary: "Queue snapshot replication to a configured target" },
       },
+      "/v1/workspaces/{workspaceId}/snapshot-replication-schedules": {
+        get: { summary: "List durable snapshot replication schedules" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshots/{name}/replication-schedules/{targetId}": {
+        get: { summary: "Get a snapshot replication schedule" },
+        put: { summary: "Create or replace a snapshot replication schedule" },
+        patch: { summary: "Pause or resume a snapshot replication schedule" },
+        delete: { summary: "Delete a snapshot replication schedule" },
+      },
       "/v1/workspaces/{workspaceId}/snapshot-replication-targets": {
         get: { summary: "List configured snapshot replication targets and status" },
       },
@@ -1064,6 +1142,7 @@ class HttpContextService {
   >;
   private readonly snapshotReplicationMaxAttempts: number;
   private readonly snapshotReplicationRetryBaseMs: number;
+  private readonly snapshotJobPollIntervalMs: number;
   private readonly mcpSessions = new Map<string, McpHttpSession>();
   private readonly mcpSessionCleanupTimer: NodeJS.Timeout;
   private pendingMcpInitializations = 0;
@@ -1092,6 +1171,7 @@ class HttpContextService {
         | "webhookMaxAttempts"
         | "snapshotReplicationMaxAttempts"
         | "snapshotReplicationRetryBaseMs"
+        | "snapshotJobPollIntervalMs"
         | "corsOrigins"
       >
     > &
@@ -1147,6 +1227,7 @@ class HttpContextService {
     );
     this.snapshotReplicationMaxAttempts = options.snapshotReplicationMaxAttempts;
     this.snapshotReplicationRetryBaseMs = options.snapshotReplicationRetryBaseMs;
+    this.snapshotJobPollIntervalMs = options.snapshotJobPollIntervalMs;
     this.runner = new IndexJobRunner({
       repository,
       engineFor: (workspace) => this.engineFor(workspace),
@@ -1162,8 +1243,10 @@ class HttpContextService {
         this.requireSnapshotReplicationTarget(workspaceId, targetId),
       hasReplicationTarget: (targetId) =>
         this.snapshotReplicationTargets.has(targetId),
+      replicationTargetIds: () => [...this.snapshotReplicationTargets.keys()],
       replicationMaxAttempts: options.snapshotReplicationMaxAttempts,
       replicationRetryBaseMs: options.snapshotReplicationRetryBaseMs,
+      pollIntervalMs: options.snapshotJobPollIntervalMs,
       onImportCompleted: (workspaceId) => this.closeEngine(workspaceId),
     });
     const github = new GitHubConnectorClient({
@@ -1377,6 +1460,16 @@ class HttpContextService {
           "snapshotReplicationRetryBaseMs",
           60_000,
         ),
+        snapshotJobPollIntervalMs: rangedPositiveOption(
+          options.snapshotJobPollIntervalMs ??
+            numberFromEnv(
+              process.env.CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS,
+              DEFAULT_SNAPSHOT_JOB_POLL_INTERVAL_MS,
+            ),
+          "snapshotJobPollIntervalMs",
+          100,
+          60_000,
+        ),
         corsOrigins: normalizeCorsOrigins(
           options.corsOrigins ??
             (process.env.CONTEXTENGINE_HTTP_CORS_ORIGINS ?? "").split(","),
@@ -1558,6 +1651,11 @@ class HttpContextService {
               max_attempts: this.snapshotReplicationMaxAttempts,
               base_delay_ms: this.snapshotReplicationRetryBaseMs,
               strategy: "exponential",
+            },
+            replication_schedules: {
+              durable: true,
+              modes: ["manual", "interval", "nightly"],
+              min_interval_ms: 60_000,
             },
           },
           retrieval: ["search", "context", "file", "codebase-retrieval"],
@@ -1916,9 +2014,10 @@ class HttpContextService {
       if (request.method === "GET" && snapshotReplicationTargetsMatch) {
         const workspaceId = decodeURIComponent(snapshotReplicationTargetsMatch[1]);
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
-        const [latest, metrics] = await Promise.all([
+        const [latest, metrics, schedules] = await Promise.all([
           this.repository.listLatestSnapshotReplicationJobs(workspaceId),
           this.repository.snapshotReplicationMetrics(workspaceId),
+          this.repository.listSnapshotReplicationSchedules(workspaceId),
         ]);
         const metricsByTarget = new Map(metrics.map((entry) => [entry.targetId, entry]));
         const targetIds = new Set(this.snapshotReplicationTargets.keys());
@@ -1926,6 +2025,7 @@ class HttpContextService {
           const targetId = job.parameters.target_id;
           if (typeof targetId === "string") targetIds.add(targetId);
         }
+        for (const schedule of schedules) targetIds.add(schedule.targetId);
         json(response, 200, {
           targets: [...targetIds].sort().map((targetId) => ({
             id: targetId,
@@ -1940,6 +2040,11 @@ class HttpContextService {
                   failed: 0,
                   retries: 0,
                   average_duration_ms: null,
+                  total_artifact_bytes: 0,
+                  average_artifact_bytes: null,
+                  largest_artifact_bytes: null,
+                  average_throughput_bytes_per_second: null,
+                  consecutive_failures: 0,
                   last_succeeded_at: null,
                   last_failed_at: null,
                   replication_lag_ms: null,
@@ -1952,16 +2057,60 @@ class HttpContextService {
                 failed: metric.failed,
                 retries: metric.retries,
                 average_duration_ms: metric.averageDurationMs,
+                total_artifact_bytes: metric.totalArtifactBytes,
+                average_artifact_bytes: metric.averageArtifactBytes,
+                largest_artifact_bytes: metric.largestArtifactBytes,
+                average_throughput_bytes_per_second:
+                  metric.averageThroughputBytesPerSecond,
+                consecutive_failures: metric.consecutiveFailures,
                 last_succeeded_at: metric.lastSucceededAt,
                 last_failed_at: metric.lastFailedAt,
-                replication_lag_ms: metric.lastSucceededAt
-                  ? Math.max(0, Date.now() - Date.parse(metric.lastSucceededAt))
-                  : null,
+                replication_lag_ms: metric.replicationLagMs === null
+                  ? null
+                  : Math.max(0, metric.replicationLagMs),
               };
             })(),
+            health: (() => {
+              const failures = metricsByTarget.get(targetId)?.consecutiveFailures ?? 0;
+              if (failures >= 3) return "unhealthy";
+              if (failures > 0) return "degraded";
+              if ((metricsByTarget.get(targetId)?.succeeded ?? 0) > 0) return "healthy";
+              return "unknown";
+            })(),
+            alert: (() => {
+              const metric = metricsByTarget.get(targetId);
+              return metric && metric.consecutiveFailures >= 3
+                ? {
+                    code: "consecutive_replication_failures",
+                    threshold: 3,
+                    count: metric.consecutiveFailures,
+                    last_failed_at: metric.lastFailedAt,
+                  }
+                : null;
+            })(),
+            schedules: schedules
+              .filter((schedule) => schedule.targetId === targetId)
+              .map(snapshotReplicationSchedulePayload),
             replications: latest
               .filter((job) => job.parameters.target_id === targetId)
               .map(snapshotJobPayload),
+          })),
+        });
+        return;
+      }
+
+      const snapshotReplicationSchedulesMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshot-replication-schedules$/.exec(pathname);
+      if (request.method === "GET" && snapshotReplicationSchedulesMatch) {
+        const workspaceId = decodeURIComponent(snapshotReplicationSchedulesMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const schedules = await this.repository.listSnapshotReplicationSchedules(
+          workspaceId,
+        );
+        json(response, 200, {
+          schedules: schedules.map((schedule) => ({
+            ...snapshotReplicationSchedulePayload(schedule),
+            target_configured: this.snapshotReplicationTargets.has(schedule.targetId),
           })),
         });
         return;
@@ -2012,16 +2161,111 @@ class HttpContextService {
           await readJsonBody(request, 16 * 1024),
         );
         this.requireSnapshotReplicationTarget(workspaceId, input.target_id);
-        const job = await this.repository.createSnapshotJob({
+        const queued = await this.repository.createSnapshotReplicationJob({
           workspaceId,
           principalId: principal.principalId,
-          operation: "replicate",
           snapshotName: name,
-          parameters: { target_id: input.target_id },
+          targetId: input.target_id,
         });
-        this.snapshotRunner.enqueue(job.id);
-        json(response, 202, { job: snapshotJobPayload(job) });
+        if (queued.created) this.snapshotRunner.enqueue(queued.job.id);
+        json(response, 202, {
+          job: snapshotJobPayload(queued.job),
+          deduplicated: !queued.created,
+        });
         return;
+      }
+
+      const snapshotReplicationScheduleItemMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshots\/([^/]+)\/replication-schedules\/([^/]+)$/.exec(
+          pathname,
+        );
+      if (snapshotReplicationScheduleItemMatch) {
+        const workspaceId = decodeURIComponent(snapshotReplicationScheduleItemMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const name = snapshotNameSchema.parse(
+          decodeURIComponent(snapshotReplicationScheduleItemMatch[2]),
+        );
+        const targetId = snapshotReplicationTargetIdSchema.parse(
+          decodeURIComponent(snapshotReplicationScheduleItemMatch[3]),
+        );
+        if (request.method === "GET") {
+          const schedule = await this.repository.getSnapshotReplicationSchedule(
+            workspaceId,
+            targetId,
+            name,
+          );
+          if (!schedule) throw new HttpError(404, "Snapshot replication schedule not found");
+          json(response, 200, {
+            schedule: {
+              ...snapshotReplicationSchedulePayload(schedule),
+              target_configured: this.snapshotReplicationTargets.has(targetId),
+            },
+          });
+          return;
+        }
+        if (request.method === "PUT") {
+          this.requireSnapshotStore(workspaceId);
+          this.requireSnapshotReplicationTarget(workspaceId, targetId);
+          const input = snapshotReplicationScheduleSchema.parse(
+            await readJsonBody(request, 16 * 1024),
+          );
+          const schedule = await this.repository.upsertSnapshotReplicationSchedule({
+            workspaceId,
+            principalId: principal.principalId,
+            targetId,
+            snapshotName: name,
+            mode: input.mode,
+            ...(input.mode === "interval"
+              ? { intervalMs: input.interval_ms, enabled: input.enabled }
+              : input.mode === "nightly"
+                ? {
+                    nightlyAt: input.nightly_at,
+                    timezone: input.timezone,
+                    enabled: input.enabled,
+                  }
+                : {}),
+          });
+          json(response, 200, { schedule: snapshotReplicationSchedulePayload(schedule) });
+          return;
+        }
+        if (request.method === "PATCH") {
+          const input = snapshotReplicationSchedulePatchSchema.parse(
+            await readJsonBody(request, 16 * 1024),
+          );
+          if (input.enabled) {
+            this.requireSnapshotStore(workspaceId);
+            this.requireSnapshotReplicationTarget(workspaceId, targetId);
+          }
+          const schedule = await this.repository.setSnapshotReplicationScheduleEnabled(
+            workspaceId,
+            targetId,
+            name,
+            input.enabled,
+          );
+          if (!schedule) {
+            const existing = await this.repository.getSnapshotReplicationSchedule(
+              workspaceId,
+              targetId,
+              name,
+            );
+            if (!existing) {
+              throw new HttpError(404, "Snapshot replication schedule not found");
+            }
+            throw new HttpError(409, "Manual replication schedules cannot be enabled");
+          }
+          json(response, 200, { schedule: snapshotReplicationSchedulePayload(schedule) });
+          return;
+        }
+        if (request.method === "DELETE") {
+          const deleted = await this.repository.deleteSnapshotReplicationSchedule(
+            workspaceId,
+            targetId,
+            name,
+          );
+          json(response, 200, { deleted });
+          return;
+        }
+        throw new HttpError(405, "Method not allowed for snapshot replication schedule");
       }
 
       const snapshotJobEventMatch =
@@ -3433,6 +3677,9 @@ class HttpContextService {
       mcpSessionStore: this.mcpSessionStore.kind,
       corsOriginsCount: this.corsOrigins.size,
       disableEmbeddings: this.disableEmbeddings,
+      snapshotStoreConfigured: Boolean(this.snapshotStore),
+      snapshotReplicationTargetCount: this.snapshotReplicationTargets.size,
+      snapshotJobPollIntervalMs: this.snapshotJobPollIntervalMs,
     });
   }
 

@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 export const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -2231,6 +2231,102 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [12],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 13) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_snapshot_replication_schedules (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+        target_id TEXT NOT NULL CHECK (target_id ~ '^[a-z][a-z0-9_-]{0,62}$'),
+        snapshot_name TEXT NOT NULL
+          CHECK (snapshot_name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'),
+        mode TEXT NOT NULL CHECK (mode IN ('manual', 'interval', 'nightly')),
+        interval_ms BIGINT,
+        nightly_at TIME WITHOUT TIME ZONE,
+        timezone TEXT NOT NULL DEFAULT 'UTC'
+          CHECK (char_length(timezone) BETWEEN 1 AND 64),
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        next_scheduled_at TIMESTAMPTZ,
+        last_scheduled_at TIMESTAMPTZ,
+        last_job_id TEXT REFERENCES ce_snapshot_jobs(id) ON DELETE SET NULL,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        UNIQUE (workspace_id, target_id, snapshot_name),
+        CHECK (
+          (mode = 'manual' AND interval_ms IS NULL AND nightly_at IS NULL)
+          OR (mode = 'interval' AND interval_ms BETWEEN 60000 AND 31536000000
+              AND nightly_at IS NULL)
+          OR (mode = 'nightly' AND interval_ms IS NULL AND nightly_at IS NOT NULL)
+        ),
+        CHECK (
+          (mode = 'manual' AND enabled = FALSE AND next_scheduled_at IS NULL)
+          OR (
+            mode <> 'manual'
+            AND (
+              (enabled = TRUE AND next_scheduled_at IS NOT NULL)
+              OR (enabled = FALSE AND next_scheduled_at IS NULL)
+            )
+          )
+        ),
+        CHECK (
+          mode <> 'nightly'
+          OR pg_catalog.timezone(
+            timezone,
+            TIMESTAMP '2000-01-01 00:00:00'
+          ) IS NOT NULL
+        )
+      );
+      CREATE INDEX IF NOT EXISTS ce_snapshot_replication_schedules_due_idx
+        ON ce_snapshot_replication_schedules(next_scheduled_at, target_id)
+        WHERE enabled = TRUE AND next_scheduled_at IS NOT NULL;
+      -- v12 allowed callers to queue the same replication more than once.
+      -- Keep a running job when possible, fence the rest, then install one
+      -- global active-job invariant shared by manual and scheduled triggers.
+      LOCK TABLE ce_snapshot_jobs IN SHARE ROW EXCLUSIVE MODE;
+      WITH ranked_active_replications AS (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY workspace_id, parameters->>'target_id', snapshot_name
+                 ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,
+                          created_at, id
+               ) AS position
+        FROM ce_snapshot_jobs
+        WHERE operation = 'replicate' AND status IN ('queued', 'running')
+      )
+      UPDATE ce_snapshot_jobs AS jobs
+      SET status = 'failed',
+          error = 'Superseded by schema v13 active replication deduplication',
+          progress = '{"phase":"superseded"}'::jsonb,
+          locked_at = NULL,
+          lock_token = NULL,
+          completed_at = clock_timestamp()
+      FROM ranked_active_replications AS ranked
+      WHERE jobs.id = ranked.id AND ranked.position > 1;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS ce_snapshot_jobs_active_replication_idx
+        ON ce_snapshot_jobs(
+          workspace_id,
+          (parameters->>'target_id'),
+          snapshot_name
+        )
+        WHERE operation = 'replicate'
+          AND status IN ('queued', 'running');
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [13],
             );
             await client.query("COMMIT");
           } catch (error) {

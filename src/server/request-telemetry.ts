@@ -110,6 +110,44 @@ export function observableRoute(pathname: string, method?: string): string {
   if (/^\/v1\/workspaces\/[^/]+\/index-jobs$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/index-jobs";
   }
+  if (/^\/v1\/workspaces\/[^/]+\/snapshots$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/snapshots";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/snapshots:(prune|gc)$/.test(pathname)) {
+    return pathname.replace(
+      /^\/v1\/workspaces\/[^/]+/,
+      "/v1/workspaces/{workspaceId}",
+    );
+  }
+  if (
+    /^\/v1\/workspaces\/[^/]+\/snapshots\/[^/]+\/replication-schedules\/[^/]+$/.test(
+      pathname,
+    )
+  ) {
+    return "/v1/workspaces/{workspaceId}/snapshots/{name}/replication-schedules/{targetId}";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/snapshots\/[^/]+\/(import|replicate)$/.test(pathname)) {
+    return pathname
+      .replace(/^\/v1\/workspaces\/[^/]+/, "/v1/workspaces/{workspaceId}")
+      .replace(/\/snapshots\/[^/]+\//, "/snapshots/{name}/");
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/snapshots\/[^/]+$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/snapshots/{name}";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/snapshot-replication-targets$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/snapshot-replication-targets";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/snapshot-replication-schedules$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/snapshot-replication-schedules";
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/snapshot-jobs\/[^/]+\/(events|retry)$/.test(pathname)) {
+    return pathname
+      .replace(/^\/v1\/workspaces\/[^/]+/, "/v1/workspaces/{workspaceId}")
+      .replace(/\/snapshot-jobs\/[^/]+\//, "/snapshot-jobs/{jobId}/");
+  }
+  if (/^\/v1\/workspaces\/[^/]+\/snapshot-jobs\/[^/]+$/.test(pathname)) {
+    return "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}";
+  }
   if (/^\/v1\/workspaces\/[^/]+\/(search|context|file|status)$/.test(pathname)) {
     return pathname.replace(/^\/v1\/workspaces\/[^/]+/, "/v1/workspaces/{workspaceId}");
   }

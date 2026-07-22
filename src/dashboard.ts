@@ -941,6 +941,9 @@ export function observabilityDashboardHtml(): string {
       ["CORS origins", number(http.cors_origins_count)],
       ["Local workspaces", http.local_workspaces ? "enabled" : "disabled"],
       ["Allowlist entries", number(http.local_root_allowlist_count)],
+      ["Snapshot store", http.snapshot_store_configured ? "configured" : "disabled"],
+      ["Replication targets", number(http.snapshot_replication_target_count)],
+      ["Snapshot poll", http.snapshot_job_poll_interval_ms == null ? "--" : duration(http.snapshot_job_poll_interval_ms)],
       ["Database", storage.host ? storage.host + (storage.port ? ":" + storage.port : "") + " / " + (storage.database || "configured") : "--"],
       ["Database TLS", storage.tls ? "enabled" : "disabled"],
     ]);

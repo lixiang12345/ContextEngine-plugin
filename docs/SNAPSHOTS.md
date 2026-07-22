@@ -128,7 +128,9 @@ workspace owner can poll
 state from the `/events` SSE endpoint.
 
 `POST /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry` requeues a
-failed job and preserves its attempt count and audit history fields.
+failed job. Non-replication jobs preserve their cumulative attempt count;
+replication starts a fresh bounded automatic-attempt budget while retaining the
+same durable job id and timestamps.
 
 Jobs survive process restarts. A claim increments `attempts` and assigns a new
 lease token; progress and terminal writes must present that token, which fences
@@ -156,11 +158,41 @@ latest status per target and snapshot through
 `GET /v1/workspaces/{workspaceId}/snapshot-replication-targets`. Failed copies
 use the standard snapshot-job retry endpoint.
 
+### Durable schedules
+
+Owners can persist one replication policy for each workspace, target, and
+snapshot:
+
+```http
+PUT /v1/workspaces/{workspaceId}/snapshots/{name}/replication-schedules/{targetId}
+Content-Type: application/json
+
+{"mode":"interval","interval_ms":3600000}
+```
+
+`manual` stores an explicitly disabled policy, `interval` accepts 60 seconds to
+365 days, and `nightly` accepts `nightly_at` (`HH:MM[:SS]`) plus an IANA
+`timezone` (for example `Asia/Shanghai`). `PATCH` with `{"enabled":false}`
+pauses a policy; setting it back to `true` computes a fresh next run using the
+PostgreSQL clock. List policies with
+`GET /v1/workspaces/{workspaceId}/snapshot-replication-schedules`, inspect a
+single policy under its snapshot path, or remove it with `DELETE`.
+
+Every due policy is claimed with `FOR UPDATE SKIP LOCKED`, advances its next
+run before the transaction commits, and writes a durable replication job with
+the policy id and scheduled timestamp. A partial unique index also collapses
+manual and scheduled requests onto one active workspace/target/snapshot job,
+so multiple HTTP instances can poll safely. Missed interval ticks coalesce into
+one catch-up job instead of producing an unbounded burst. Store implementations
+and their credentials remain process-injected; only schedule metadata and
+aggregate metrics are persisted.
+
 Replication jobs automatically retry transient target failures up to three
 attempts by default, with exponential delays capped at five minutes. The job
 payload exposes `next_attempt_at` while waiting, and the target status endpoint
-reports retry count, terminal failures, average duration, and lag since the
-last successful copy. `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` and
+reports retry count, terminal failures, average duration, database-clock lag,
+artifact bytes, effective throughput, consecutive failures, and a bounded
+health/alert summary. `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` and
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` bound this policy.
 An explicit retry of a terminal replication job starts a fresh bounded attempt
 budget; non-replication jobs retain their cumulative attempt count.

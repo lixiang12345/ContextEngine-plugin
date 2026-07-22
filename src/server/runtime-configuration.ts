@@ -49,6 +49,9 @@ export interface RuntimeConfigurationOptions {
   mcpMaxSessions?: number;
   mcpSessionStore?: "postgres" | "memory";
   corsOriginsCount?: number;
+  snapshotStoreConfigured?: boolean;
+  snapshotReplicationTargetCount?: number;
+  snapshotJobPollIntervalMs?: number;
   disableEmbeddings: boolean;
 }
 
@@ -414,6 +417,10 @@ export class RuntimeModelConfiguration {
         cors_origins_count: options.corsOriginsCount ?? 0,
         local_workspaces: options.allowLocalWorkspaces,
         local_root_allowlist_count: options.localRootAllowlistCount,
+        snapshot_store_configured: options.snapshotStoreConfigured ?? false,
+        snapshot_replication_target_count:
+          options.snapshotReplicationTargetCount ?? 0,
+        snapshot_job_poll_interval_ms: options.snapshotJobPollIntervalMs ?? null,
       },
       storage: databaseTarget(options.databaseUrl),
     };

@@ -340,7 +340,10 @@ CLI snapshot commands remain synchronous. Configure
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` or inject target stores to enable
 owner-triggered asynchronous replication.
 Replication failures use bounded automatic exponential retry before becoming
-terminal failures.
+terminal failures. Owners can also persist interval or timezone-aware nightly
+replication schedules through the HTTP API; schedules are claimed safely across
+instances and expose artifact bytes, throughput, lag, and bounded failure
+alerts. See [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.md) for the schedule contract.
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).
@@ -391,6 +394,7 @@ explicitly need a smaller packed payload; omitting it returns all selected hits.
 | `CONTEXTENGINE_MCP_SESSION_STORE` | `postgres` (default, cross-instance) or `memory` (single-process rollback) |
 | `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` | Remote MCP idle session lifetime (default 30 minutes) |
 | `CONTEXTENGINE_MCP_MAX_SESSIONS` | Global PostgreSQL Remote MCP session cap (default 128; per-process in memory mode) |
+| `CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS` | Durable snapshot job/schedule scan interval (default 2000 ms; 100-60000 ms) |
 | `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | Allow server-local workspace roots (default off) |
 | `CONTEXTENGINE_HTTP_ALLOW_PRIVATE_MODEL_URLS` | Permit runtime model URLs on private/local networks in trusted deployments (default off) |
 | `CONTEXTENGINE_COMMIT_LIMIT` | How many recent commits to index (default `80`, `0` = off) |

@@ -120,4 +120,164 @@ describePostgres("durable snapshot jobs", () => {
       "failed",
     );
   });
+
+  it("persists interval and nightly policies with database-clock pause/resume", async () => {
+    const workspace = await repository.createWorkspace({
+      name: "snapshot schedules",
+      sourceMode: "blob",
+      ownerPrincipalId: "owner",
+    });
+    const manual = await repository.upsertSnapshotReplicationSchedule({
+      workspaceId: workspace.id,
+      principalId: "owner",
+      targetId: "region_backup",
+      snapshotName: "main",
+      mode: "manual",
+    });
+    assert.equal(manual.enabled, false);
+    assert.equal(manual.nextScheduledAt, null);
+
+    const interval = await repository.upsertSnapshotReplicationSchedule({
+      workspaceId: workspace.id,
+      principalId: "owner",
+      targetId: "region_backup",
+      snapshotName: "main",
+      mode: "interval",
+      intervalMs: 60_000,
+    });
+    assert.equal(interval.id, manual.id);
+    assert.equal(interval.mode, "interval");
+    assert.equal(interval.intervalMs, 60_000);
+    assert.equal(interval.enabled, true);
+    assert.ok(Date.parse(interval.nextScheduledAt!) > Date.now());
+
+    const paused = await repository.setSnapshotReplicationScheduleEnabled(
+      workspace.id,
+      "region_backup",
+      "main",
+      false,
+    );
+    assert.equal(paused?.enabled, false);
+    assert.equal(paused?.nextScheduledAt, null);
+    const resumed = await repository.setSnapshotReplicationScheduleEnabled(
+      workspace.id,
+      "region_backup",
+      "main",
+      true,
+    );
+    assert.equal(resumed?.enabled, true);
+    assert.ok(Date.parse(resumed?.nextScheduledAt ?? "") > Date.now());
+
+    const nightly = await repository.upsertSnapshotReplicationSchedule({
+      workspaceId: workspace.id,
+      principalId: "owner",
+      targetId: "region_backup",
+      snapshotName: "nightly",
+      mode: "nightly",
+      nightlyAt: "23:30",
+      timezone: "Asia/Shanghai",
+    });
+    assert.equal(nightly.nightlyAt, "23:30:00");
+    assert.equal(nightly.timezone, "Asia/Shanghai");
+    assert.ok(nightly.nextScheduledAt);
+    await assert.rejects(
+      repository.upsertSnapshotReplicationSchedule({
+        workspaceId: workspace.id,
+        principalId: "owner",
+        targetId: "region_backup",
+        snapshotName: "invalid",
+        mode: "nightly",
+        nightlyAt: "23:30",
+        timezone: "Not/AZone",
+      }),
+      /Invalid snapshot replication timezone/,
+    );
+    assert.equal(
+      await repository.deleteSnapshotReplicationSchedule(
+        workspace.id,
+        "region_backup",
+        "nightly",
+      ),
+      true,
+    );
+  });
+
+  it("claims due schedules once across repositories and deduplicates manual jobs", async () => {
+    const workspace = await repository.createWorkspace({
+      name: "schedule race",
+      sourceMode: "blob",
+      ownerPrincipalId: "owner",
+    });
+    const schedule = await repository.upsertSnapshotReplicationSchedule({
+      workspaceId: workspace.id,
+      principalId: "owner",
+      targetId: "region_backup",
+      snapshotName: "main",
+      mode: "interval",
+      intervalMs: 60_000,
+    });
+    const control = new Pool({ connectionString: schemaUrl });
+    const second = await WorkspaceRepository.open(schemaUrl);
+    try {
+      await control.query(
+        `UPDATE ce_snapshot_replication_schedules
+         SET next_scheduled_at = clock_timestamp() - interval '1 second'
+         WHERE id = $1`,
+        [schedule.id],
+      );
+      const claims = await Promise.all([
+        repository.scheduleDueSnapshotReplicationJobs(["region_backup"]),
+        second.scheduleDueSnapshotReplicationJobs(["region_backup"]),
+      ]);
+      const scheduled = claims.flat();
+      assert.equal(scheduled.length, 1);
+      assert.equal(scheduled[0].parameters.schedule_id, schedule.id);
+      assert.equal(scheduled[0].parameters.trigger, "schedule");
+      const active = await repository.createSnapshotReplicationJob({
+        workspaceId: workspace.id,
+        principalId: "owner",
+        targetId: "region_backup",
+        snapshotName: "main",
+      });
+      assert.equal(active.created, false);
+      assert.equal(active.job.id, scheduled[0].id);
+
+      const claimed = await repository.claimSnapshotJob(scheduled[0].id);
+      assert.ok(claimed);
+      assert.equal(
+        (await repository.completeSnapshotJob(claimed.id, claimed.attemptToken, {
+          artifact_bytes: 12,
+          transfer_duration_ms: 3,
+        }))?.status,
+        "succeeded",
+      );
+      await control.query(
+        `UPDATE ce_snapshot_replication_schedules
+         SET next_scheduled_at = clock_timestamp() - interval '1 second'
+         WHERE id = $1`,
+        [schedule.id],
+      );
+      const next = await repository.scheduleDueSnapshotReplicationJobs([
+        "region_backup",
+      ]);
+      assert.equal(next.length, 1);
+      assert.notEqual(next[0].id, scheduled[0].id);
+      assert.equal(
+        (await repository.createSnapshotReplicationJob({
+          workspaceId: workspace.id,
+          principalId: "owner",
+          targetId: "region_backup",
+          snapshotName: "main",
+        })).created,
+        false,
+      );
+      assert.deepEqual(
+        await repository.scheduleDueSnapshotReplicationJobs(["unconfigured"]),
+        [],
+      );
+    } finally {
+      await second.close();
+      await control.end();
+    }
+  });
 });

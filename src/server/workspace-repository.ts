@@ -15,6 +15,7 @@ export type IndexJobMode = "incremental" | "rebuild";
 export type IndexJobStatus = "queued" | "running" | "succeeded" | "failed";
 export type SnapshotJobOperation = "export" | "import" | "prune" | "gc" | "replicate";
 export type SnapshotJobStatus = "queued" | "running" | "succeeded" | "failed";
+export type SnapshotReplicationScheduleMode = "manual" | "interval" | "nightly";
 export type WorkspacePermission = "reader" | "writer" | "owner";
 /** Lowercase provider id registered by a SourceConnectorPlugin. */
 export type ConnectorProvider = string;
@@ -218,6 +219,29 @@ export interface ClaimedSnapshotJob extends StoredSnapshotJob {
   attemptToken: string;
 }
 
+export interface StoredSnapshotReplicationSchedule {
+  id: string;
+  workspaceId: string;
+  targetId: string;
+  snapshotName: string;
+  mode: SnapshotReplicationScheduleMode;
+  intervalMs: number | null;
+  nightlyAt: string | null;
+  timezone: string;
+  enabled: boolean;
+  nextScheduledAt: string | null;
+  lastScheduledAt: string | null;
+  lastJobId: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SnapshotReplicationJobCreation {
+  job: StoredSnapshotJob;
+  created: boolean;
+}
+
 export interface SnapshotReplicationMetrics {
   targetId: string;
   queued: number;
@@ -226,6 +250,12 @@ export interface SnapshotReplicationMetrics {
   failed: number;
   retries: number;
   averageDurationMs: number | null;
+  totalArtifactBytes: number;
+  averageArtifactBytes: number | null;
+  largestArtifactBytes: number | null;
+  averageThroughputBytesPerSecond: number | null;
+  consecutiveFailures: number;
+  replicationLagMs: number | null;
   lastSucceededAt: string | null;
   lastFailedAt: string | null;
 }
@@ -314,6 +344,24 @@ interface SnapshotJobRow extends QueryResultRow {
   created_at: string | Date;
   started_at: string | Date | null;
   completed_at: string | Date | null;
+}
+
+interface SnapshotReplicationScheduleRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  target_id: string;
+  snapshot_name: string;
+  mode: SnapshotReplicationScheduleMode;
+  interval_ms: string | number | null;
+  nightly_at: string | null;
+  timezone: string;
+  enabled: boolean;
+  next_scheduled_at: string | Date | null;
+  last_scheduled_at: string | Date | null;
+  last_job_id: string | null;
+  created_by: string;
+  created_at: string | Date;
+  updated_at: string | Date;
 }
 
 interface McpSessionRow extends QueryResultRow {
@@ -448,6 +496,95 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "23505"
+  );
+}
+
+const SNAPSHOT_REPLICATION_TARGET_ID_RE = /^[a-z][a-z0-9_-]{0,62}$/;
+const SNAPSHOT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const NIGHTLY_TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/;
+const MIN_SNAPSHOT_REPLICATION_INTERVAL_MS = 60_000;
+const MAX_SNAPSHOT_REPLICATION_INTERVAL_MS = 365 * 24 * 60 * 60 * 1_000;
+
+function normalizeNightlyTime(value: string): string {
+  const trimmed = value.trim();
+  if (!NIGHTLY_TIME_RE.test(trimmed)) {
+    throw new Error("Snapshot replication nightlyAt must be HH:MM or HH:MM:SS");
+  }
+  return trimmed.length === 5 ? `${trimmed}:00` : trimmed;
+}
+
+function validateSnapshotReplicationScheduleInput(input: {
+  targetId: string;
+  snapshotName: string;
+  mode: SnapshotReplicationScheduleMode;
+  intervalMs?: number | null;
+  nightlyAt?: string | null;
+  timezone?: string;
+  enabled?: boolean;
+}): {
+  intervalMs: number | null;
+  nightlyAt: string | null;
+  timezone: string;
+  enabled: boolean;
+} {
+  if (!SNAPSHOT_REPLICATION_TARGET_ID_RE.test(input.targetId)) {
+    throw new Error(`Invalid snapshot replication target id: ${input.targetId}`);
+  }
+  if (!SNAPSHOT_NAME_RE.test(input.snapshotName)) {
+    throw new Error(`Invalid snapshot name: ${input.snapshotName}`);
+  }
+  if (!["manual", "interval", "nightly"].includes(input.mode)) {
+    throw new Error(`Invalid snapshot replication schedule mode: ${input.mode}`);
+  }
+  const intervalMs = input.intervalMs == null ? null : Math.floor(input.intervalMs);
+  const nightlyAt = input.nightlyAt == null ? null : normalizeNightlyTime(input.nightlyAt);
+  const timezone = (input.timezone ?? "UTC").trim();
+  if (!timezone || timezone.length > 64) {
+    throw new Error("Snapshot replication timezone must be 1 to 64 characters");
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format();
+  } catch {
+    throw new Error(`Invalid snapshot replication timezone: ${timezone}`);
+  }
+  const enabled = input.mode === "manual" ? false : (input.enabled ?? true);
+  if (input.mode === "manual") {
+    if (intervalMs !== null || nightlyAt !== null) {
+      throw new Error("Manual snapshot replication schedules cannot set intervalMs or nightlyAt");
+    }
+  } else if (input.mode === "interval") {
+    if (
+      intervalMs === null ||
+      !Number.isFinite(intervalMs) ||
+      intervalMs < MIN_SNAPSHOT_REPLICATION_INTERVAL_MS ||
+      intervalMs > MAX_SNAPSHOT_REPLICATION_INTERVAL_MS
+    ) {
+      throw new Error(
+        `Snapshot replication intervalMs must be from ${MIN_SNAPSHOT_REPLICATION_INTERVAL_MS} to ${MAX_SNAPSHOT_REPLICATION_INTERVAL_MS}`,
+      );
+    }
+    if (nightlyAt !== null) {
+      throw new Error("Interval snapshot replication schedules cannot set nightlyAt");
+    }
+  } else if (nightlyAt === null) {
+    throw new Error("Nightly snapshot replication schedules require nightlyAt");
+  } else if (intervalMs !== null) {
+    throw new Error("Nightly snapshot replication schedules cannot set intervalMs");
+  }
+  return {
+    intervalMs,
+    nightlyAt,
+    timezone: input.mode === "nightly" ? timezone : "UTC",
+    enabled,
+  };
+}
+
 function workspaceFromRow(row: WorkspaceRow): StoredWorkspace {
   return {
     id: row.id,
@@ -496,6 +633,30 @@ function snapshotJobFromRow(row: SnapshotJobRow): StoredSnapshotJob {
     createdAt: iso(row.created_at)!,
     startedAt: iso(row.started_at),
     completedAt: iso(row.completed_at),
+  };
+}
+
+function snapshotReplicationScheduleFromRow(
+  row: SnapshotReplicationScheduleRow,
+): StoredSnapshotReplicationSchedule {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    targetId: row.target_id,
+    snapshotName: row.snapshot_name,
+    mode: row.mode,
+    intervalMs: row.interval_ms === null ? null : Number(row.interval_ms),
+    // PostgreSQL returns TIME as a string. Keep the canonical database value
+    // so callers can use it directly when rendering or calculating a run.
+    nightlyAt: row.nightly_at,
+    timezone: row.timezone,
+    enabled: row.enabled,
+    nextScheduledAt: iso(row.next_scheduled_at),
+    lastScheduledAt: iso(row.last_scheduled_at),
+    lastJobId: row.last_job_id,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at)!,
+    updatedAt: iso(row.updated_at)!,
   };
 }
 
@@ -2780,6 +2941,369 @@ export class WorkspaceRepository {
     return snapshotJobFromRow(result.rows[0]);
   }
 
+  /**
+   * Queue a replication while collapsing concurrent manual/scheduled
+   * requests onto the one active job for a workspace/target/snapshot tuple.
+   * The partial unique index installed by schema v13 is the final arbiter;
+   * the follow-up lookup makes the normal conflict path useful to callers.
+   */
+  async createSnapshotReplicationJob(input: {
+    workspaceId: string;
+    principalId: string;
+    targetId: string;
+    snapshotName: string;
+    scheduleId?: string;
+    scheduledFor?: string;
+  }): Promise<SnapshotReplicationJobCreation> {
+    validateSnapshotReplicationScheduleInput({
+      targetId: input.targetId,
+      snapshotName: input.snapshotName,
+      mode: "manual",
+    });
+    const parameters = {
+      target_id: input.targetId,
+      ...(input.scheduleId ? { schedule_id: input.scheduleId } : {}),
+      ...(input.scheduledFor ? { scheduled_for: input.scheduledFor } : {}),
+      ...(input.scheduleId ? { trigger: "schedule" } : { trigger: "manual" }),
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const id = randomUUID();
+      try {
+        const result = await this.pool.query<SnapshotJobRow>(
+          `INSERT INTO ce_snapshot_jobs(
+             id, workspace_id, principal_id, operation, snapshot_name,
+             parameters, status, progress
+           )
+           VALUES ($1, $2, $3, 'replicate', $4, $5::jsonb, 'queued', $6::jsonb)
+           ON CONFLICT DO NOTHING
+           RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                     parameters, status, progress, result, error, attempts,
+                     locked_at, lock_token, next_attempt_at, created_at,
+                     started_at, completed_at`,
+          [
+            id,
+            input.workspaceId,
+            input.principalId,
+            input.snapshotName,
+            JSON.stringify(parameters),
+            JSON.stringify({ phase: "queued" }),
+          ],
+        );
+        if (result.rows[0]) {
+          return { job: snapshotJobFromRow(result.rows[0]), created: true };
+        }
+      } catch (error) {
+        if (!isUniqueViolation(error)) throw error;
+      }
+      const active = await this.pool.query<SnapshotJobRow>(
+        `SELECT id, workspace_id, principal_id, operation, snapshot_name,
+                parameters, status, progress, result, error, attempts,
+                locked_at, lock_token, next_attempt_at, created_at,
+                started_at, completed_at
+         FROM ce_snapshot_jobs
+         WHERE workspace_id = $1 AND operation = 'replicate'
+           AND snapshot_name = $2
+           AND parameters->>'target_id' = $3
+           AND status IN ('queued', 'running')
+         ORDER BY created_at, id
+         LIMIT 1`,
+        [input.workspaceId, input.snapshotName, input.targetId],
+      );
+      if (active.rows[0]) {
+        return { job: snapshotJobFromRow(active.rows[0]), created: false };
+      }
+    }
+    throw new Error("Replication job disappeared while resolving a concurrent request");
+  }
+
+  async upsertSnapshotReplicationSchedule(input: {
+    workspaceId: string;
+    principalId: string;
+    targetId: string;
+    snapshotName: string;
+    mode: SnapshotReplicationScheduleMode;
+    intervalMs?: number | null;
+    nightlyAt?: string | null;
+    timezone?: string;
+    enabled?: boolean;
+  }): Promise<StoredSnapshotReplicationSchedule> {
+    const normalized = validateSnapshotReplicationScheduleInput(input);
+    const id = randomUUID();
+    const result = await this.pool.query<SnapshotReplicationScheduleRow>(
+      `WITH db_clock AS (SELECT clock_timestamp() AS now)
+       INSERT INTO ce_snapshot_replication_schedules(
+         id, workspace_id, target_id, snapshot_name, mode, interval_ms,
+         nightly_at, timezone, enabled, next_scheduled_at, created_by
+       )
+       SELECT $1, $2, $3, $4, $5, $6::bigint, $7::time, $8, $9::boolean,
+              CASE
+                WHEN $9::boolean = FALSE OR $5 = 'manual' THEN NULL
+                WHEN $5 = 'interval' THEN
+                  db_clock.now + ($6::bigint * interval '1 millisecond')
+                ELSE
+                  (
+                    (
+                      (db_clock.now AT TIME ZONE $8)::date
+                      + CASE
+                          WHEN (db_clock.now AT TIME ZONE $8)::time < $7::time
+                          THEN 0 ELSE 1
+                        END
+                    ) + $7::time
+                  ) AT TIME ZONE $8
+              END,
+              $10
+       FROM db_clock
+       ON CONFLICT (workspace_id, target_id, snapshot_name)
+       DO UPDATE SET
+         mode = EXCLUDED.mode,
+         interval_ms = EXCLUDED.interval_ms,
+         nightly_at = EXCLUDED.nightly_at,
+         timezone = EXCLUDED.timezone,
+         enabled = EXCLUDED.enabled,
+         next_scheduled_at = EXCLUDED.next_scheduled_at,
+         updated_at = clock_timestamp()
+       RETURNING id, workspace_id, target_id, snapshot_name, mode, interval_ms,
+                 nightly_at, timezone, enabled, next_scheduled_at,
+                 last_scheduled_at, last_job_id, created_by, created_at, updated_at`,
+      [
+        id,
+        input.workspaceId,
+        input.targetId,
+        input.snapshotName,
+        input.mode,
+        normalized.intervalMs,
+        normalized.nightlyAt,
+        normalized.timezone,
+        normalized.enabled,
+        input.principalId,
+      ],
+    );
+    return snapshotReplicationScheduleFromRow(result.rows[0]);
+  }
+
+  async listSnapshotReplicationSchedules(
+    workspaceId: string,
+  ): Promise<StoredSnapshotReplicationSchedule[]> {
+    const result = await this.pool.query<SnapshotReplicationScheduleRow>(
+      `SELECT id, workspace_id, target_id, snapshot_name, mode, interval_ms,
+              nightly_at, timezone, enabled, next_scheduled_at,
+              last_scheduled_at, last_job_id, created_by, created_at, updated_at
+       FROM ce_snapshot_replication_schedules
+       WHERE workspace_id = $1
+       ORDER BY target_id, snapshot_name`,
+      [workspaceId],
+    );
+    return result.rows.map(snapshotReplicationScheduleFromRow);
+  }
+
+  async getSnapshotReplicationSchedule(
+    workspaceId: string,
+    targetId: string,
+    snapshotName: string,
+  ): Promise<StoredSnapshotReplicationSchedule | null> {
+    const result = await this.pool.query<SnapshotReplicationScheduleRow>(
+      `SELECT id, workspace_id, target_id, snapshot_name, mode, interval_ms,
+              nightly_at, timezone, enabled, next_scheduled_at,
+              last_scheduled_at, last_job_id, created_by, created_at, updated_at
+       FROM ce_snapshot_replication_schedules
+       WHERE workspace_id = $1 AND target_id = $2 AND snapshot_name = $3`,
+      [workspaceId, targetId, snapshotName],
+    );
+    return result.rows[0] ? snapshotReplicationScheduleFromRow(result.rows[0]) : null;
+  }
+
+  async setSnapshotReplicationScheduleEnabled(
+    workspaceId: string,
+    targetId: string,
+    snapshotName: string,
+    enabled: boolean,
+  ): Promise<StoredSnapshotReplicationSchedule | null> {
+    const result = await this.pool.query<SnapshotReplicationScheduleRow>(
+      `WITH db_clock AS (SELECT clock_timestamp() AS now)
+       UPDATE ce_snapshot_replication_schedules AS schedule
+       SET enabled = $4::boolean,
+           next_scheduled_at = CASE
+             WHEN $4::boolean = FALSE OR schedule.mode = 'manual' THEN NULL
+             WHEN schedule.mode = 'interval' THEN
+               db_clock.now + (schedule.interval_ms * interval '1 millisecond')
+             ELSE
+               (
+                 (
+                   (db_clock.now AT TIME ZONE schedule.timezone)::date
+                   + CASE
+                       WHEN (db_clock.now AT TIME ZONE schedule.timezone)::time
+                              < schedule.nightly_at
+                       THEN 0 ELSE 1
+                     END
+                 ) + schedule.nightly_at
+               ) AT TIME ZONE schedule.timezone
+           END,
+           updated_at = clock_timestamp()
+       FROM db_clock
+       WHERE schedule.workspace_id = $1 AND schedule.target_id = $2
+         AND schedule.snapshot_name = $3
+         AND (schedule.mode <> 'manual' OR $4::boolean = FALSE)
+       RETURNING schedule.id, schedule.workspace_id, schedule.target_id,
+                 schedule.snapshot_name, schedule.mode, schedule.interval_ms,
+                 schedule.nightly_at, schedule.timezone, schedule.enabled,
+                 schedule.next_scheduled_at, schedule.last_scheduled_at,
+                 schedule.last_job_id, schedule.created_by, schedule.created_at,
+                 schedule.updated_at`,
+      [workspaceId, targetId, snapshotName, enabled],
+    );
+    return result.rows[0] ? snapshotReplicationScheduleFromRow(result.rows[0]) : null;
+  }
+
+  async deleteSnapshotReplicationSchedule(
+    workspaceId: string,
+    targetId: string,
+    snapshotName: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      `DELETE FROM ce_snapshot_replication_schedules
+       WHERE workspace_id = $1 AND target_id = $2 AND snapshot_name = $3`,
+      [workspaceId, targetId, snapshotName],
+    );
+    return (result.rowCount ?? 0) === 1;
+  }
+
+  /** Claim due policies and create at most one active job per policy tuple. */
+  async scheduleDueSnapshotReplicationJobs(
+    targetIds: readonly string[],
+    limit = 32,
+  ): Promise<StoredSnapshotJob[]> {
+    const ids = [...new Set(targetIds)].filter((id) =>
+      SNAPSHOT_REPLICATION_TARGET_ID_RE.test(id),
+    );
+    if (!ids.length) return [];
+    const safeLimit = Math.min(128, Math.max(1, Math.floor(limit)));
+    const client = await this.pool.connect();
+    const created: StoredSnapshotJob[] = [];
+    try {
+      await client.query("BEGIN");
+      const due = await client.query<SnapshotReplicationScheduleRow & {
+        database_now: string | Date;
+      }>(
+        `SELECT id, workspace_id, target_id, snapshot_name, mode, interval_ms,
+                nightly_at, timezone, enabled, next_scheduled_at,
+                last_scheduled_at, last_job_id, created_by, created_at, updated_at,
+                clock_timestamp() AS database_now
+         FROM ce_snapshot_replication_schedules
+         WHERE enabled = TRUE AND next_scheduled_at <= clock_timestamp()
+           AND target_id = ANY($1::text[])
+         ORDER BY next_scheduled_at, id
+         FOR UPDATE SKIP LOCKED
+         LIMIT $2`,
+        [ids, safeLimit],
+      );
+      for (const schedule of due.rows) {
+        const nowText = iso(schedule.database_now);
+        const dueText = iso(schedule.next_scheduled_at);
+        if (!nowText || !dueText) continue;
+        const now = new Date(nowText);
+        const dueAt = new Date(dueText);
+        let nextScheduledAt: Date;
+        if (schedule.mode === "interval") {
+          const intervalMs = Number(schedule.interval_ms);
+          const periods = Math.max(
+            1,
+            Math.floor(Math.max(0, now.getTime() - dueAt.getTime()) / intervalMs) + 1,
+          );
+          nextScheduledAt = new Date(dueAt.getTime() + periods * intervalMs);
+        } else {
+          const next = await client.query<{ next_scheduled_at: string | Date }>(
+            `SELECT (
+               (
+                 (($1::timestamptz AT TIME ZONE $3)::date
+                   + CASE
+                       WHEN ($1::timestamptz AT TIME ZONE $3)::time < $2::time
+                       THEN 0 ELSE 1
+                     END
+                 ) + $2::time
+               ) AT TIME ZONE $3
+             ) AS next_scheduled_at`,
+            [now, schedule.nightly_at, schedule.timezone],
+          );
+          const value = next.rows[0]?.next_scheduled_at;
+          if (!value) continue;
+          nextScheduledAt = new Date(iso(value)!);
+        }
+        const parameters = {
+          target_id: schedule.target_id,
+          schedule_id: schedule.id,
+          scheduled_for: dueAt.toISOString(),
+          trigger: "schedule",
+        };
+        let jobRow: SnapshotJobRow | undefined;
+        let createdJobId: string | null = null;
+        for (let attempt = 0; attempt < 2 && !jobRow; attempt += 1) {
+          const jobId = randomUUID();
+          const inserted = await client.query<SnapshotJobRow>(
+            `INSERT INTO ce_snapshot_jobs(
+               id, workspace_id, principal_id, operation, snapshot_name,
+               parameters, status, progress
+             ) VALUES ($1, $2, $3, 'replicate', $4, $5::jsonb, 'queued', $6::jsonb)
+             ON CONFLICT DO NOTHING
+             RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                       parameters, status, progress, result, error, attempts,
+                       locked_at, lock_token, next_attempt_at, created_at,
+                       started_at, completed_at`,
+            [
+              jobId,
+              schedule.workspace_id,
+              schedule.created_by,
+              schedule.snapshot_name,
+              JSON.stringify(parameters),
+              JSON.stringify({ phase: "queued", trigger: "schedule" }),
+            ],
+          );
+          jobRow = inserted.rows[0];
+          if (jobRow) {
+            createdJobId = jobId;
+            break;
+          }
+          const active = await client.query<SnapshotJobRow>(
+            `SELECT id, workspace_id, principal_id, operation, snapshot_name,
+                    parameters, status, progress, result, error, attempts,
+                    locked_at, lock_token, next_attempt_at, created_at,
+                    started_at, completed_at
+             FROM ce_snapshot_jobs
+             WHERE workspace_id = $1 AND operation = 'replicate'
+               AND snapshot_name = $2
+               AND parameters->>'target_id' = $3
+               AND status IN ('queued', 'running')
+             ORDER BY created_at, id
+             LIMIT 1`,
+            [schedule.workspace_id, schedule.snapshot_name, schedule.target_id],
+          );
+          jobRow = active.rows[0];
+        }
+        if (!jobRow) {
+          throw new Error(
+            "Active replication disappeared while materializing a schedule",
+          );
+        }
+        await client.query(
+          `UPDATE ce_snapshot_replication_schedules
+           SET last_scheduled_at = clock_timestamp(),
+               last_job_id = $2,
+               next_scheduled_at = $3::timestamptz,
+               updated_at = clock_timestamp()
+           WHERE id = $1`,
+          [schedule.id, jobRow.id, nextScheduledAt.toISOString()],
+        );
+        if (jobRow.id === createdJobId) created.push(snapshotJobFromRow(jobRow));
+      }
+      await client.query("COMMIT");
+      return created;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getSnapshotJob(jobId: string): Promise<StoredSnapshotJob | null> {
     const result = await this.pool.query<SnapshotJobRow>(
       `SELECT id, workspace_id, principal_id, operation, snapshot_name,
@@ -2820,23 +3344,85 @@ export class WorkspaceRepository {
       failed: string | number;
       retries: string | number;
       average_duration_ms: string | number | null;
+      total_artifact_bytes: string | number | null;
+      average_artifact_bytes: string | number | null;
+      largest_artifact_bytes: string | number | null;
+      average_throughput_bytes_per_second: string | number | null;
+      consecutive_failures: string | number;
+      replication_lag_ms: string | number | null;
       last_succeeded_at: string | Date | null;
       last_failed_at: string | Date | null;
     }>(
-      `SELECT parameters->>'target_id' AS target_id,
-              COUNT(*) FILTER (WHERE status = 'queued') AS queued,
-              COUNT(*) FILTER (WHERE status = 'running') AS running,
-              COUNT(*) FILTER (WHERE status = 'succeeded') AS succeeded,
-              COUNT(*) FILTER (WHERE status = 'failed') AS failed,
-              COALESCE(SUM(GREATEST(attempts - 1, 0)), 0) AS retries,
-              AVG(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)
-                FILTER (WHERE status = 'succeeded') AS average_duration_ms,
-              MAX(completed_at) FILTER (WHERE status = 'succeeded') AS last_succeeded_at,
-              MAX(completed_at) FILTER (WHERE status = 'failed') AS last_failed_at
-       FROM ce_snapshot_jobs
-       WHERE workspace_id = $1 AND operation = 'replicate'
-       GROUP BY parameters->>'target_id'
-       ORDER BY target_id`,
+      `WITH replication_jobs AS (
+         SELECT jobs.*,
+                jobs.parameters->>'target_id' AS target_id,
+                CASE
+                  WHEN jsonb_typeof(jobs.result->'artifact_bytes') = 'number'
+                  THEN (jobs.result->>'artifact_bytes')::numeric
+                  ELSE NULL
+                END AS artifact_bytes,
+                CASE
+                  WHEN jsonb_typeof(jobs.result->'transfer_duration_ms') = 'number'
+                  THEN (jobs.result->>'transfer_duration_ms')::numeric
+                  ELSE NULL
+                END AS transfer_duration_ms
+         FROM ce_snapshot_jobs AS jobs
+         WHERE jobs.workspace_id = $1 AND jobs.operation = 'replicate'
+       ), latest_success AS (
+         SELECT target_id, MAX(completed_at) AS completed_at
+         FROM replication_jobs
+         WHERE status = 'succeeded'
+         GROUP BY target_id
+       )
+       SELECT jobs.target_id,
+              COUNT(*) FILTER (WHERE jobs.status = 'queued') AS queued,
+              COUNT(*) FILTER (WHERE jobs.status = 'running') AS running,
+              COUNT(*) FILTER (WHERE jobs.status = 'succeeded') AS succeeded,
+              COUNT(*) FILTER (
+                WHERE jobs.status = 'failed'
+                  AND COALESCE(jobs.progress->>'phase', '') <> 'superseded'
+              ) AS failed,
+              COALESCE(SUM(GREATEST(jobs.attempts - 1, 0)), 0) AS retries,
+              AVG(EXTRACT(EPOCH FROM (jobs.completed_at - jobs.started_at)) * 1000)
+                FILTER (WHERE jobs.status = 'succeeded') AS average_duration_ms,
+              COALESCE(SUM(jobs.artifact_bytes)
+                FILTER (WHERE jobs.status = 'succeeded'), 0) AS total_artifact_bytes,
+              AVG(jobs.artifact_bytes)
+                FILTER (WHERE jobs.status = 'succeeded') AS average_artifact_bytes,
+              MAX(jobs.artifact_bytes)
+                FILTER (WHERE jobs.status = 'succeeded') AS largest_artifact_bytes,
+              CASE
+                WHEN COALESCE(SUM(jobs.transfer_duration_ms)
+                  FILTER (WHERE jobs.status = 'succeeded'), 0) > 0
+                THEN COALESCE(SUM(jobs.artifact_bytes)
+                  FILTER (WHERE jobs.status = 'succeeded'), 0) * 1000
+                  / SUM(jobs.transfer_duration_ms)
+                    FILTER (WHERE jobs.status = 'succeeded')
+                ELSE NULL
+              END AS average_throughput_bytes_per_second,
+              COUNT(*) FILTER (
+                WHERE jobs.status = 'failed'
+                  AND COALESCE(jobs.progress->>'phase', '') <> 'superseded'
+                  AND jobs.completed_at >= COALESCE(
+                    latest_success.completed_at,
+                    '-infinity'::timestamptz
+                  )
+              ) AS consecutive_failures,
+              MAX(jobs.completed_at)
+                FILTER (WHERE jobs.status = 'succeeded') AS last_succeeded_at,
+              MAX(jobs.completed_at)
+                FILTER (
+                  WHERE jobs.status = 'failed'
+                    AND COALESCE(jobs.progress->>'phase', '') <> 'superseded'
+                ) AS last_failed_at,
+              EXTRACT(EPOCH FROM (
+                clock_timestamp()
+                - MAX(jobs.completed_at) FILTER (WHERE jobs.status = 'succeeded')
+              )) * 1000 AS replication_lag_ms
+       FROM replication_jobs AS jobs
+       LEFT JOIN latest_success ON latest_success.target_id = jobs.target_id
+       GROUP BY jobs.target_id, latest_success.completed_at
+       ORDER BY jobs.target_id`,
       [workspaceId],
     );
     return result.rows.map((row) => ({
@@ -2848,6 +3434,22 @@ export class WorkspaceRepository {
       retries: Number(row.retries),
       averageDurationMs:
         row.average_duration_ms === null ? null : Number(row.average_duration_ms),
+      totalArtifactBytes: Number(row.total_artifact_bytes ?? 0),
+      averageArtifactBytes:
+        row.average_artifact_bytes === null
+          ? null
+          : Number(row.average_artifact_bytes),
+      largestArtifactBytes:
+        row.largest_artifact_bytes === null
+          ? null
+          : Number(row.largest_artifact_bytes),
+      averageThroughputBytesPerSecond:
+        row.average_throughput_bytes_per_second === null
+          ? null
+          : Number(row.average_throughput_bytes_per_second),
+      consecutiveFailures: Number(row.consecutive_failures),
+      replicationLagMs:
+        row.replication_lag_ms === null ? null : Number(row.replication_lag_ms),
       lastSucceededAt: iso(row.last_succeeded_at),
       lastFailedAt: iso(row.last_failed_at),
     }));
@@ -3014,20 +3616,25 @@ export class WorkspaceRepository {
   }
 
   async retrySnapshotJob(jobId: string): Promise<StoredSnapshotJob | null> {
-    const result = await this.pool.query<SnapshotJobRow>(
-      `UPDATE ce_snapshot_jobs
-       SET status = 'queued', next_attempt_at = clock_timestamp(),
-           attempts = CASE WHEN operation = 'replicate' THEN 0 ELSE attempts END,
-           error = NULL, completed_at = NULL, locked_at = NULL,
-           lock_token = NULL, progress = $2::jsonb
-       WHERE id = $1 AND status = 'failed'
-       RETURNING id, workspace_id, principal_id, operation, snapshot_name,
-                 parameters, status, progress, result, error, attempts,
-                 locked_at, lock_token, next_attempt_at, created_at,
-                 started_at, completed_at`,
-      [jobId, JSON.stringify({ phase: "queued", retry: true })],
-    );
-    return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+    try {
+      const result = await this.pool.query<SnapshotJobRow>(
+        `UPDATE ce_snapshot_jobs
+         SET status = 'queued', next_attempt_at = clock_timestamp(),
+             attempts = CASE WHEN operation = 'replicate' THEN 0 ELSE attempts END,
+             error = NULL, completed_at = NULL, locked_at = NULL,
+             lock_token = NULL, progress = $2::jsonb
+         WHERE id = $1 AND status = 'failed'
+         RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                   parameters, status, progress, result, error, attempts,
+                   locked_at, lock_token, next_attempt_at, created_at,
+                   started_at, completed_at`,
+        [jobId, JSON.stringify({ phase: "queued", retry: true })],
+      );
+      return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+    } catch (error) {
+      if (isUniqueViolation(error)) return null;
+      throw error;
+    }
   }
 
   async countSourceFiles(
