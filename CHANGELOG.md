@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Added a reproducible retrieval trace on every packed response
+  (`PackedContext.trace`). It records the query intent, the retrieval channels
+  that contributed, degraded channels, candidate/packed/file counts, estimated
+  tokens, the packing policy, and the serving index generation/revision — the
+  same axes needed to compare runs across models and budgets. Surfaced in the
+  `context` CLI summary and full JSON output; exported as `RetrievalTrace`.
+- Added a pluggable context packing policy (`raw` | `extractive`). Under a tight
+  token budget the `extractive` policy keeps the query-salient lines of a passage
+  plus one line of surrounding context and elides the rest, instead of the `raw`
+  leading-character fit that can truncate before reaching the relevant symbol.
+  Exposed through `getTaskContext`/`codebaseRetrieval`, the `context --packing`
+  CLI flag, and the `codebase-retrieval` MCP `packing` argument; `PackedContext`
+  now reports the applied policy. Default remains `raw` (no external model).
 - Added schema v15 durable snapshot job attempts and immutable event history.
   Job mutations append history in the same PostgreSQL transaction, lease
   takeover closes the replaced attempt, and a lifetime attempt sequence stays

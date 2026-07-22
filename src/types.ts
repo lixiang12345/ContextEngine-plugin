@@ -131,6 +131,15 @@ export interface SearchOptions {
   neuralRerank?: boolean;
 }
 
+/**
+ * How passages are reduced when the packed context would exceed the token
+ * budget.
+ * - `raw`: keep each passage's leading characters (fast, lossy at the tail).
+ * - `extractive`: keep the lines that match the query, dropping unrelated
+ *   lines first so the surviving budget carries more task-relevant evidence.
+ */
+export type PackingPolicy = "raw" | "extractive";
+
 export interface TaskContextOptions {
   task: string;
   topK?: number;
@@ -141,6 +150,8 @@ export interface TaskContextOptions {
   sourceAccess?: SourcePathPolicy;
   /** Use MMR diversification (default true). */
   diversify?: boolean;
+  /** Passage reduction strategy under a token budget (default `raw`). */
+  packing?: PackingPolicy;
 }
 
 export type SourceAccessEffect = "allow" | "deny";
@@ -156,6 +167,43 @@ export interface SourcePathPolicy {
   rules: readonly SourcePathRule[];
 }
 
+/**
+ * Reproducible retrieval trace for one packed response. Lets evals and agents
+ * compare runs on the same axes Augment reports: which index generation and
+ * revision served the query, which retrieval channels contributed, what was
+ * degraded, and how many candidates survived into the pack.
+ */
+export interface RetrievalTrace {
+  /** Query intent classified by the analyzer (symbol/path/concept/...). */
+  intent: string;
+  /** Retrieval channels that produced a score on at least one candidate. */
+  channels: string[];
+  /** Channels that were unavailable and forced a degraded result. */
+  degradedChannels: string[];
+  /** Candidates retrieved before packing. */
+  candidateCount: number;
+  /** Candidates that survived into the packed context. */
+  packedCount: number;
+  /** Distinct files represented in the pack. */
+  fileCount: number;
+  /** Estimated tokens in the packed text. */
+  estimatedTokens: number;
+  /** Whether the pack was capped by the token budget. */
+  truncated: boolean;
+  /** Passage reduction strategy applied. */
+  packing: PackingPolicy;
+  /** Immutable index generation that served the query. */
+  generationId?: string;
+  /** Revision of the generation currently serving queries. */
+  indexedRevision?: string;
+  /** Revision observed from the source workspace. */
+  sourceRevision?: string;
+  /** Revision of an in-flight generation, if any. */
+  pendingRevision?: string;
+  /** When the serving generation was indexed. */
+  indexedAt?: string;
+}
+
 export interface PackedContext {
   task: string;
   hits: SearchHit[];
@@ -163,6 +211,10 @@ export interface PackedContext {
   estimatedTokens: number;
   truncated: boolean;
   degradedChannels?: string[];
+  /** Passage reduction strategy applied to this pack. */
+  packing?: PackingPolicy;
+  /** Reproducible retrieval trace for evals and cross-run comparison. */
+  trace?: RetrievalTrace;
 }
 
 export interface IndexProgress {

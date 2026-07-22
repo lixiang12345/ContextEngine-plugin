@@ -197,4 +197,82 @@ describe("context packing", () => {
     assert.match(result.packedText, /"indexed_revision":"indexed-rev"/);
     assert.match(result.packedText, /"pending_revision":"pending-rev"/);
   });
+
+  test("reports a reproducible retrieval trace with generation and channels", async () => {
+    const scored: SearchHit = {
+      chunk: {
+        id: "traced",
+        path: "src/traced.ts",
+        language: "typescript",
+        startLine: 1,
+        endLine: 1,
+        content: "export const traced = true;",
+        hash: "hash-traced",
+      },
+      score: 0.9,
+      source: "hybrid",
+      preview: "export const traced = true;",
+      channels: { fts: 0.5, semantic: 0.7 },
+      degradedChannels: ["graph"],
+    };
+    const engine = new StubContextEngine([scored], {
+      generationId: "generation-7",
+      indexedRevision: "indexed-rev",
+      sourceRevision: "source-rev",
+      indexedAt: "2026-07-20T12:00:00.000Z",
+    });
+
+    const result = await engine.getTaskContext({ task: "traced", topK: 1 });
+
+    assert.ok(result.trace);
+    assert.equal(result.trace.generationId, "generation-7");
+    assert.equal(result.trace.indexedRevision, "indexed-rev");
+    assert.equal(result.trace.candidateCount, 1);
+    assert.equal(result.trace.packedCount, 1);
+    assert.equal(result.trace.fileCount, 1);
+    assert.equal(result.trace.packing, "raw");
+    assert.deepEqual([...result.trace.channels].sort(), ["fts", "semantic"]);
+    assert.deepEqual(result.trace.degradedChannels, ["graph"]);
+    assert.equal(result.trace.estimatedTokens, result.estimatedTokens);
+  });
+
+  test("extractive packing keeps query-salient lines a raw cap would drop", async () => {
+    // The salient line (processPayment) sits at the tail; a raw leading-char
+    // fit under a tight budget would truncate before reaching it.
+    const filler = "const unrelatedNoise = 0;\n".repeat(40);
+    const content = `${filler}export function processPayment(order) {\n  return charge(order);\n}\n`;
+    const engine = new StubContextEngine([
+      hit("pay", "src/payments.ts", content, 1, { startLine: 1, endLine: 44 }),
+    ]);
+
+    const raw = await engine.getTaskContext({
+      task: "where is processPayment defined",
+      topK: 1,
+      maxTokens: 220,
+      packing: "raw",
+    });
+    const extractive = await engine.getTaskContext({
+      task: "where is processPayment defined",
+      topK: 1,
+      maxTokens: 220,
+      packing: "extractive",
+    });
+
+    assert.equal(extractive.packing, "extractive");
+    assert.ok(extractive.packedText.length <= 220 * 4);
+    // Raw truncation loses the salient symbol; extractive preserves it.
+    assert.doesNotMatch(raw.packedText, /processPayment\(order\)/);
+    assert.match(extractive.packedText, /processPayment\(order\)/);
+    assert.match(extractive.packedText, /unrelated lines omitted/);
+  });
+
+  test("extractive packing reports the raw policy by default", async () => {
+    const engine = new StubContextEngine([
+      hit("a", "src/a.ts", "export const a = 1;", 1),
+    ]);
+
+    const result = await engine.getTaskContext({ task: "a", topK: 1 });
+
+    assert.equal(result.packing, "raw");
+  });
 });

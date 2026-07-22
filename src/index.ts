@@ -199,6 +199,8 @@ export type {
   SearchOptions,
   TaskContextOptions,
   PackedContext,
+  PackingPolicy,
+  RetrievalTrace,
   IndexStats,
   EngineConfig,
   EmbeddingsConfig,

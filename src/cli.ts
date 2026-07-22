@@ -273,6 +273,11 @@ program
   .option("-d, --data-dir <dir>", "index data directory")
   .option("-k, --top-k <n>", "chunks to consider", "12")
   .option("--max-tokens <n>", "optional cap for packed context tokens")
+  .option(
+    "--packing <policy>",
+    "passage reduction under the token cap: raw | extractive",
+    "raw",
+  )
   .option("--json", "JSON output")
   .action(
     async (
@@ -282,6 +287,7 @@ program
         dataDir?: string;
         topK: string;
         maxTokens?: string;
+        packing?: string;
         json?: boolean;
       },
     ) => {
@@ -293,6 +299,7 @@ program
         task,
         topK: Number(opts.topK) || 12,
         maxTokens: optionalPositiveInteger(opts.maxTokens),
+        packing: opts.packing === "extractive" ? "extractive" : "raw",
       });
       await engine.close();
       if (opts.json) {
@@ -300,8 +307,22 @@ program
         return;
       }
       console.log(packed.packedText);
+      const trace = packed.trace;
+      const traceLine = trace
+        ? [
+            `intent: ${trace.intent}`,
+            trace.channels.length ? `channels: ${trace.channels.join("+")}` : null,
+            trace.degradedChannels.length
+              ? `degraded: ${trace.degradedChannels.join(",")}`
+              : null,
+            `files: ${trace.fileCount}`,
+            trace.generationId ? `gen: ${trace.generationId.slice(0, 8)}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        : "";
       console.error(
-        `\n--- ~${packed.estimatedTokens} tokens · ${packed.hits.length} chunks${packed.truncated ? " · capped" : ""} ---`,
+        `\n--- ~${packed.estimatedTokens} tokens · ${packed.hits.length} chunks${packed.truncated ? " · capped" : ""}${traceLine ? ` · ${traceLine}` : ""} ---`,
       );
     },
   );

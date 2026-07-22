@@ -32,6 +32,12 @@ const retrievalSchema = {
     ),
   top_k: z.number().int().min(1).max(40).optional(),
   max_tokens: z.number().int().min(1).optional(),
+  packing: z
+    .enum(["raw", "extractive"])
+    .optional()
+    .describe(
+      "Passage reduction when max_tokens is tight: 'extractive' keeps query-relevant lines, 'raw' keeps leading characters (default).",
+    ),
 };
 
 /**
@@ -48,10 +54,12 @@ export function registerCodebaseRetrievalTools(
     information_request,
     top_k,
     max_tokens,
+    packing,
   }: {
     information_request: string;
     top_k?: number;
     max_tokens?: number;
+    packing?: "raw" | "extractive";
   }) => {
     try {
       const engine = await runtime.ensureReady();
@@ -60,6 +68,7 @@ export function registerCodebaseRetrievalTools(
         topK: top_k ?? 14,
         maxTokens: max_tokens,
         sourceAccess,
+        packing,
       });
       return {
         content: [{ type: "text" as const, text: packed.packedText }],

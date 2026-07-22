@@ -5,6 +5,8 @@ import type {
   IndexRoot,
   IndexStats,
   PackedContext,
+  PackingPolicy,
+  RetrievalTrace,
   SearchHit,
   SearchOptions,
   TaskContextOptions,
@@ -130,7 +132,10 @@ export class ContextEngine {
   async getTaskContext(opts: TaskContextOptions): Promise<PackedContext> {
     const topK = opts.topK ?? 12;
     const maxTokens = normalizeTokenBudget(opts.maxTokens);
+    const packing: PackingPolicy = opts.packing ?? "raw";
     const analyzed = analyzeQuery(opts.task);
+    const salientTerms =
+      packing === "extractive" ? buildSalientTerms(analyzed) : null;
 
     const hits = await this.search({
       query: opts.task,
@@ -189,6 +194,7 @@ export class ContextEngine {
         hit,
         this.indexFreshness,
         remaining,
+        salientTerms,
       );
       if (!block) {
         // There is not enough room for a provenance-bearing block. The
@@ -208,6 +214,33 @@ export class ContextEngine {
     const degradedChannels = [
       ...new Set(hits.flatMap((hit) => hit.degradedChannels ?? [])),
     ];
+    const channels = [
+      ...new Set(
+        hits.flatMap((hit) =>
+          hit.channels
+            ? Object.entries(hit.channels)
+                .filter(([, value]) => value !== undefined)
+                .map(([name]) => name)
+            : [],
+        ),
+      ),
+    ];
+    const trace: RetrievalTrace = {
+      intent: analyzed.intent,
+      channels,
+      degradedChannels,
+      candidateCount: hits.length,
+      packedCount: used.length,
+      fileCount: new Set(used.map((hit) => hit.chunk.path)).size,
+      estimatedTokens,
+      truncated,
+      packing,
+      generationId: this.indexFreshness?.generationId,
+      indexedRevision: this.indexFreshness?.indexedRevision,
+      sourceRevision: this.indexFreshness?.sourceRevision,
+      pendingRevision: this.indexFreshness?.pendingRevision,
+      indexedAt: this.indexFreshness?.indexedAt,
+    };
 
     return {
       task: opts.task,
@@ -216,6 +249,8 @@ export class ContextEngine {
       estimatedTokens,
       truncated,
       degradedChannels: degradedChannels.length ? degradedChannels : undefined,
+      packing,
+      trace,
     };
   }
 
@@ -228,6 +263,7 @@ export class ContextEngine {
       topK?: number;
       maxTokens?: number;
       sourceAccess?: import("./types.js").SourcePathPolicy;
+      packing?: PackingPolicy;
     },
   ): Promise<PackedContext> {
     return this.getTaskContext({
@@ -236,6 +272,7 @@ export class ContextEngine {
       maxTokens: opts?.maxTokens,
       sourceAccess: opts?.sourceAccess,
       diversify: true,
+      packing: opts?.packing,
     });
   }
 
@@ -530,6 +567,7 @@ function formatHitWithinChars(
   hit: SearchHit,
   freshness: IndexFreshness | undefined,
   maxChars: number | undefined,
+  salientTerms: Set<string> | null = null,
 ): FormattedHit | null {
   const full = formatHit(hit, freshness);
   if (maxChars === undefined || full.length <= maxChars) {
@@ -543,6 +581,17 @@ function formatHitWithinChars(
     const provenanceOnly = formatProvenanceOnly(hit, freshness);
     if (provenanceOnly.length > maxChars) return null;
     return { text: provenanceOnly, truncated: true };
+  }
+
+  // Extractive: keep query-salient lines instead of the leading characters,
+  // so the surviving budget carries more task-relevant evidence. Falls back to
+  // the leading-character fit when it cannot do better.
+  if (salientTerms && salientTerms.size > 0) {
+    const extractive = extractSalientContent(content, salientTerms);
+    if (extractive && extractive !== content) {
+      const candidate = formatHit(hit, freshness, extractive, true);
+      if (candidate.length <= maxChars) return { text: candidate, truncated: true };
+    }
   }
 
   let best = minimal;
@@ -564,6 +613,75 @@ function formatHitWithinChars(
     }
   }
   return { text: best, truncated: true };
+}
+
+/**
+ * Salient identifiers/terms from the query, used by the extractive packing
+ * policy to decide which lines of a passage carry task-relevant signal.
+ */
+function buildSalientTerms(analyzed: {
+  identifiers: string[];
+  tokens: string[];
+  expandedTerms: string[];
+}): Set<string> {
+  const terms = new Set<string>();
+  for (const group of [
+    analyzed.identifiers,
+    analyzed.tokens,
+    analyzed.expandedTerms,
+  ]) {
+    for (const term of group) {
+      const normalized = term.trim().toLowerCase();
+      if (normalized.length >= 3) terms.add(normalized);
+    }
+  }
+  return terms;
+}
+
+/**
+ * Reduce a passage to the lines that match query terms plus one line of
+ * surrounding context, joining non-adjacent kept regions with an elision
+ * marker. Returns null when nothing matches so the caller can fall back to a
+ * leading-character fit.
+ */
+function extractSalientContent(
+  content: string,
+  salientTerms: Set<string>,
+): string | null {
+  const lines = content.split("\n");
+  if (lines.length <= 3) return null;
+
+  const matched = lines.map((line) => {
+    const lower = line.toLowerCase();
+    for (const term of salientTerms) {
+      if (lower.includes(term)) return true;
+    }
+    return false;
+  });
+  if (!matched.some(Boolean)) return null;
+
+  // Keep matched lines plus one line of context on each side.
+  const keep = new Array<boolean>(lines.length).fill(false);
+  for (let i = 0; i < lines.length; i++) {
+    if (!matched[i]) continue;
+    for (let j = Math.max(0, i - 1); j <= Math.min(lines.length - 1, i + 1); j++) {
+      keep[j] = true;
+    }
+  }
+  if (keep.every(Boolean)) return null;
+
+  const out: string[] = [];
+  let elided = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (keep[i]) {
+      out.push(lines[i]);
+      elided = false;
+    } else if (!elided) {
+      out.push("… [unrelated lines omitted]");
+      elided = true;
+    }
+  }
+  return out.join("\n");
 }
 
 function formatProvenanceOnly(

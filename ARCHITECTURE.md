@@ -24,7 +24,7 @@ understand query → multi-signal retrieve → fuse → rerank → expand → pa
 | Rerank | Feature scorer (symbol/path/ident/overlap/lang) | Cheap “code-aware” ranking without a cross-encoder |
 | Neural rerank | Optional `/v1/rerank` blend on top-N (`CONTEXTENGINE_NEURAL_RERANK`) | Cross-encoder style second stage when GPU server is available |
 | Expand | PostgreSQL import/symbol graph around retrieved candidates | Related files without a full in-memory graph |
-| Pack | MMR diversity + token budget | Fewer tokens, less duplicate noise |
+| Pack | MMR diversity + token budget + pluggable `raw`/`extractive` policy | Fewer tokens, less duplicate noise; extractive keeps query-salient lines under a tight cap |
 | Multi-source | Multi-root + provider-neutral source plugin SDK; GitHub built in | Extensible without weakening sync fencing |
 | Eval | Recall + MRR + nDCG@k | Continuous quality bar |
 
