@@ -20,6 +20,9 @@
 - Added schema v10 CI provenance metadata with strict provider/run/ref/commit/
   repository validation, terminal audit results, and installable GitHub Actions,
   GitLab CI, and Bitbucket Pipelines templates via `ci-template`.
+- Added versioned team index snapshots with MVCC-consistent paged export,
+  content-addressed gzip artifacts, strict manifest/record/checksum validation,
+  atomic generation import, and pluggable filesystem/S3-compatible stores.
 - Added schema v8 persistent connector webhook events, a provider-neutral signed
   webhook contract, GitHub HMAC-SHA256 push handling, delivery/body replay
   protection, database-clock worker recovery, bounded retries, and attempt

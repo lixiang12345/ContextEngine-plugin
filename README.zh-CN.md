@@ -312,6 +312,8 @@ allow/deny 与嵌套路径前缀规则；Search、Context、File Read 和 Remote
 Source 级 CI Trigger Token 可让 GitHub Actions、GitLab CI 与 Bitbucket Pipelines
 只刷新指定来源而无需拿到工作区级 API Key，详见 [docs/HTTP_API.md](./docs/HTTP_API.md)
 中的 CI Trigger 小节。
+活动索引 generation 还可以通过版本化、checksum 校验的 filesystem 或 S3-compatible
+快照共享，详见 [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.md)。
 
 完整的客户端协议、入参出参、SSE 索引进度以及已检查 IntelliJ 插件的适配映射
 见 [docs/HTTP_API.md](./docs/HTTP_API.md)。
@@ -331,6 +333,7 @@ contextengine watch [root] [--debounce 800]   # 实时重建索引
 contextengine serve [--auto-index]            # MCP stdio
 contextengine http [--host 127.0.0.1] [--port 8787]  # 带鉴权 HTTP 服务
 contextengine ci-template <github|gitlab|bitbucket>  # 输出可安装 CI workflow
+contextengine snapshot export|import <name> [--store path|s3://bucket/prefix]
 contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
 ```
@@ -530,6 +533,7 @@ npm run mcp
 - 多仓库 profiles（`contextengine profile`）
 - `examples/` 下 MCP 配置示例
 - CI、索引导出/导入、与 Augment 对比文档
+- 版本化团队索引快照与可插拔 filesystem/S3-compatible store
 
 ### Phase 4 — ✅ `0.4.0`（Augment 级栈）
 

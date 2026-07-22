@@ -7,7 +7,7 @@
 当前数据库：PostgreSQL schema v10
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `189/189` 通过。
+全量测试 `193/193` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -59,6 +59,15 @@ lease/cursor/index-job，delivery/body replay 返回 409，终端结果包含
 `ci_provenance`。`contextengine ci-template github|gitlab|bitbucket` 输出可直接安装的
 三平台 workflow，且模板使用 provider run id 作为幂等 delivery。下一步进入
 S3/team index snapshot。
+
+Phase 9 状态（2026-07-22）：已实现版本化 team index snapshot。导出在活动 physical
+generation 上使用 `REPEATABLE READ READ ONLY` 与分页流式 gzip NDJSON；先上传
+SHA-256 content-addressed artifact，最后发布 manifest。导入先下载到私有临时文件并校验
+压缩/展开上限、size、digest、format/index version、严格 record schema 和计数，再写入
+新 generation，全部成功后原子 promotion。`SnapshotObjectStore` 是可插拔契约，内置
+atomic filesystem 与 AWS SDK S3-compatible adapter，支持 endpoint/path-style、SSE-S3
+与 SSE-KMS；CLI 提供 `snapshot export|import`。下一步补 snapshot list/delete、保留/GC
+策略和 owner 管理 HTTP API。
 
 ## 1. 目标
 

@@ -7,7 +7,7 @@ import { extractSymbolNames } from "../chunker/code-chunker.js";
 import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
-const INDEX_VERSION = 3;
+export const INDEX_VERSION = 3;
 const SCHEMA_VERSION = 10;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
@@ -35,6 +35,21 @@ interface FileMetadata {
   mtimeMs: number;
   size: number;
   rootAlias?: string;
+}
+
+export interface SnapshotFileRow extends FileMetadata {
+  rootAlias: string;
+}
+
+export interface SnapshotChunkRow extends CodeChunk {
+  rootAlias: string;
+}
+
+export interface SnapshotEmbeddingRow {
+  chunkId: string;
+  model: string;
+  dim: number;
+  embedding: string;
 }
 
 export interface IndexGenerationStatus {
@@ -331,6 +346,30 @@ export class PostgresStore {
           this.generationId,
         ),
       );
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Pin one immutable MVCC view while a snapshot is streamed in pages. */
+  async consistentRead<T>(fn: (store: PostgresStore) => Promise<T>): Promise<T> {
+    if (this.client) return fn(this);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const result = await fn(new PostgresStore(
+        this.databaseUrl,
+        this.workspaceId,
+        this.pool,
+        client,
+        this.logicalWorkspaceId,
+        this.generationId,
+      ));
       await client.query("COMMIT");
       return result;
     } catch (error) {
@@ -755,6 +794,142 @@ export class PostgresStore {
     );
   }
 
+  /** Safe, portable metadata only; local roots and generation ids are excluded. */
+  async snapshotMetadata(): Promise<Record<string, string>> {
+    const result = await this.query<{ key: string; value: string }>(
+      `SELECT key, value
+       FROM ce_meta
+       WHERE workspace_id = $1
+         AND key = ANY($2::text[])
+       ORDER BY key`,
+      [
+        this.workspaceId,
+        [
+          "commit_lineage_key",
+          "embedding_model",
+          "embedding_signature",
+          "index_version",
+          "last_indexed_at",
+          "search_tokenizer_version",
+        ],
+      ],
+    );
+    return Object.fromEntries(result.rows.map((row) => [row.key, row.value]));
+  }
+
+  async snapshotFilesPage(afterPath: string | null, limit = 500): Promise<SnapshotFileRow[]> {
+    const bounded = Math.max(1, Math.min(2_000, Math.floor(limit)));
+    const result = await this.query<{
+      path: string;
+      hash: string;
+      language: string;
+      mtime_ms: string | number;
+      size: string | number;
+      root_alias: string;
+    }>(
+      `SELECT path, hash, language, mtime_ms, size, root_alias
+       FROM ce_files
+       WHERE workspace_id = $1 AND ($2::text IS NULL OR path > $2)
+       ORDER BY path
+       LIMIT $3`,
+      [this.workspaceId, afterPath, bounded],
+    );
+    return result.rows.map((row) => ({
+      path: row.path,
+      hash: row.hash,
+      language: row.language,
+      mtimeMs: Number(row.mtime_ms),
+      size: Number(row.size),
+      rootAlias: row.root_alias,
+    }));
+  }
+
+  async snapshotChunksPage(
+    after: { path: string; id: string } | null,
+    limit = 500,
+  ): Promise<SnapshotChunkRow[]> {
+    const bounded = Math.max(1, Math.min(2_000, Math.floor(limit)));
+    const result = await this.query<{
+      id: string;
+      path: string;
+      language: string;
+      start_line: number;
+      end_line: number;
+      content: string;
+      symbol: string | null;
+      hash: string;
+      root_alias: string;
+    }>(
+      `SELECT id, path, language, start_line, end_line, content, symbol,
+              hash, root_alias
+       FROM ce_chunks
+       WHERE workspace_id = $1
+         AND ($2::text IS NULL OR (path, id) > ($2, $3))
+       ORDER BY path, id
+       LIMIT $4`,
+      [this.workspaceId, after?.path ?? null, after?.id ?? null, bounded],
+    );
+    return result.rows.map((row) => ({ ...rowToChunk(row), rootAlias: row.root_alias }));
+  }
+
+  async snapshotEmbeddingsPage(
+    afterChunkId: string | null,
+    limit = 500,
+  ): Promise<SnapshotEmbeddingRow[]> {
+    const bounded = Math.max(1, Math.min(2_000, Math.floor(limit)));
+    const result = await this.query<{
+      chunk_id: string;
+      model: string;
+      dim: number;
+      embedding: string;
+    }>(
+      `SELECT chunk_id, model, dim, embedding::text AS embedding
+       FROM ce_embeddings
+       WHERE workspace_id = $1 AND ($2::text IS NULL OR chunk_id > $2)
+       ORDER BY chunk_id
+       LIMIT $3`,
+      [this.workspaceId, afterChunkId, bounded],
+    );
+    return result.rows.map((row) => ({
+      chunkId: row.chunk_id,
+      model: row.model,
+      dim: Number(row.dim),
+      embedding: row.embedding,
+    }));
+  }
+
+  async snapshotRowCounts(): Promise<{
+    files: number;
+    chunks: number;
+    embeddings: number;
+    orphanChunks: number;
+  }> {
+    const result = await this.query<{
+      files: string;
+      chunks: string;
+      embeddings: string;
+      orphan_chunks: string;
+    }>(
+      `SELECT
+         (SELECT count(*) FROM ce_files WHERE workspace_id = $1)::text AS files,
+         (SELECT count(*) FROM ce_chunks WHERE workspace_id = $1)::text AS chunks,
+         (SELECT count(*) FROM ce_embeddings WHERE workspace_id = $1)::text AS embeddings,
+         (SELECT count(*)
+          FROM ce_chunks AS chunk
+          LEFT JOIN ce_files AS file
+            ON file.workspace_id = chunk.workspace_id AND file.path = chunk.path
+          WHERE chunk.workspace_id = $1 AND file.path IS NULL)::text AS orphan_chunks`,
+      [this.workspaceId],
+    );
+    const row = result.rows[0];
+    return {
+      files: Number(row?.files ?? 0),
+      chunks: Number(row?.chunks ?? 0),
+      embeddings: Number(row?.embeddings ?? 0),
+      orphanChunks: Number(row?.orphan_chunks ?? 0),
+    };
+  }
+
   async getFileHash(relPath: string): Promise<string | null> {
     const result = await this.query<{ hash: string }>(
       `SELECT hash FROM ce_files WHERE workspace_id = $1 AND path = $2`,
@@ -790,6 +965,35 @@ export class PostgresStore {
         meta.size,
         meta.rootAlias ?? "",
       ],
+    );
+  }
+
+  async upsertFiles(items: readonly FileMetadata[]): Promise<void> {
+    if (!items.length) return;
+    if (items.length > 2_000) throw new Error("File metadata batch exceeds 2000 rows");
+    const rows = items.map((meta) => ({
+      path: meta.path,
+      hash: meta.hash,
+      language: meta.language,
+      mtime_ms: Math.round(meta.mtimeMs),
+      size: meta.size,
+      root_alias: meta.rootAlias ?? "",
+    }));
+    await this.query(
+      `INSERT INTO ce_files(workspace_id, path, hash, language, mtime_ms, size, root_alias)
+       SELECT $1, input.path, input.hash, input.language, input.mtime_ms,
+              input.size, input.root_alias
+       FROM jsonb_to_recordset($2::jsonb) AS input(
+         path TEXT, hash TEXT, language TEXT, mtime_ms BIGINT,
+         size BIGINT, root_alias TEXT
+       )
+       ON CONFLICT(workspace_id, path) DO UPDATE SET
+         hash = excluded.hash,
+         language = excluded.language,
+         mtime_ms = excluded.mtime_ms,
+         size = excluded.size,
+         root_alias = excluded.root_alias`,
+      [this.workspaceId, JSON.stringify(rows)],
     );
   }
 

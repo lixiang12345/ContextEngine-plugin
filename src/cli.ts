@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import path from "node:path";
-import { loadDotEnv, resolveEngineConfig } from "./config.js";
+import { loadDotEnv, resolveDatabaseUrl, resolveEngineConfig } from "./config.js";
 import { ContextEngine } from "./engine.js";
 import { renderCiTemplate, type CiTemplateProvider } from "./ci/templates.js";
+import { FilesystemSnapshotStore } from "./snapshots/filesystem-store.js";
+import { S3SnapshotStore } from "./snapshots/s3-store.js";
+import { exportIndexSnapshot, importIndexSnapshot } from "./snapshots/snapshot.js";
+import type { SnapshotObjectStore } from "./snapshots/object-store.js";
 
 loadDotEnv();
 
@@ -25,6 +29,44 @@ program
       throw new Error(`Unsupported CI provider: ${provider}`);
     }
     process.stdout.write(renderCiTemplate(provider as CiTemplateProvider));
+  });
+
+const snapshot = program
+  .command("snapshot")
+  .description("Export or import a versioned team index snapshot");
+
+snapshot
+  .command("export")
+  .argument("<name>", "snapshot name")
+  .option("-r, --root <dir>", "local workspace root", process.cwd())
+  .option("--workspace-id <id>", "logical workspace id (defaults to root)")
+  .option("--store <location>", "directory or s3://bucket/prefix")
+  .action(async (name: string, opts: SnapshotCliOptions) => {
+    const root = path.resolve(opts.root);
+    const result = await exportIndexSnapshot({
+      databaseUrl: requireSnapshotDatabaseUrl(),
+      workspaceId: opts.workspaceId ?? root,
+      name,
+      store: snapshotStore(opts.store, root),
+    });
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+snapshot
+  .command("import")
+  .argument("<name>", "snapshot name")
+  .option("-r, --root <dir>", "local workspace root", process.cwd())
+  .option("--workspace-id <id>", "logical workspace id (defaults to root)")
+  .option("--store <location>", "directory or s3://bucket/prefix")
+  .action(async (name: string, opts: SnapshotCliOptions) => {
+    const root = path.resolve(opts.root);
+    const result = await importIndexSnapshot({
+      databaseUrl: requireSnapshotDatabaseUrl(),
+      workspaceId: opts.workspaceId ?? root,
+      name,
+      store: snapshotStore(opts.store, root),
+    });
+    console.log(JSON.stringify(result, null, 2));
   });
 
 program
@@ -555,4 +597,40 @@ function optionalPositiveInteger(value: string | undefined): number | undefined 
   return Number.isFinite(parsed) && parsed > 0
     ? Math.floor(parsed)
     : undefined;
+}
+
+interface SnapshotCliOptions {
+  root: string;
+  workspaceId?: string;
+  store?: string;
+}
+
+function requireSnapshotDatabaseUrl(): string {
+  const value = resolveDatabaseUrl();
+  if (!value) throw new Error("CONTEXTENGINE_DATABASE_URL is required for snapshots");
+  return value;
+}
+
+function snapshotStore(location: string | undefined, root: string): SnapshotObjectStore {
+  const value = location?.trim() || path.join(root, ".contextengine", "snapshots");
+  if (!value.startsWith("s3://")) return new FilesystemSnapshotStore(value);
+  const parsed = new URL(value);
+  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("Snapshot S3 location must be s3://bucket/prefix");
+  }
+  return new S3SnapshotStore({
+    bucket: parsed.hostname,
+    prefix: parsed.pathname.replace(/^\/+|\/+$/g, "") || "contextengine",
+    region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION,
+    endpoint: process.env.CONTEXTENGINE_S3_ENDPOINT || process.env.CC_S3_ENDPOINT,
+    forcePathStyle: /^(1|true|yes|on)$/i.test(
+      process.env.CONTEXTENGINE_S3_FORCE_PATH_STYLE || process.env.CC_S3_FORCE_PATH_STYLE || "",
+    ),
+    serverSideEncryption: process.env.CONTEXTENGINE_S3_SSE === "aws:kms"
+      ? "aws:kms"
+      : process.env.CONTEXTENGINE_S3_SSE === "AES256"
+        ? "AES256"
+        : undefined,
+    kmsKeyId: process.env.CONTEXTENGINE_S3_KMS_KEY_ID,
+  });
 }

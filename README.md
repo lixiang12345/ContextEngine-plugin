@@ -331,6 +331,8 @@ see [docs/PLUGINS.md](./docs/PLUGINS.md).
 Source-scoped CI trigger tokens let GitHub Actions, GitLab CI, and Bitbucket
 Pipelines refresh one source without receiving a workspace-wide API key; see
 the CI trigger section in [docs/HTTP_API.md](./docs/HTTP_API.md).
+Active index generations can also be shared through versioned, checksum-verified
+filesystem or S3-compatible snapshots; see [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.md).
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).
@@ -350,6 +352,7 @@ contextengine watch [root] [--debounce 800]   # live re-index
 contextengine serve [--auto-index]            # MCP stdio
 contextengine http [--host 127.0.0.1] [--port 8787]  # authenticated HTTP service
 contextengine ci-template <github|gitlab|bitbucket>  # print an installable CI workflow
+contextengine snapshot export|import <name> [--store path|s3://bucket/prefix]
 contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
 ```
@@ -549,6 +552,7 @@ npm run mcp
 - Multi-repo profiles (`contextengine profile`)
 - Example MCP configs under `examples/`
 - CI, index export/import, comparison doc vs Augment
+- Versioned team index snapshots with pluggable filesystem/S3-compatible stores
 
 ### Phase 4 — ✅ `0.4.0` (Augment-class stack)
 
