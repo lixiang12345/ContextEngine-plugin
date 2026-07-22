@@ -95,6 +95,23 @@ const store: SnapshotObjectStore = {
 await exportIndexSnapshot({ databaseUrl, workspaceId, name: "main", store });
 ```
 
+Replication uses the same store contract and publishes the target manifest last:
+
+```ts
+import { replicateIndexSnapshot } from "contextengine-plugin";
+
+await replicateIndexSnapshot({
+  name: "main",
+  source: primaryStore,
+  target: regionalStore,
+});
+```
+
+The artifact is first downloaded into a bounded private temporary file and
+verified against its manifest digest and byte count. A failed copy therefore
+cannot replace an existing valid target artifact; a retry is idempotent and
+publishes the manifest only after the artifact is durable.
+
 Snapshot format v1 contains portable index metadata, file metadata, chunks,
 and embeddings. It intentionally excludes database credentials, CI/webhook
 credentials, ACLs, local root paths, source Blob objects, and binary files. It

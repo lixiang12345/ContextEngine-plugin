@@ -29,7 +29,7 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 | 规则和团队知识 | CLI 支持 `AGENTS.md`、`CLAUDE.md`、`.augment/rules`、用户规则和 agent-requested 规则 | 仓库可读取代码/文档，但没有规则解析、优先级和持久化 memory 层 | 高 |
 | 权限 | Auggie/Cosmos 支持 allow/deny、脚本或 webhook policy、工具级匹配和审计语义 | API Key/OIDC principal、workspace ACL、schema v7 source/path ACL、local-root allowlist、模型 URL SSRF 防护、路径边界校验 | 中到高：缺 connector 权限快照、外部策略 webhook 和完整审计流 |
 | 自动更新 | Remote default branch 随 push 更新；Connectors 提供 webhook/GitHub Actions | 本地 watcher、签名 GitHub/GitLab/Bitbucket push webhook、可安装 source-scoped CI workflow、CI provenance 与 HTTP sync/index jobs | 低：缺托管安装 API |
-| 团队索引共享 | 官方文档给出 S3 store/team sharing | 可共享 PostgreSQL workspace；版本化 snapshot 支持 content-addressed gzip、checksum、atomic generation import、filesystem/S3-compatible store、list/delete、retention prune/GC，以及带 claim/lease/fencing 的 owner 异步 HTTP jobs | 低：缺跨区域复制与目标级状态 |
+| 团队索引共享 | 官方文档给出 S3 store/team sharing | 可共享 PostgreSQL workspace；版本化 snapshot 支持 content-addressed gzip、checksum、atomic generation import、filesystem/S3-compatible store、list/delete、retention prune/GC、跨 store 复制原语，以及带 claim/lease/fencing 的 owner 异步 HTTP jobs | 低：缺复制目标注册与目标级状态 |
 | 评测 | Augment 公开过端到端 PR 评测和 token/tool-call 叙述 | 有 Recall/MRR/nDCG、多仓库脚本、重复成对 `eval-pr` 和 3 个固定历史任务 | 高：缺公共大样本 corpus、受控真实模型结果和可比结论 |
 
 ## 当前实现核对

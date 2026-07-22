@@ -61,6 +61,7 @@ export {
   deleteIndexSnapshot,
   garbageCollectSnapshotArtifacts,
   pruneIndexSnapshots,
+  replicateIndexSnapshot,
   SnapshotNotFoundError,
   SNAPSHOT_FORMAT_VERSION,
 } from "./snapshots/snapshot.js";
@@ -73,6 +74,7 @@ export type {
   SnapshotManifest,
   SnapshotExportResult,
   SnapshotImportResult,
+  SnapshotReplicationResult,
 } from "./snapshots/snapshot.js";
 export {
   WorkspaceRepository,

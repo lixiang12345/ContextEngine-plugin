@@ -65,6 +65,12 @@ export interface SnapshotImportResult {
   generationId: string;
 }
 
+export interface SnapshotReplicationResult {
+  manifest: SnapshotManifest;
+  manifestKey: string;
+  artifactKey: string;
+}
+
 export class SnapshotNotFoundError extends Error {
   constructor(readonly key: string) {
     super(`Snapshot object not found: ${key}`);
@@ -94,6 +100,64 @@ export async function deleteIndexSnapshot(options: {
 }): Promise<void> {
   const name = snapshotNameSchema.parse(options.name);
   await options.store.delete(`snapshots/${name}/manifest.json`);
+}
+
+/** Copy one snapshot between pluggable stores and publish its manifest last. */
+export async function replicateIndexSnapshot(options: {
+  name: string;
+  source: SnapshotObjectStore;
+  target: SnapshotObjectStore;
+}): Promise<SnapshotReplicationResult> {
+  const name = snapshotNameSchema.parse(options.name);
+  const manifestKey = `snapshots/${name}/manifest.json`;
+  const manifest = manifestSchema.parse(
+    JSON.parse(await readObject(options.source, manifestKey, MAX_MANIFEST_BYTES)),
+  );
+  validateSnapshotObjectKey(manifest.artifact.key);
+  if (
+    manifest.artifact.key !==
+    `objects/sha256/${manifest.artifact.sha256}.ndjson.gz`
+  ) {
+    throw new Error("Snapshot artifact key does not match its digest");
+  }
+
+  const temporary = path.join(
+    os.tmpdir(),
+    `contextengine-replication-${randomUUID()}.ndjson.gz`,
+  );
+  try {
+    await downloadAndVerify(
+      options.source,
+      manifest.artifact.key,
+      manifest.artifact.sha256,
+      manifest.artifact.bytes,
+      temporary,
+    );
+    await options.target.put(manifest.artifact.key, createReadStream(temporary), {
+      contentType: "application/x-ndjson",
+      contentEncoding: "gzip",
+      contentLength: manifest.artifact.bytes,
+      checksumSha256: manifest.artifact.sha256,
+    });
+  } catch (error) {
+    if (isMissingObjectError(error)) {
+      throw new SnapshotNotFoundError(manifest.artifact.key);
+    }
+    throw error;
+  } finally {
+    await rm(temporary, { force: true });
+  }
+
+  const body = JSON.stringify(manifest);
+  await options.target.put(manifestKey, Readable.from([body]), {
+    contentType: "application/json",
+    contentLength: Buffer.byteLength(body),
+  });
+  return {
+    manifest,
+    manifestKey,
+    artifactKey: manifest.artifact.key,
+  };
 }
 
 /** Remove unreferenced content-addressed artifacts after snapshot deletion. */

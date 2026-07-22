@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdtemp } from "node:fs/promises";
+import { appendFile, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -14,6 +14,7 @@ import {
   importIndexSnapshot,
   listIndexSnapshots,
   pruneIndexSnapshots,
+  replicateIndexSnapshot,
 } from "../src/snapshots/snapshot.js";
 import { PostgresStore } from "../src/store/postgres-store.js";
 
@@ -37,10 +38,12 @@ describePostgres("portable index snapshots", () => {
   const schemaUrl = databaseUrlForSchema(databaseUrl!, schema);
   const admin = new Pool({ connectionString: databaseUrl! });
   let directory = "";
+  let replicaDirectory = "";
 
   before(async () => {
     await admin.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
     directory = await mkdtemp(path.join(os.tmpdir(), "ce-index-snapshot-"));
+    replicaDirectory = await mkdtemp(path.join(os.tmpdir(), "ce-index-replica-"));
   });
 
   after(async () => {
@@ -48,6 +51,8 @@ describePostgres("portable index snapshots", () => {
       await admin.query(
         `DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`,
       );
+      await rm(directory, { recursive: true, force: true });
+      await rm(replicaDirectory, { recursive: true, force: true });
     } finally {
       await admin.end();
     }
@@ -107,6 +112,22 @@ describePostgres("portable index snapshots", () => {
     assert.doesNotMatch(JSON.stringify(exported.manifest), /private\/source/);
     assert.deepEqual(await objectStore.list("operations"), []);
     assert.deepEqual(await listIndexSnapshots(objectStore), ["team-main"]);
+
+    const replicaStore = new FilesystemSnapshotStore(replicaDirectory);
+    const replicated = await replicateIndexSnapshot({
+      name: "team-main",
+      source: objectStore,
+      target: replicaStore,
+    });
+    assert.equal(replicated.artifactKey, exported.manifest.artifact.key);
+    assert.deepEqual(await listIndexSnapshots(replicaStore), ["team-main"]);
+    const replicaImport = await importIndexSnapshot({
+      databaseUrl: schemaUrl,
+      workspaceId: "region-copy",
+      name: "team-main",
+      store: replicaStore,
+    });
+    assert.equal(replicaImport.manifest.artifact.sha256, exported.manifest.artifact.sha256);
 
     const imported = await importIndexSnapshot({
       databaseUrl: schemaUrl,
