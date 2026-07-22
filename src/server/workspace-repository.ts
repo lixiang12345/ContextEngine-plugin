@@ -242,6 +242,14 @@ export interface SnapshotReplicationJobCreation {
   created: boolean;
 }
 
+export interface StoredSnapshotReplicationPublication {
+  jobId: string;
+  publicationSequence: string;
+  sourceManifest: Record<string, unknown>;
+  sourceManifestSha256: string;
+  pinnedAt: string;
+}
+
 export interface SnapshotReplicationMetrics {
   targetId: string;
   queued: number;
@@ -362,6 +370,14 @@ interface SnapshotReplicationScheduleRow extends QueryResultRow {
   created_by: string;
   created_at: string | Date;
   updated_at: string | Date;
+}
+
+interface SnapshotReplicationPublicationRow extends QueryResultRow {
+  job_id: string;
+  publication_sequence: string | number;
+  source_manifest: unknown;
+  source_manifest_sha256: string;
+  pinned_at: string | Date;
 }
 
 interface McpSessionRow extends QueryResultRow {
@@ -657,6 +673,22 @@ function snapshotReplicationScheduleFromRow(
     createdBy: row.created_by,
     createdAt: iso(row.created_at)!,
     updatedAt: iso(row.updated_at)!,
+  };
+}
+
+function snapshotReplicationPublicationFromRow(
+  row: SnapshotReplicationPublicationRow,
+): StoredSnapshotReplicationPublication {
+  const sourceManifest = asObject(row.source_manifest);
+  if (!sourceManifest) {
+    throw new Error("Snapshot replication publication manifest is invalid");
+  }
+  return {
+    jobId: row.job_id,
+    publicationSequence: String(row.publication_sequence),
+    sourceManifest,
+    sourceManifestSha256: row.source_manifest_sha256,
+    pinnedAt: iso(row.pinned_at)!,
   };
 }
 
@@ -3304,6 +3336,281 @@ export class WorkspaceRepository {
     }
   }
 
+  async getSnapshotReplicationPublication(
+    jobId: string,
+    attemptToken: string,
+  ): Promise<StoredSnapshotReplicationPublication | null> {
+    const result = await this.pool.query<SnapshotReplicationPublicationRow>(
+      `SELECT publication.job_id, publication.publication_sequence,
+              publication.source_manifest,
+              publication.source_manifest_sha256, publication.pinned_at
+       FROM ce_snapshot_replication_publications AS publication
+       JOIN ce_snapshot_jobs AS job ON job.id = publication.job_id
+       WHERE publication.job_id = $1
+         AND job.operation = 'replicate'
+         AND job.status = 'running'
+         AND job.lock_token = $2`,
+      [jobId, attemptToken],
+    );
+    return result.rows[0]
+      ? snapshotReplicationPublicationFromRow(result.rows[0])
+      : null;
+  }
+
+  async pinSnapshotReplicationPublication(
+    jobId: string,
+    attemptToken: string,
+    input: {
+      sourceManifest: Record<string, unknown>;
+      sourceManifestSha256: string;
+    },
+  ): Promise<StoredSnapshotReplicationPublication | null> {
+    return this.pinSnapshotReplicationPublicationWithLoader(
+      jobId,
+      attemptToken,
+      async () => input,
+    );
+  }
+
+  async pinSnapshotReplicationPublicationWithLoader(
+    jobId: string,
+    attemptToken: string,
+    loadSource: () => Promise<{
+      sourceManifest: Record<string, unknown>;
+      sourceManifestSha256: string;
+    }>,
+  ): Promise<StoredSnapshotReplicationPublication | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const owner = await client.query<{ workspace_id: string }>(
+        `SELECT workspace_id FROM ce_snapshot_jobs WHERE id = $1`,
+        [jobId],
+      );
+      if (!owner.rows[0]) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
+        [`contextengine:snapshot-artifacts:${owner.rows[0].workspace_id}`],
+      );
+      const existing = await client.query<SnapshotReplicationPublicationRow>(
+        `SELECT publication.job_id, publication.publication_sequence,
+                publication.source_manifest,
+                publication.source_manifest_sha256, publication.pinned_at
+         FROM ce_snapshot_replication_publications AS publication
+         JOIN ce_snapshot_jobs AS job ON job.id = publication.job_id
+         WHERE publication.job_id = $1
+           AND job.operation = 'replicate'
+           AND job.status = 'running'
+           AND job.lock_token = $2`,
+        [jobId, attemptToken],
+      );
+      if (existing.rows[0]) {
+        await client.query("COMMIT");
+        return snapshotReplicationPublicationFromRow(existing.rows[0]);
+      }
+      const input = await loadSource();
+      let sourceManifestJson: string;
+      try {
+        const serialized = JSON.stringify(input.sourceManifest);
+        if (typeof serialized !== "string") throw new Error("not an object");
+        sourceManifestJson = serialized;
+      } catch {
+        throw new Error(
+          "Snapshot replication publication manifest is not JSON serializable",
+        );
+      }
+      if (
+        !input.sourceManifest ||
+        Array.isArray(input.sourceManifest) ||
+        Buffer.byteLength(sourceManifestJson) > 256 * 1024 ||
+        !/^[0-9a-f]{64}$/.test(input.sourceManifestSha256)
+      ) {
+        throw new Error("Snapshot replication publication is invalid");
+      }
+      const active = await client.query(
+        `SELECT id
+         FROM ce_snapshot_jobs
+         WHERE id = $1 AND operation = 'replicate'
+           AND status = 'running' AND lock_token = $2
+         FOR UPDATE`,
+        [jobId, attemptToken],
+      );
+      if (!active.rows[0]) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      let publication = await client.query<SnapshotReplicationPublicationRow>(
+        `SELECT job_id, publication_sequence, source_manifest,
+                source_manifest_sha256, pinned_at
+         FROM ce_snapshot_replication_publications
+         WHERE job_id = $1`,
+        [jobId],
+      );
+      if (!publication.rows[0]) {
+        publication = await client.query<SnapshotReplicationPublicationRow>(
+          `INSERT INTO ce_snapshot_replication_publications(
+             job_id, source_manifest, source_manifest_sha256
+           ) VALUES ($1, $2::jsonb, $3)
+           RETURNING job_id, publication_sequence, source_manifest,
+                     source_manifest_sha256, pinned_at`,
+          [
+            jobId,
+            sourceManifestJson,
+            input.sourceManifestSha256,
+          ],
+        );
+      }
+      await client.query("COMMIT");
+      return snapshotReplicationPublicationFromRow(publication.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async withSnapshotReplicationArtifactGuard<T>(
+    workspaceId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
+        [`contextengine:snapshot-artifacts:${workspaceId}`],
+      );
+      const result = await operation();
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async isSnapshotJobAttemptActive(
+    jobId: string,
+    attemptToken: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query<{ active: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM ce_snapshot_jobs
+         WHERE id = $1 AND status = 'running' AND lock_token = $2
+       ) AS active`,
+      [jobId, attemptToken],
+    );
+    return result.rows[0]?.active ?? false;
+  }
+
+  async isSnapshotReplicationPublicationCurrent(
+    jobId: string,
+    attemptToken: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query<{ current: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM ce_snapshot_replication_publications AS publication
+         JOIN ce_snapshot_jobs AS job ON job.id = publication.job_id
+         WHERE publication.job_id = $1
+           AND job.operation = 'replicate'
+           AND job.status = 'running'
+           AND job.lock_token = $2
+           AND NOT EXISTS (
+             SELECT 1
+             FROM ce_snapshot_replication_publications AS newer_publication
+             JOIN ce_snapshot_jobs AS newer_job
+               ON newer_job.id = newer_publication.job_id
+             WHERE newer_publication.publication_sequence
+                     > publication.publication_sequence
+               AND newer_job.workspace_id = job.workspace_id
+               AND newer_job.snapshot_name = job.snapshot_name
+               AND newer_job.parameters->>'target_id'
+                     = job.parameters->>'target_id'
+           )
+       ) AS current`,
+      [jobId, attemptToken],
+    );
+    return result.rows[0]?.current ?? false;
+  }
+
+  /** Serialize the short external manifest CAS with lease/terminal transitions. */
+  async withSnapshotReplicationPublicationGuard<T>(
+    jobId: string,
+    attemptToken: string,
+    operation: () => Promise<T>,
+  ): Promise<T | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const current = await client.query(
+        `SELECT publication.job_id
+         FROM ce_snapshot_replication_publications AS publication
+         JOIN ce_snapshot_jobs AS job ON job.id = publication.job_id
+         WHERE publication.job_id = $1
+           AND job.operation = 'replicate'
+           AND job.status = 'running'
+           AND job.lock_token = $2
+           AND NOT EXISTS (
+             SELECT 1
+             FROM ce_snapshot_replication_publications AS newer_publication
+             JOIN ce_snapshot_jobs AS newer_job
+               ON newer_job.id = newer_publication.job_id
+             WHERE newer_publication.publication_sequence
+                     > publication.publication_sequence
+               AND newer_job.workspace_id = job.workspace_id
+               AND newer_job.snapshot_name = job.snapshot_name
+               AND newer_job.parameters->>'target_id'
+                     = job.parameters->>'target_id'
+           )
+         FOR UPDATE OF job`,
+        [jobId, attemptToken],
+      );
+      if (!current.rows[0]) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      const result = await operation();
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listRetainedSnapshotReplicationArtifactKeys(
+    workspaceId: string,
+  ): Promise<string[]> {
+    const result = await this.pool.query<{ artifact_key: string }>(
+      `SELECT DISTINCT publication.source_manifest->'artifact'->>'key' AS artifact_key
+       FROM ce_snapshot_replication_publications AS publication
+       JOIN ce_snapshot_jobs AS job ON job.id = publication.job_id
+       WHERE job.workspace_id = $1
+         AND job.operation = 'replicate'
+         AND (
+           job.status IN ('queued', 'running')
+           OR (
+             job.status = 'failed'
+             AND job.completed_at
+                   >= clock_timestamp() - interval '7 days'
+           )
+         )
+         AND jsonb_typeof(publication.source_manifest->'artifact') = 'object'
+         AND jsonb_typeof(publication.source_manifest->'artifact'->'key') = 'string'`,
+      [workspaceId],
+    );
+    return result.rows.map((row) => row.artifact_key);
+  }
+
   async getSnapshotJob(jobId: string): Promise<StoredSnapshotJob | null> {
     const result = await this.pool.query<SnapshotJobRow>(
       `SELECT id, workspace_id, principal_id, operation, snapshot_name,
@@ -3365,39 +3672,57 @@ export class WorkspaceRepository {
                   WHEN jsonb_typeof(jobs.result->'transfer_duration_ms') = 'number'
                   THEN (jobs.result->>'transfer_duration_ms')::numeric
                   ELSE NULL
-                END AS transfer_duration_ms
+                END AS transfer_duration_ms,
+                COALESCE(jobs.result->>'publication_status', 'published')
+                  <> 'superseded' AS effective_publication
          FROM ce_snapshot_jobs AS jobs
          WHERE jobs.workspace_id = $1 AND jobs.operation = 'replicate'
        ), latest_success AS (
          SELECT target_id, MAX(completed_at) AS completed_at
          FROM replication_jobs
-         WHERE status = 'succeeded'
+         WHERE status = 'succeeded' AND effective_publication
          GROUP BY target_id
        )
        SELECT jobs.target_id,
               COUNT(*) FILTER (WHERE jobs.status = 'queued') AS queued,
               COUNT(*) FILTER (WHERE jobs.status = 'running') AS running,
-              COUNT(*) FILTER (WHERE jobs.status = 'succeeded') AS succeeded,
+              COUNT(*) FILTER (
+                WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+              ) AS succeeded,
               COUNT(*) FILTER (
                 WHERE jobs.status = 'failed'
                   AND COALESCE(jobs.progress->>'phase', '') <> 'superseded'
               ) AS failed,
               COALESCE(SUM(GREATEST(jobs.attempts - 1, 0)), 0) AS retries,
               AVG(EXTRACT(EPOCH FROM (jobs.completed_at - jobs.started_at)) * 1000)
-                FILTER (WHERE jobs.status = 'succeeded') AS average_duration_ms,
+                FILTER (
+                  WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                ) AS average_duration_ms,
               COALESCE(SUM(jobs.artifact_bytes)
-                FILTER (WHERE jobs.status = 'succeeded'), 0) AS total_artifact_bytes,
+                FILTER (
+                  WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                ), 0) AS total_artifact_bytes,
               AVG(jobs.artifact_bytes)
-                FILTER (WHERE jobs.status = 'succeeded') AS average_artifact_bytes,
+                FILTER (
+                  WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                ) AS average_artifact_bytes,
               MAX(jobs.artifact_bytes)
-                FILTER (WHERE jobs.status = 'succeeded') AS largest_artifact_bytes,
+                FILTER (
+                  WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                ) AS largest_artifact_bytes,
               CASE
                 WHEN COALESCE(SUM(jobs.transfer_duration_ms)
-                  FILTER (WHERE jobs.status = 'succeeded'), 0) > 0
+                  FILTER (
+                    WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                  ), 0) > 0
                 THEN COALESCE(SUM(jobs.artifact_bytes)
-                  FILTER (WHERE jobs.status = 'succeeded'), 0) * 1000
+                  FILTER (
+                    WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                  ), 0) * 1000
                   / SUM(jobs.transfer_duration_ms)
-                    FILTER (WHERE jobs.status = 'succeeded')
+                    FILTER (
+                      WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                    )
                 ELSE NULL
               END AS average_throughput_bytes_per_second,
               COUNT(*) FILTER (
@@ -3409,7 +3734,9 @@ export class WorkspaceRepository {
                   )
               ) AS consecutive_failures,
               MAX(jobs.completed_at)
-                FILTER (WHERE jobs.status = 'succeeded') AS last_succeeded_at,
+                FILTER (
+                  WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                ) AS last_succeeded_at,
               MAX(jobs.completed_at)
                 FILTER (
                   WHERE jobs.status = 'failed'
@@ -3417,7 +3744,9 @@ export class WorkspaceRepository {
                 ) AS last_failed_at,
               EXTRACT(EPOCH FROM (
                 clock_timestamp()
-                - MAX(jobs.completed_at) FILTER (WHERE jobs.status = 'succeeded')
+                - MAX(jobs.completed_at) FILTER (
+                    WHERE jobs.status = 'succeeded' AND jobs.effective_publication
+                  )
               )) * 1000 AS replication_lag_ms
        FROM replication_jobs AS jobs
        LEFT JOIN latest_success ON latest_success.target_id = jobs.target_id

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added schema v14 replication publication fencing with immutable per-job
+  source manifest pins, decimal monotonic sequences, filesystem/S3 conditional
+  writes, CAS conflict rechecks, lease-loss cancellation, idempotent/superseded
+  outcomes, and bounded GC retention for retryable pinned artifacts. Minimal
+  custom stores remain compatible and explicitly report best-effort fencing.
 - Added schema v13 durable snapshot replication schedules with manual,
   interval, and IANA-timezone nightly policies, database-clock pause/resume,
   cross-instance `SKIP LOCKED` materialization, active-job deduplication, and

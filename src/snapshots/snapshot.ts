@@ -12,7 +12,10 @@ import { z } from "zod";
 import { INDEX_VERSION, PostgresStore } from "../store/postgres-store.js";
 import type { CodeChunk } from "../types.js";
 import type { SnapshotObjectStore } from "./object-store.js";
-import { validateSnapshotObjectKey } from "./object-store.js";
+import {
+  supportsConditionalSnapshotWrites,
+  validateSnapshotObjectKey,
+} from "./object-store.js";
 
 export const SNAPSHOT_FORMAT_VERSION = 1;
 const MAX_MANIFEST_BYTES = 256 * 1024;
@@ -21,6 +24,7 @@ const MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024 * 1024;
 const MAX_LINE_BYTES = 16 * 1024 * 1024;
 const PAGE_SIZE = 500;
 const PUBLICATION_MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MANIFEST_PUBLICATION_TIMEOUT_MS = 30_000;
 
 const snapshotNameSchema = z
   .string()
@@ -50,6 +54,13 @@ const manifestSchema = z
         embeddings: z.number().int().nonnegative().max(50_000_000),
       })
       .strict(),
+    replication: z
+      .object({
+        publication_sequence: z.string().regex(/^[1-9][0-9]*$/),
+        source_manifest_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -69,7 +80,27 @@ export interface SnapshotReplicationResult {
   manifest: SnapshotManifest;
   manifestKey: string;
   artifactKey: string;
+  publicationStatus: "published" | "already_current" | "superseded";
+  publicationSequence: string | null;
+  sourceManifestSha256: string;
+  strictFencing: boolean;
 }
+
+export interface LoadedSnapshotManifest {
+  manifest: SnapshotManifest;
+  manifestKey: string;
+  sha256: string;
+}
+
+export interface SnapshotReplicationPublication {
+  publicationSequence: string;
+  sourceManifest: SnapshotManifest;
+  sourceManifestSha256: string;
+}
+
+export type SnapshotPublicationGuard = <T>(
+  operation: () => Promise<T>,
+) => Promise<T | null>;
 
 export class SnapshotNotFoundError extends Error {
   constructor(readonly key: string) {
@@ -102,23 +133,90 @@ export async function deleteIndexSnapshot(options: {
   await options.store.delete(`snapshots/${name}/manifest.json`);
 }
 
+export async function loadIndexSnapshotManifest(options: {
+  name: string;
+  store: SnapshotObjectStore;
+  signal?: AbortSignal;
+}): Promise<LoadedSnapshotManifest> {
+  const name = snapshotNameSchema.parse(options.name);
+  const manifestKey = `snapshots/${name}/manifest.json`;
+  const body = await readObject(
+    options.store,
+    manifestKey,
+    MAX_MANIFEST_BYTES,
+    options.signal,
+  );
+  return {
+    manifest: manifestSchema.parse(JSON.parse(body)),
+    manifestKey,
+    sha256: createHash("sha256").update(body).digest("hex"),
+  };
+}
+
+export function parseSnapshotManifest(value: unknown): SnapshotManifest {
+  return manifestSchema.parse(value);
+}
+
 /** Copy one snapshot between pluggable stores and publish its manifest last. */
 export async function replicateIndexSnapshot(options: {
   name: string;
   source: SnapshotObjectStore;
   target: SnapshotObjectStore;
+  publication?: SnapshotReplicationPublication;
+  isPublicationCurrent?: () => Promise<boolean>;
+  withPublicationGuard?: SnapshotPublicationGuard;
+  signal?: AbortSignal;
 }): Promise<SnapshotReplicationResult> {
-  const name = snapshotNameSchema.parse(options.name);
-  const manifestKey = `snapshots/${name}/manifest.json`;
-  const manifest = manifestSchema.parse(
-    JSON.parse(await readObject(options.source, manifestKey, MAX_MANIFEST_BYTES)),
-  );
+  const loaded = options.publication
+    ? {
+        manifest: manifestSchema.parse(options.publication.sourceManifest),
+        manifestKey: `snapshots/${snapshotNameSchema.parse(options.name)}/manifest.json`,
+        sha256: z
+          .string()
+          .regex(/^[0-9a-f]{64}$/)
+          .parse(options.publication.sourceManifestSha256),
+      }
+    : await loadIndexSnapshotManifest({
+        name: options.name,
+        store: options.source,
+        signal: options.signal,
+      });
+  const manifest = loaded.manifest;
+  const manifestKey = loaded.manifestKey;
+  if (options.publication) {
+    z.string()
+      .regex(/^[1-9][0-9]*$/)
+      .parse(options.publication.publicationSequence);
+  }
   validateSnapshotObjectKey(manifest.artifact.key);
   if (
     manifest.artifact.key !==
     `objects/sha256/${manifest.artifact.sha256}.ndjson.gz`
   ) {
     throw new Error("Snapshot artifact key does not match its digest");
+  }
+  const publishedManifest: SnapshotManifest = options.publication
+    ? {
+        ...manifest,
+        replication: {
+          publication_sequence: options.publication.publicationSequence,
+          source_manifest_sha256: loaded.sha256,
+        },
+      }
+    : manifest;
+  if (
+    options.publication &&
+    !(await publicationIsCurrent(options.isPublicationCurrent))
+  ) {
+    return {
+      manifest: publishedManifest,
+      manifestKey,
+      artifactKey: manifest.artifact.key,
+      publicationStatus: "superseded",
+      publicationSequence: options.publication.publicationSequence,
+      sourceManifestSha256: loaded.sha256,
+      strictFencing: supportsConditionalSnapshotWrites(options.target),
+    };
   }
 
   const temporary = path.join(
@@ -132,13 +230,14 @@ export async function replicateIndexSnapshot(options: {
       manifest.artifact.sha256,
       manifest.artifact.bytes,
       temporary,
+      options.signal,
     );
     await options.target.put(manifest.artifact.key, createReadStream(temporary), {
       contentType: "application/x-ndjson",
       contentEncoding: "gzip",
       contentLength: manifest.artifact.bytes,
       checksumSha256: manifest.artifact.sha256,
-    });
+    }, { signal: options.signal });
   } catch (error) {
     if (isMissingObjectError(error)) {
       throw new SnapshotNotFoundError(manifest.artifact.key);
@@ -148,21 +247,208 @@ export async function replicateIndexSnapshot(options: {
     await rm(temporary, { force: true });
   }
 
-  const body = JSON.stringify(manifest);
-  await options.target.put(manifestKey, Readable.from([body]), {
-    contentType: "application/json",
-    contentLength: Buffer.byteLength(body),
+  const publication = await publishReplicationManifest({
+    target: options.target,
+    manifestKey,
+    manifest: publishedManifest,
+    sourceManifestSha256: loaded.sha256,
+    publicationSequence: options.publication?.publicationSequence,
+    isPublicationCurrent: options.isPublicationCurrent,
+    withPublicationGuard: options.withPublicationGuard,
+    signal: options.signal,
   });
   return {
-    manifest,
+    manifest: publishedManifest,
     manifestKey,
     artifactKey: manifest.artifact.key,
+    publicationStatus: publication.status,
+    publicationSequence: options.publication?.publicationSequence ?? null,
+    sourceManifestSha256: loaded.sha256,
+    strictFencing: publication.strictFencing,
   };
+}
+
+async function publishReplicationManifest(options: {
+  target: SnapshotObjectStore;
+  manifestKey: string;
+  manifest: SnapshotManifest;
+  sourceManifestSha256: string;
+  publicationSequence?: string;
+  isPublicationCurrent?: () => Promise<boolean>;
+  withPublicationGuard?: SnapshotPublicationGuard;
+  signal?: AbortSignal;
+}): Promise<{
+  status: SnapshotReplicationResult["publicationStatus"];
+  strictFencing: boolean;
+}> {
+  const body = JSON.stringify(options.manifest);
+  const metadata = {
+    contentType: "application/json",
+    contentLength: Buffer.byteLength(body),
+  };
+  if (!options.publicationSequence) {
+    await options.target.put(
+      options.manifestKey,
+      Readable.from([body]),
+      metadata,
+      { signal: options.signal },
+    );
+    return { status: "published", strictFencing: false };
+  }
+
+  if (!supportsConditionalSnapshotWrites(options.target)) {
+    const current = await tryReadSnapshotManifest(
+      options.target,
+      options.manifestKey,
+      options.signal,
+    );
+    const status = comparePublication(
+      current,
+      options.manifest,
+      options.publicationSequence,
+      options.sourceManifestSha256,
+    );
+    if (status) return { status, strictFencing: false };
+    if (!(await publicationIsCurrent(options.isPublicationCurrent))) {
+      return { status: "superseded", strictFencing: false };
+    }
+    await options.target.put(
+      options.manifestKey,
+      Readable.from([body]),
+      metadata,
+      { signal: options.signal },
+    );
+    return { status: "published", strictFencing: false };
+  }
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    options.signal?.throwIfAborted();
+    if (!(await publicationIsCurrent(options.isPublicationCurrent))) {
+      return { status: "superseded", strictFencing: true };
+    }
+    const observed = await options.target.head(options.manifestKey, {
+      signal: options.signal,
+    });
+    let current: SnapshotManifest | null = null;
+    if (observed) {
+      current = await tryReadSnapshotManifest(
+        options.target,
+        options.manifestKey,
+        options.signal,
+      );
+      if (!current) continue;
+      const confirmed = await options.target.head(options.manifestKey, {
+        signal: options.signal,
+      });
+      if (!confirmed || confirmed.entityTag !== observed.entityTag) continue;
+      const status = comparePublication(
+        current,
+        options.manifest,
+        options.publicationSequence,
+        options.sourceManifestSha256,
+      );
+      if (status) return { status, strictFencing: true };
+    }
+    if (!(await publicationIsCurrent(options.isPublicationCurrent))) {
+      return { status: "superseded", strictFencing: true };
+    }
+    const publicationSignal = boundedPublicationSignal(options.signal);
+    const guarded = await runWithPublicationGuard(
+      options.withPublicationGuard,
+      () =>
+        options.target.putConditional!(
+          options.manifestKey,
+          Readable.from([body]),
+          observed ? { entityTag: observed.entityTag } : { ifAbsent: true },
+          metadata,
+          { signal: publicationSignal },
+        ),
+    );
+    if (!guarded.executed) {
+      return { status: "superseded", strictFencing: true };
+    }
+    const written = guarded.value;
+    if (written.written) return { status: "published", strictFencing: true };
+  }
+  throw new Error("Snapshot manifest publication exceeded the CAS retry limit");
+}
+
+function boundedPublicationSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(MANIFEST_PUBLICATION_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+async function tryReadSnapshotManifest(
+  store: SnapshotObjectStore,
+  key: string,
+  signal?: AbortSignal,
+): Promise<SnapshotManifest | null> {
+  try {
+    return manifestSchema.parse(
+      JSON.parse(await readObject(store, key, MAX_MANIFEST_BYTES, signal)),
+    );
+  } catch (error) {
+    if (error instanceof SnapshotNotFoundError) return null;
+    throw error;
+  }
+}
+
+function comparePublication(
+  current: SnapshotManifest | null,
+  candidate: SnapshotManifest,
+  publicationSequence: string,
+  sourceManifestSha256: string,
+): "already_current" | "superseded" | null {
+  if (!current?.replication) return null;
+  const currentSequence = BigInt(current.replication.publication_sequence);
+  const candidateSequence = BigInt(publicationSequence);
+  if (currentSequence > candidateSequence) return "superseded";
+  if (currentSequence < candidateSequence) return null;
+  if (
+    current.replication.source_manifest_sha256 === sourceManifestSha256 &&
+    canonicalJson(current) === canonicalJson(candidate)
+  ) {
+    return "already_current";
+  }
+  throw new Error(
+    `Snapshot publication sequence ${publicationSequence} has conflicting source manifests`,
+  );
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+async function publicationIsCurrent(
+  check?: () => Promise<boolean>,
+): Promise<boolean> {
+  return check ? check() : true;
+}
+
+async function runWithPublicationGuard<T>(
+  guard: SnapshotPublicationGuard | undefined,
+  operation: () => Promise<T>,
+): Promise<{ executed: true; value: T } | { executed: false }> {
+  if (!guard) return { executed: true, value: await operation() };
+  const result = await guard(async () => ({ value: await operation() }));
+  return result === null
+    ? { executed: false }
+    : { executed: true, value: result.value };
 }
 
 /** Remove unreferenced content-addressed artifacts after snapshot deletion. */
 export async function garbageCollectSnapshotArtifacts(
   store: SnapshotObjectStore,
+  options: { preserveArtifactKeys?: readonly string[] } = {},
 ): Promise<string[]> {
   if (!store.list)
     throw new Error("Snapshot object store does not support listing");
@@ -182,6 +468,7 @@ export async function garbageCollectSnapshotArtifacts(
     }
     await store.delete(key);
   }
+  const preserved = new Set(options.preserveArtifactKeys ?? []);
   const referenced = new Set<string>();
   for (const name of await listIndexSnapshots(store)) {
     try {
@@ -207,7 +494,7 @@ export async function garbageCollectSnapshotArtifacts(
   const deleted: string[] = [];
   for (const key of await store.list("objects/sha256")) {
     if (!/^objects\/sha256\/[0-9a-f]{64}\.ndjson\.gz$/.test(key)) continue;
-    if (!referenced.has(key)) {
+    if (!referenced.has(key) && !preserved.has(key)) {
       await store.delete(key);
       deleted.push(key);
     }
@@ -724,9 +1011,10 @@ async function readObject(
   store: SnapshotObjectStore,
   key: string,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<string> {
   try {
-    const stream = await store.get(key);
+    const stream = await store.get(key, { signal });
     const chunks: Buffer[] = [];
     let bytes = 0;
     for await (const chunk of stream) {
@@ -762,8 +1050,9 @@ async function downloadAndVerify(
   expectedSha256: string,
   expectedBytes: number,
   target: string,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const source = await store.get(key);
+  const source = await store.get(key, { signal });
   const hash = createHash("sha256");
   let bytes = 0;
   const digest = new Transform({
@@ -779,6 +1068,7 @@ async function downloadAndVerify(
     source,
     digest,
     createWriteStream(target, { flags: "wx", mode: 0o600 }),
+    { signal },
   );
   if (bytes !== expectedBytes || hash.digest("hex") !== expectedSha256)
     throw new Error("Snapshot artifact checksum or size mismatch");

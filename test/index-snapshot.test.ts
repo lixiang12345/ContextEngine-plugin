@@ -194,6 +194,12 @@ describePostgres("portable index snapshots", () => {
       /publication is active/,
     );
     await objectStore.delete(markerKey);
+    assert.deepEqual(
+      await garbageCollectSnapshotArtifacts(objectStore, {
+        preserveArtifactKeys: [exported.manifest.artifact.key],
+      }),
+      [],
+    );
     assert.deepEqual(await garbageCollectSnapshotArtifacts(objectStore), [
       exported.manifest.artifact.key,
     ]);

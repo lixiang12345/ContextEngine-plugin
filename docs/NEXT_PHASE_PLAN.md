@@ -4,10 +4,10 @@
 
 起始基线：`3420ddf` (`main`)
 
-当前数据库：PostgreSQL schema v13
+当前数据库：PostgreSQL schema v14
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `202/202` 通过。
+全量测试 `208/208` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -103,6 +103,17 @@ Phase 14 状态（2026-07-22）：schema v13 已加入 workspace/target/snapshot
 状态新增 artifact 字节、有效吞吐、连续失败以及 bounded health/alert 汇总。下一步是
 固定 source manifest digest/generation、目标 manifest 单调发布、跨实例 SSE/event
 history、attempt 级审计，以及可选 object-store CAS/head/health 能力。
+
+Phase 15 状态（2026-07-22）：schema v14 为每个复制 job 固定首个已验证 source
+manifest、SHA-256 与单调发布序列，所有 lease takeover、自动重试和人工重试复用同一
+输入。内置 filesystem/S3 store 已实现可选 `head` 与条件写 capability；目标 manifest
+记录发布序列，CAS 冲突会重新读取并比较水位，旧 worker 只能返回 `superseded`，同序列
+同摘要为幂等成功。runner 在 lease renewal 失败时中止对象存储 I/O，并在 CAS 前校验
+数据库最新发布水位；最终 manifest 写入的短临界区持有 job 行锁，因此 takeover 与
+发布点不能交叉，目标 manifest 被删除也不会让旧 job 复活。最小第三方 store
+继续兼容无条件写，但结果明确返回 `strict_fencing: false`。GC 会保留活动或七天内失败
+publication pin 引用的 artifact。下一步是 attempt/event history、跨实例 SSE、目标
+probe/capacity/timeout 控制面。
 
 ## 1. 目标
 

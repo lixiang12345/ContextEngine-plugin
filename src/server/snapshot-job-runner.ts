@@ -5,6 +5,8 @@ import {
   exportIndexSnapshot,
   garbageCollectSnapshotArtifacts,
   importIndexSnapshot,
+  loadIndexSnapshotManifest,
+  parseSnapshotManifest,
   pruneIndexSnapshots,
   replicateIndexSnapshot,
 } from "../snapshots/snapshot.js";
@@ -176,17 +178,34 @@ export class SnapshotJobRunner {
     if (!job) return;
     this.publish(job);
     let heartbeat = Promise.resolve();
+    const abortController = new AbortController();
     const heartbeatTimer = setInterval(() => {
-      heartbeat = heartbeat.then(async () => {
-        await this.repository.renewSnapshotJobLease(job.id, job.attemptToken);
-      }).catch(() => undefined);
-    }, Math.max(1_000, Math.floor(this.leaseMs / 3)));
+      heartbeat = heartbeat
+        .then(async () => {
+          if (abortController.signal.aborted) return;
+          const renewed = await this.repository.renewSnapshotJobLease(
+            job.id,
+            job.attemptToken,
+          );
+          if (!renewed) {
+            abortController.abort(
+              new Error("Snapshot job lease is no longer active"),
+            );
+          }
+        })
+        .catch((error: unknown) => {
+          abortController.abort(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        });
+    }, Math.max(100, Math.floor(this.leaseMs / 3)));
     heartbeatTimer.unref();
     try {
       await this.progress(job, "running");
-      const result = await this.execute(job);
+      const result = await this.execute(job, abortController.signal);
       clearInterval(heartbeatTimer);
       await heartbeat;
+      abortController.signal.throwIfAborted();
       const completed = await this.repository.completeSnapshotJob(
         job.id,
         job.attemptToken,
@@ -224,7 +243,10 @@ export class SnapshotJobRunner {
     }
   }
 
-  private async execute(job: ClaimedSnapshotJob): Promise<Record<string, unknown>> {
+  private async execute(
+    job: ClaimedSnapshotJob,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
     const requiresList = job.operation === "prune" || job.operation === "gc";
     const store = this.storeFor(job.workspaceId, requiresList);
     if (job.operation === "export") {
@@ -266,11 +288,57 @@ export class SnapshotJobRunner {
       }
       await this.progress(job, "replicating");
       const transferStartedAt = performance.now();
-      const result = await replicateIndexSnapshot({
-        name: job.snapshotName,
-        source: store,
-        target: this.replicationTargetFor(job.workspaceId, targetId),
-      });
+      let publication = await this.repository.getSnapshotReplicationPublication(
+        job.id,
+        job.attemptToken,
+      );
+      if (!publication) {
+        publication = await this.repository.pinSnapshotReplicationPublicationWithLoader(
+          job.id,
+          job.attemptToken,
+          async () => {
+            const loaded = await loadIndexSnapshotManifest({
+              name: job.snapshotName!,
+              store,
+              signal,
+            });
+            return {
+              sourceManifest: loaded.manifest,
+              sourceManifestSha256: loaded.sha256,
+            };
+          },
+        );
+      }
+      if (!publication) {
+        throw new Error("Snapshot job lease is no longer active");
+      }
+      const result =
+        await this.repository.withSnapshotReplicationArtifactGuard(
+          job.workspaceId,
+          () =>
+            replicateIndexSnapshot({
+              name: job.snapshotName!,
+              source: store,
+              target: this.replicationTargetFor!(job.workspaceId, targetId),
+              publication: {
+                publicationSequence: publication.publicationSequence,
+                sourceManifest: parseSnapshotManifest(publication.sourceManifest),
+                sourceManifestSha256: publication.sourceManifestSha256,
+              },
+              isPublicationCurrent: () =>
+                this.repository.isSnapshotReplicationPublicationCurrent(
+                  job.id,
+                  job.attemptToken,
+                ),
+              withPublicationGuard: (operation) =>
+                this.repository.withSnapshotReplicationPublicationGuard(
+                  job.id,
+                  job.attemptToken,
+                  operation,
+                ),
+              signal,
+            }),
+        );
       // Keep transfer measurements with the durable result so aggregate
       // metrics remain available after a worker restarts or another instance
       // claims the job. A one millisecond floor avoids an infinite rate for
@@ -279,21 +347,48 @@ export class SnapshotJobRunner {
         1,
         Math.round(performance.now() - transferStartedAt),
       );
-      const artifactBytes = result.manifest.artifact.bytes;
+      const effectivePublication = result.publicationStatus !== "superseded";
+      const artifactBytes = effectivePublication
+        ? result.manifest.artifact.bytes
+        : 0;
+      const effectiveTransferDurationMs = effectivePublication
+        ? transferDurationMs
+        : 0;
       return {
         target_id: targetId,
         snapshot: result.manifest,
         manifest_key: result.manifestKey,
         artifact_key: result.artifactKey,
+        publication_status: result.publicationStatus,
+        publication_sequence: result.publicationSequence,
+        source_manifest_sha256: result.sourceManifestSha256,
+        strict_fencing: result.strictFencing,
         artifact_bytes: artifactBytes,
-        transfer_duration_ms: transferDurationMs,
-        transfer_throughput_bytes_per_second: Math.round(
-          (artifactBytes * 1000) / transferDurationMs,
-        ),
+        transfer_duration_ms: effectiveTransferDurationMs,
+        transfer_throughput_bytes_per_second:
+          effectiveTransferDurationMs === 0
+            ? 0
+            : Math.round(
+                (artifactBytes * 1000) / effectiveTransferDurationMs,
+              ),
       };
     }
     await this.progress(job, "garbage_collecting");
-    return { deleted_artifacts: await garbageCollectSnapshotArtifacts(store) };
+    return this.repository.withSnapshotReplicationArtifactGuard(
+      job.workspaceId,
+      async () => {
+        const preserveArtifactKeys =
+          await this.repository.listRetainedSnapshotReplicationArtifactKeys(
+            job.workspaceId,
+          );
+        return {
+          deleted_artifacts: await garbageCollectSnapshotArtifacts(store, {
+            preserveArtifactKeys,
+          }),
+          preserved_replication_artifacts: preserveArtifactKeys,
+        };
+      },
+    );
   }
 
   private async progress(job: ClaimedSnapshotJob, phase: string): Promise<void> {

@@ -45,7 +45,9 @@ Optional server-side encryption settings are
 `snapshot delete` removes only the named manifest. Run `snapshot gc` to remove
 content-addressed artifacts that are no longer referenced by any valid
 manifest. GC fails closed when a manifest is unreadable or invalid, so damaged
-metadata cannot cause a still-needed artifact to be deleted.
+metadata cannot cause a still-needed artifact to be deleted. HTTP GC also
+preserves artifacts pinned by active replication jobs or failed replication
+jobs from the last seven days, keeping bounded manual retries recoverable.
 
 `snapshot prune` can retain the newest `--keep` snapshots, enforce
 `--older-than-days`, or combine both so a snapshot must cross both boundaries
@@ -95,6 +97,19 @@ const store: SnapshotObjectStore = {
 await exportIndexSnapshot({ databaseUrl, workspaceId, name: "main", store });
 ```
 
+The minimal interface remains sufficient for custom stores. A store can opt in
+to strict cross-process publication fencing by also implementing `head` and
+`putConditional`. `supportsConditionalSnapshotWrites(store)` detects the
+capability; request methods receive an optional `AbortSignal`, which conditional
+implementations must honor. The built-in
+filesystem and S3 adapters implement it, with S3 mapping conditions to
+`If-Match` and `If-None-Match`.
+
+The filesystem adapter never steals a publication lock based on wall-clock
+age, because a suspended process could otherwise overwrite a newer manifest.
+An orphaned lock causes a bounded timeout and must be removed only after an
+operator verifies that no writer remains.
+
 Replication uses the same store contract and publishes the target manifest last:
 
 ```ts
@@ -111,6 +126,21 @@ The artifact is first downloaded into a bounded private temporary file and
 verified against its manifest digest and byte count. A failed copy therefore
 cannot replace an existing valid target artifact; a retry is idempotent and
 publishes the manifest only after the artifact is durable.
+
+Durable HTTP replication pins the first validated source manifest and its
+SHA-256 in PostgreSQL schema v14. Every job receives a monotonic decimal-string
+publication sequence that is retained across lease takeover and explicit
+retry. The target manifest stores that sequence and source digest. Conditional
+publication re-reads after every conflict: a lower sequence returns
+`superseded`, and the same sequence plus digest returns `already_current`.
+The final manifest CAS holds the current job row lock for that short write, so
+lease takeover and terminal state changes cannot cross the publication point.
+Replication and GC also share a workspace-scoped PostgreSQL advisory lifecycle
+lock, covering the artifact transfer through manifest publication and the GC
+scan/deletes.
+Replication results expose `publication_status`, `publication_sequence`,
+`source_manifest_sha256`, and `strict_fencing`. Minimal third-party stores use a
+compatible best-effort fallback and report `strict_fencing: false`.
 
 Snapshot format v1 contains portable index metadata, file metadata, chunks,
 and embeddings. It intentionally excludes database credentials, CI/webhook
@@ -134,8 +164,11 @@ same durable job id and timestamps.
 
 Jobs survive process restarts. A claim increments `attempts` and assigns a new
 lease token; progress and terminal writes must present that token, which fences
-off a worker whose lease was replaced by another server instance. CLI commands
-remain synchronous for scripting and maintenance workflows.
+off a worker whose lease was replaced by another server instance. Lease loss
+also aborts in-flight object-store operations. A database publication watermark
+prevents an older failed job from being retried over a newer publication even
+if the target manifest was deleted. CLI commands remain synchronous for
+scripting and maintenance workflows.
 
 ## Replication Targets
 

@@ -101,7 +101,7 @@ describePostgres("durable snapshot jobs", () => {
       first.id,
       first.attemptToken,
       "temporary outage",
-      30,
+      60_000,
     );
     assert.equal(retrying?.status, "queued");
     assert.equal(retrying?.error, "temporary outage");
@@ -110,7 +110,17 @@ describePostgres("durable snapshot jobs", () => {
       null,
     );
     assert.equal(await repository.claimSnapshotJob(created.id, 60_000), null);
-    await new Promise<void>((resolve) => setTimeout(resolve, 45));
+    const clock = new Pool({ connectionString: schemaUrl });
+    try {
+      await clock.query(
+        `UPDATE ce_snapshot_jobs
+         SET next_attempt_at = clock_timestamp() - interval '1 second'
+         WHERE id = $1`,
+        [created.id],
+      );
+    } finally {
+      await clock.end();
+    }
     const second = await repository.claimSnapshotJob(created.id, 60_000);
     assert.ok(second);
     assert.equal(second.attempts, 2);
@@ -119,6 +129,286 @@ describePostgres("durable snapshot jobs", () => {
         ?.status,
       "failed",
     );
+  });
+
+  it("pins one manifest per replication job across lease takeovers", async () => {
+    const workspace = await repository.createWorkspace({
+      name: "snapshot publication pin",
+      sourceMode: "blob",
+      ownerPrincipalId: "owner",
+    });
+    const created = await repository.createSnapshotJob({
+      workspaceId: workspace.id,
+      principalId: "owner",
+      operation: "replicate",
+      snapshotName: "main",
+      parameters: { target_id: "region_backup" },
+    });
+    const first = await repository.claimSnapshotJob(created.id, 60_000);
+    assert.ok(first);
+    const secondRepository = await WorkspaceRepository.open(schemaUrl);
+    try {
+      const manifest = { generation_id: "generation-a", value: 1 };
+      const digest = "a".repeat(64);
+      await assert.rejects(
+        repository.pinSnapshotReplicationPublication(first.id, first.attemptToken, {
+          sourceManifest: { oversized: "x".repeat(256 * 1024) },
+          sourceManifestSha256: digest,
+        }),
+        /publication is invalid/,
+      );
+      let releaseLifecycle!: () => void;
+      const lifecycleReleased = new Promise<void>((resolve) => {
+        releaseLifecycle = resolve;
+      });
+      let enterLifecycle!: () => void;
+      const lifecycleEntered = new Promise<void>((resolve) => {
+        enterLifecycle = resolve;
+      });
+      const lifecycle = repository.withSnapshotReplicationArtifactGuard(
+        workspace.id,
+        async () => {
+          enterLifecycle();
+          await lifecycleReleased;
+        },
+      );
+      await lifecycleEntered;
+      let loaderCalled = false;
+      const firstPinPromise =
+        secondRepository.pinSnapshotReplicationPublicationWithLoader(
+          first.id,
+          first.attemptToken,
+          async () => {
+            loaderCalled = true;
+            return {
+              sourceManifest: manifest,
+              sourceManifestSha256: digest,
+            };
+          },
+        );
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      assert.equal(loaderCalled, false);
+      releaseLifecycle();
+      await lifecycle;
+      const pins = [
+        await firstPinPromise,
+        await repository.pinSnapshotReplicationPublication(
+          first.id,
+          first.attemptToken,
+          { sourceManifest: manifest, sourceManifestSha256: digest },
+        ),
+      ];
+      assert.equal(loaderCalled, true);
+      assert.ok(pins[0]);
+      assert.deepEqual(pins[1], pins[0]);
+      assert.match(pins[0].publicationSequence, /^[1-9][0-9]*$/);
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      const takeover = await secondRepository.claimSnapshotJob(created.id, 1);
+      assert.ok(takeover);
+      assert.equal(
+        await repository.getSnapshotReplicationPublication(
+          first.id,
+          first.attemptToken,
+        ),
+        null,
+      );
+      assert.equal(
+        await repository.pinSnapshotReplicationPublication(
+          first.id,
+          first.attemptToken,
+          {
+            sourceManifest: { generation_id: "stale" },
+            sourceManifestSha256: "b".repeat(64),
+          },
+        ),
+        null,
+      );
+      assert.equal(
+        await repository.isSnapshotJobAttemptActive(first.id, first.attemptToken),
+        false,
+      );
+      assert.deepEqual(
+        await secondRepository.getSnapshotReplicationPublication(
+          takeover.id,
+          takeover.attemptToken,
+        ),
+        pins[0],
+      );
+      assert.deepEqual(
+        await secondRepository.pinSnapshotReplicationPublication(
+          takeover.id,
+          takeover.attemptToken,
+          {
+            sourceManifest: { generation_id: "new-source-must-not-replace-pin" },
+            sourceManifestSha256: "c".repeat(64),
+          },
+        ),
+        pins[0],
+      );
+      assert.equal(
+        (
+          await secondRepository.completeSnapshotJob(
+            takeover.id,
+            takeover.attemptToken,
+            {},
+          )
+        )?.status,
+        "succeeded",
+      );
+
+      const next = await repository.createSnapshotJob({
+        workspaceId: workspace.id,
+        principalId: "owner",
+        operation: "replicate",
+        snapshotName: "main",
+        parameters: { target_id: "region_backup" },
+      });
+      const nextClaim = await repository.claimSnapshotJob(next.id);
+      assert.ok(nextClaim);
+      const nextPin = await repository.pinSnapshotReplicationPublication(
+        nextClaim.id,
+        nextClaim.attemptToken,
+        {
+          sourceManifest: {
+            generation_id: "generation-b",
+            artifact: {
+              key: `objects/sha256/${"d".repeat(64)}.ndjson.gz`,
+            },
+          },
+          sourceManifestSha256: "d".repeat(64),
+        },
+      );
+      assert.ok(nextPin);
+      assert.ok(
+        BigInt(nextPin.publicationSequence) > BigInt(pins[0].publicationSequence),
+      );
+      assert.equal(
+        await repository.isSnapshotReplicationPublicationCurrent(
+          nextClaim.id,
+          nextClaim.attemptToken,
+        ),
+        true,
+      );
+      let enterGuard!: () => void;
+      const guardEntered = new Promise<void>((resolve) => {
+        enterGuard = resolve;
+      });
+      let releaseGuard!: () => void;
+      const guardReleased = new Promise<void>((resolve) => {
+        releaseGuard = resolve;
+      });
+      const guarded = repository.withSnapshotReplicationPublicationGuard(
+        nextClaim.id,
+        nextClaim.attemptToken,
+        async () => {
+          enterGuard();
+          await guardReleased;
+          return "published";
+        },
+      );
+      await guardEntered;
+      let terminalSettled = false;
+      const terminal = secondRepository
+        .failSnapshotJob(nextClaim.id, nextClaim.attemptToken, "done")
+        .finally(() => {
+          terminalSettled = true;
+        });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      assert.equal(terminalSettled, false);
+      releaseGuard();
+      assert.equal(await guarded, "published");
+      assert.equal((await terminal)?.status, "failed");
+      assert.deepEqual(
+        await repository.listRetainedSnapshotReplicationArtifactKeys(workspace.id),
+        [`objects/sha256/${"d".repeat(64)}.ndjson.gz`],
+      );
+
+      const newest = await repository.createSnapshotJob({
+        workspaceId: workspace.id,
+        principalId: "owner",
+        operation: "replicate",
+        snapshotName: "main",
+        parameters: { target_id: "region_backup" },
+      });
+      const newestClaim = await repository.claimSnapshotJob(newest.id);
+      assert.ok(newestClaim);
+      const newestPin = await repository.pinSnapshotReplicationPublication(
+        newestClaim.id,
+        newestClaim.attemptToken,
+        {
+          sourceManifest: { generation_id: "generation-c" },
+          sourceManifestSha256: "e".repeat(64),
+        },
+      );
+      assert.ok(newestPin);
+      assert.ok(
+        BigInt(newestPin.publicationSequence) > BigInt(nextPin.publicationSequence),
+      );
+      await repository.completeSnapshotJob(
+        newestClaim.id,
+        newestClaim.attemptToken,
+        {},
+      );
+
+      const retried = await repository.retrySnapshotJob(next.id);
+      assert.ok(retried);
+      const staleRetry = await repository.claimSnapshotJob(next.id);
+      assert.ok(staleRetry);
+      assert.equal(
+        await repository.isSnapshotReplicationPublicationCurrent(
+          staleRetry.id,
+          staleRetry.attemptToken,
+        ),
+        false,
+      );
+      let staleOperationRan = false;
+      assert.equal(
+        await repository.withSnapshotReplicationPublicationGuard(
+          staleRetry.id,
+          staleRetry.attemptToken,
+          async () => {
+            staleOperationRan = true;
+          },
+        ),
+        null,
+      );
+      assert.equal(staleOperationRan, false);
+      await repository.completeSnapshotJob(
+        staleRetry.id,
+        staleRetry.attemptToken,
+        { publication_status: "superseded" },
+      );
+      const metrics = await repository.snapshotReplicationMetrics(workspace.id);
+      assert.equal(metrics[0].succeeded, 2);
+
+      const exportJob = await repository.createSnapshotJob({
+        workspaceId: workspace.id,
+        principalId: "owner",
+        operation: "export",
+        snapshotName: "not-replication",
+      });
+      const exportClaim = await repository.claimSnapshotJob(exportJob.id);
+      assert.ok(exportClaim);
+      assert.equal(
+        await repository.pinSnapshotReplicationPublication(
+          exportClaim.id,
+          exportClaim.attemptToken,
+          {
+            sourceManifest: manifest,
+            sourceManifestSha256: digest,
+          },
+        ),
+        null,
+      );
+      await repository.failSnapshotJob(
+        exportClaim.id,
+        exportClaim.attemptToken,
+        "done",
+      );
+    } finally {
+      await secondRepository.close();
+    }
   });
 
   it("persists interval and nightly policies with database-clock pause/resume", async () => {

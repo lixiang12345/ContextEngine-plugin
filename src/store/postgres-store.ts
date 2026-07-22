@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 export const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -2327,6 +2327,34 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [13],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 14) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_snapshot_replication_publications (
+        job_id TEXT PRIMARY KEY
+          REFERENCES ce_snapshot_jobs(id) ON DELETE CASCADE,
+        publication_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+        source_manifest JSONB NOT NULL
+          CHECK (jsonb_typeof(source_manifest) = 'object'),
+        source_manifest_sha256 TEXT NOT NULL
+          CHECK (source_manifest_sha256 ~ '^[0-9a-f]{64}$'),
+        pinned_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+      );
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [14],
             );
             await client.query("COMMIT");
           } catch (error) {

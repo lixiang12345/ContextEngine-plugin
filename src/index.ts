@@ -61,24 +61,38 @@ export {
   listIndexSnapshots,
   deleteIndexSnapshot,
   garbageCollectSnapshotArtifacts,
+  loadIndexSnapshotManifest,
+  parseSnapshotManifest,
   pruneIndexSnapshots,
   replicateIndexSnapshot,
   SnapshotNotFoundError,
   SNAPSHOT_FORMAT_VERSION,
 } from "./snapshots/snapshot.js";
 export type {
+  ConditionalSnapshotObjectStore,
+  SnapshotConditionalWriteResult,
   SnapshotObjectMetadata,
+  SnapshotObjectRequestOptions,
   SnapshotObjectStore,
+  SnapshotObjectVersion,
+  SnapshotObjectWriteCondition,
 } from "./snapshots/object-store.js";
-export { PrefixedSnapshotObjectStore } from "./snapshots/object-store.js";
+export {
+  PrefixedSnapshotObjectStore,
+  supportsConditionalSnapshotWrites,
+} from "./snapshots/object-store.js";
 export type {
+  LoadedSnapshotManifest,
   SnapshotManifest,
+  SnapshotPublicationGuard,
   SnapshotExportResult,
   SnapshotImportResult,
   SnapshotReplicationResult,
+  SnapshotReplicationPublication,
 } from "./snapshots/snapshot.js";
 export {
   WorkspaceRepository,
+  type StoredSnapshotReplicationPublication,
   WorkspaceNotFoundError,
   RevisionConflictError,
   MissingBlobError,

@@ -450,6 +450,18 @@ count, and a low-cardinality `health`/`alert` summary. Replication failures retr
 automatically with bounded exponential backoff; configure
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` and
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` to tune the policy.
+Schema v14 pins the first validated source manifest for each replication job
+and publishes a monotonic sequence plus source digest into the target manifest.
+Built-in filesystem and S3 targets use conditional writes, retry CAS conflicts
+only after re-reading the target, and abort I/O after lease loss. Replication
+results include `publication_status`, `publication_sequence`,
+`source_manifest_sha256`, and `strict_fencing`; a minimal custom store remains
+compatible but reports `strict_fencing: false`. GC preserves artifacts
+referenced by active pins and failed pins from the last seven days, returning
+them as `preserved_replication_artifacts`. Replication and GC take a
+workspace-scoped lifecycle lock across artifact transfer/publication and the GC
+scan, while the manifest CAS holds the job row only for the bounded manifest
+write.
 Owners can persist one policy per workspace/target/snapshot. `manual` disables
 automatic runs; `interval` requires `interval_ms` from 60 seconds through 365
 days; `nightly` requires `nightly_at` (`HH:MM[:SS]`) and an IANA `timezone`.
@@ -790,11 +802,13 @@ enabling webhook delivery; schema v8 workers can safely share the inbox and use
 Schema v9 adds source-scoped CI credentials, schema v10 adds optional validated
 provenance to inbox events, schema v11 adds leased snapshot jobs, schema v12
 adds replication jobs and target status indexes, and schema v13 adds durable
-replication schedules plus the active replication uniqueness invariant. Older
-instances reject a newer marker; drain them before issuing CI credentials,
-accepting CI deliveries, or creating snapshot jobs/schedules. The v12 to v13
+replication schedules plus the active replication uniqueness invariant. Schema
+v14 adds immutable per-job source manifest pins and monotonic publication
+sequences. Older instances reject a newer marker; drain them before issuing CI
+credentials, accepting CI deliveries, or creating snapshot jobs/schedules. The v12 to v13
 migration fences duplicate active replication rows before creating the unique
-index; deploy new workers before enabling schedules.
+index; the v13 to v14 migration is additive and creates publication pins. Deploy
+new workers before enabling schedules or replication fencing.
 
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former

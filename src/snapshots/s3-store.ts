@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
@@ -10,12 +11,19 @@ import {
 } from "@aws-sdk/client-s3";
 import {
   validateSnapshotObjectKey,
+  type SnapshotConditionalWriteResult,
   type SnapshotObjectMetadata,
+  type SnapshotObjectRequestOptions,
   type SnapshotObjectStore,
+  type SnapshotObjectVersion,
+  type SnapshotObjectWriteCondition,
 } from "./object-store.js";
 
 export interface S3CommandClient {
-  send(command: object): Promise<unknown>;
+  send(
+    command: object,
+    options?: { abortSignal?: AbortSignal },
+  ): Promise<unknown>;
 }
 
 export interface S3SnapshotStoreOptions {
@@ -64,31 +72,25 @@ export class S3SnapshotStore implements SnapshotObjectStore {
     key: string,
     source: Readable,
     metadata: SnapshotObjectMetadata = {},
+    options?: SnapshotObjectRequestOptions,
   ): Promise<void> {
     await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: this.key(key),
-        Body: source,
-        ContentType: metadata.contentType,
-        ContentEncoding: metadata.contentEncoding,
-        ContentLength: metadata.contentLength,
-        ChecksumSHA256: metadata.checksumSha256
-          ? Buffer.from(metadata.checksumSha256, "hex").toString("base64")
-          : undefined,
-        ServerSideEncryption: this.encryption,
-        SSEKMSKeyId: this.kmsKeyId,
-      }),
+      new PutObjectCommand(this.putInput(key, source, metadata)),
+      requestOptions(options),
     );
   }
 
-  async get(key: string): Promise<Readable> {
+  async get(
+    key: string,
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<Readable> {
     const result = (await this.client.send(
       new GetObjectCommand({
         Bucket: this.bucket,
         Key: this.key(key),
         ChecksumMode: "ENABLED",
       }),
+      requestOptions(options),
     )) as { Body?: unknown };
     if (!result.Body) throw new Error(`S3 snapshot object has no body: ${key}`);
     if (result.Body instanceof Readable) return result.Body;
@@ -101,16 +103,23 @@ export class S3SnapshotStore implements SnapshotObjectStore {
     throw new Error(`S3 snapshot object body is not streamable: ${key}`);
   }
 
-  async delete(key: string): Promise<void> {
+  async delete(
+    key: string,
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<void> {
     await this.client.send(
       new DeleteObjectCommand({
         Bucket: this.bucket,
         Key: this.key(key),
       }),
+      requestOptions(options),
     );
   }
 
-  async list(prefix = ""): Promise<string[]> {
+  async list(
+    prefix = "",
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<string[]> {
     const normalized = prefix.replace(/\/+$/, "");
     const listedPrefix = normalized
       ? `${this.key(normalized)}/`
@@ -124,6 +133,7 @@ export class S3SnapshotStore implements SnapshotObjectStore {
           Prefix: listedPrefix,
           ContinuationToken: continuationToken,
         }),
+        requestOptions(options),
       )) as {
         Contents?: Array<{ Key?: string }>;
         IsTruncated?: boolean;
@@ -146,9 +156,111 @@ export class S3SnapshotStore implements SnapshotObjectStore {
     return output;
   }
 
+  async head(
+    key: string,
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<SnapshotObjectVersion | null> {
+    try {
+      const result = (await this.client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: this.key(key) }),
+        requestOptions(options),
+      )) as { ETag?: string; ContentLength?: number };
+      if (!result.ETag) {
+        throw new Error(`S3 snapshot object has no entity tag: ${key}`);
+      }
+      return {
+        entityTag: result.ETag,
+        contentLength: result.ContentLength,
+      };
+    } catch (error) {
+      if (isMissingObjectError(error)) return null;
+      throw error;
+    }
+  }
+
+  async putConditional(
+    key: string,
+    source: Readable,
+    condition: SnapshotObjectWriteCondition,
+    metadata: SnapshotObjectMetadata = {},
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<SnapshotConditionalWriteResult> {
+    try {
+      const result = (await this.client.send(
+        new PutObjectCommand({
+          ...this.putInput(key, source, metadata),
+          ...("ifAbsent" in condition
+            ? { IfNoneMatch: "*" }
+            : { IfMatch: condition.entityTag }),
+        }),
+        requestOptions(options),
+      )) as { ETag?: string };
+      return { written: true, entityTag: result.ETag };
+    } catch (error) {
+      if (isConditionalWriteConflict(error)) {
+        source.destroy();
+        return { written: false };
+      }
+      throw error;
+    }
+  }
+
+  private putInput(
+    key: string,
+    source: Readable,
+    metadata: SnapshotObjectMetadata,
+  ): ConstructorParameters<typeof PutObjectCommand>[0] {
+    return {
+      Bucket: this.bucket,
+      Key: this.key(key),
+      Body: source,
+      ContentType: metadata.contentType,
+      ContentEncoding: metadata.contentEncoding,
+      ContentLength: metadata.contentLength,
+      ChecksumSHA256: metadata.checksumSha256
+        ? Buffer.from(metadata.checksumSha256, "hex").toString("base64")
+        : undefined,
+      ServerSideEncryption: this.encryption,
+      SSEKMSKeyId: this.kmsKeyId,
+    };
+  }
+
   private key(key: string): string {
     return `${this.prefix}/${validateSnapshotObjectKey(key)}`;
   }
+}
+
+function requestOptions(
+  options?: SnapshotObjectRequestOptions,
+): { abortSignal?: AbortSignal } | undefined {
+  return options?.signal ? { abortSignal: options.signal } : undefined;
+}
+
+function isMissingObjectError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    name?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  return (
+    candidate.name === "NoSuchKey" ||
+    candidate.name === "NotFound" ||
+    candidate.$metadata?.httpStatusCode === 404
+  );
+}
+
+function isConditionalWriteConflict(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    name?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  return (
+    candidate.name === "PreconditionFailed" ||
+    candidate.name === "ConditionalRequestConflict" ||
+    candidate.$metadata?.httpStatusCode === 409 ||
+    candidate.$metadata?.httpStatusCode === 412
+  );
 }
 
 function normalizePrefix(value: string): string {

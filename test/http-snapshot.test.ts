@@ -619,11 +619,12 @@ describePostgres("owner-managed snapshot HTTP API", () => {
     const gcJobId = ((await gc.json()) as { job: { id: string } }).job.id;
     const gcJob = await waitSnapshotJob("alice", aliceWorkspace, gcJobId);
     assert.equal(gcJob.status, "succeeded", gcJob.error ?? undefined);
-    assert.equal(
-      (gcJob.result as { deleted_artifacts: string[] }).deleted_artifacts
-        .length,
-      1,
-    );
+    const gcResult = gcJob.result as {
+      deleted_artifacts: string[];
+      preserved_replication_artifacts: string[];
+    };
+    assert.deepEqual(gcResult.deleted_artifacts, []);
+    assert.equal(gcResult.preserved_replication_artifacts.length, 1);
   });
 
   it("returns service unavailable when no snapshot store is configured", async () => {
