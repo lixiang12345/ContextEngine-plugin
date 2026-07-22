@@ -26,6 +26,8 @@ export interface SnapshotJobRunnerOptions {
   hasReplicationTarget?(targetId: string): boolean;
   onImportCompleted?(workspaceId: string): Promise<void>;
   leaseMs?: number;
+  replicationMaxAttempts?: number;
+  replicationRetryBaseMs?: number;
 }
 
 export class SnapshotJobRunner {
@@ -36,6 +38,8 @@ export class SnapshotJobRunner {
   private readonly hasReplicationTarget?: SnapshotJobRunnerOptions["hasReplicationTarget"];
   private readonly onImportCompleted?: SnapshotJobRunnerOptions["onImportCompleted"];
   private readonly leaseMs: number;
+  private readonly replicationMaxAttempts: number;
+  private readonly replicationRetryBaseMs: number;
   private readonly events = new EventEmitter();
   private readonly queue: string[] = [];
   private readonly queued = new Set<string>();
@@ -51,6 +55,14 @@ export class SnapshotJobRunner {
     this.hasReplicationTarget = options.hasReplicationTarget;
     this.onImportCompleted = options.onImportCompleted;
     this.leaseMs = options.leaseMs ?? 5 * 60_000;
+    this.replicationMaxAttempts = Math.max(
+      1,
+      Math.min(10, Math.floor(options.replicationMaxAttempts ?? 3)),
+    );
+    this.replicationRetryBaseMs = Math.max(
+      10,
+      Math.min(60_000, Math.floor(options.replicationRetryBaseMs ?? 1_000)),
+    );
   }
 
   async start(): Promise<void> {
@@ -146,6 +158,24 @@ export class SnapshotJobRunner {
       clearInterval(heartbeatTimer);
       await heartbeat.catch(() => undefined);
       const message = error instanceof Error ? error.message : String(error);
+      if (job.operation === "replicate" && job.attempts < this.replicationMaxAttempts) {
+        const delayMs = Math.min(
+          5 * 60_000,
+          this.replicationRetryBaseMs * 2 ** Math.max(0, job.attempts - 1),
+        );
+        const retrying = await this.repository.scheduleSnapshotJobRetry(
+          job.id,
+          job.attemptToken,
+          message,
+          delayMs,
+        );
+        if (retrying) {
+          this.publish(retrying);
+          const timer = setTimeout(() => this.enqueue(job.id), delayMs + 10);
+          timer.unref();
+        }
+        return;
+      }
       const failed = await this.repository.failSnapshotJob(
         job.id,
         job.attemptToken,

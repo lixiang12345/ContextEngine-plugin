@@ -218,6 +218,18 @@ export interface ClaimedSnapshotJob extends StoredSnapshotJob {
   attemptToken: string;
 }
 
+export interface SnapshotReplicationMetrics {
+  targetId: string;
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  retries: number;
+  averageDurationMs: number | null;
+  lastSucceededAt: string | null;
+  lastFailedAt: string | null;
+}
+
 interface WorkspaceRow extends QueryResultRow {
   id: string;
   name: string;
@@ -2797,6 +2809,50 @@ export class WorkspaceRepository {
     return result.rows.map(snapshotJobFromRow);
   }
 
+  async snapshotReplicationMetrics(
+    workspaceId: string,
+  ): Promise<SnapshotReplicationMetrics[]> {
+    const result = await this.pool.query<{
+      target_id: string;
+      queued: string | number;
+      running: string | number;
+      succeeded: string | number;
+      failed: string | number;
+      retries: string | number;
+      average_duration_ms: string | number | null;
+      last_succeeded_at: string | Date | null;
+      last_failed_at: string | Date | null;
+    }>(
+      `SELECT parameters->>'target_id' AS target_id,
+              COUNT(*) FILTER (WHERE status = 'queued') AS queued,
+              COUNT(*) FILTER (WHERE status = 'running') AS running,
+              COUNT(*) FILTER (WHERE status = 'succeeded') AS succeeded,
+              COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+              COALESCE(SUM(GREATEST(attempts - 1, 0)), 0) AS retries,
+              AVG(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)
+                FILTER (WHERE status = 'succeeded') AS average_duration_ms,
+              MAX(completed_at) FILTER (WHERE status = 'succeeded') AS last_succeeded_at,
+              MAX(completed_at) FILTER (WHERE status = 'failed') AS last_failed_at
+       FROM ce_snapshot_jobs
+       WHERE workspace_id = $1 AND operation = 'replicate'
+       GROUP BY parameters->>'target_id'
+       ORDER BY target_id`,
+      [workspaceId],
+    );
+    return result.rows.map((row) => ({
+      targetId: row.target_id,
+      queued: Number(row.queued),
+      running: Number(row.running),
+      succeeded: Number(row.succeeded),
+      failed: Number(row.failed),
+      retries: Number(row.retries),
+      averageDurationMs:
+        row.average_duration_ms === null ? null : Number(row.average_duration_ms),
+      lastSucceededAt: iso(row.last_succeeded_at),
+      lastFailedAt: iso(row.last_failed_at),
+    }));
+  }
+
   async listQueuedSnapshotJobs(leaseMs = 5 * 60_000): Promise<StoredSnapshotJob[]> {
     const result = await this.pool.query<SnapshotJobRow>(
       `SELECT id, workspace_id, principal_id, operation, snapshot_name,
@@ -2928,10 +2984,40 @@ export class WorkspaceRepository {
     return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
   }
 
+  async scheduleSnapshotJobRetry(
+    jobId: string,
+    attemptToken: string,
+    message: string,
+    delayMs: number,
+  ): Promise<StoredSnapshotJob | null> {
+    const safeDelayMs = Math.max(0, Math.min(24 * 60 * 60 * 1000, Math.floor(delayMs)));
+    const result = await this.pool.query<SnapshotJobRow>(
+      `UPDATE ce_snapshot_jobs
+       SET status = 'queued', error = $3,
+           next_attempt_at = clock_timestamp() + ($4::bigint * interval '1 millisecond'),
+           locked_at = NULL, lock_token = NULL, completed_at = NULL,
+           progress = $5::jsonb
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                 parameters, status, progress, result, error, attempts,
+                 locked_at, lock_token, next_attempt_at, created_at,
+                 started_at, completed_at`,
+      [
+        jobId,
+        attemptToken,
+        message.slice(0, 4000),
+        safeDelayMs,
+        JSON.stringify({ phase: "retry_wait", retry_in_ms: safeDelayMs }),
+      ],
+    );
+    return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+  }
+
   async retrySnapshotJob(jobId: string): Promise<StoredSnapshotJob | null> {
     const result = await this.pool.query<SnapshotJobRow>(
       `UPDATE ce_snapshot_jobs
        SET status = 'queued', next_attempt_at = clock_timestamp(),
+           attempts = CASE WHEN operation = 'replicate' THEN 0 ELSE attempts END,
            error = NULL, completed_at = NULL, locked_at = NULL,
            lock_token = NULL, progress = $2::jsonb
        WHERE id = $1 AND status = 'failed'

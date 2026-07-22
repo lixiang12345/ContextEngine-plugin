@@ -81,4 +81,43 @@ describePostgres("durable snapshot jobs", () => {
     assert.equal(completed?.status, "succeeded");
     assert.equal(completed?.attempts, 2);
   });
+
+  it("schedules fenced retries using the database clock", async () => {
+    const workspace = await repository.createWorkspace({
+      name: "snapshot retry",
+      sourceMode: "blob",
+      ownerPrincipalId: "owner",
+    });
+    const created = await repository.createSnapshotJob({
+      workspaceId: workspace.id,
+      principalId: "owner",
+      operation: "replicate",
+      snapshotName: "main",
+      parameters: { target_id: "region_backup" },
+    });
+    const first = await repository.claimSnapshotJob(created.id, 60_000);
+    assert.ok(first);
+    const retrying = await repository.scheduleSnapshotJobRetry(
+      first.id,
+      first.attemptToken,
+      "temporary outage",
+      30,
+    );
+    assert.equal(retrying?.status, "queued");
+    assert.equal(retrying?.error, "temporary outage");
+    assert.equal(
+      await repository.completeSnapshotJob(first.id, first.attemptToken, {}),
+      null,
+    );
+    assert.equal(await repository.claimSnapshotJob(created.id, 60_000), null);
+    await new Promise<void>((resolve) => setTimeout(resolve, 45));
+    const second = await repository.claimSnapshotJob(created.id, 60_000);
+    assert.ok(second);
+    assert.equal(second.attempts, 2);
+    assert.equal(
+      (await repository.failSnapshotJob(second.id, second.attemptToken, "terminal"))
+        ?.status,
+      "failed",
+    );
+  });
 });

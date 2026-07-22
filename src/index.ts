@@ -202,6 +202,7 @@ export type {
   IndexJobStatus,
   SnapshotJobOperation,
   SnapshotJobStatus,
+  SnapshotReplicationMetrics,
   StoredSnapshotJob,
   ClaimedSnapshotJob,
   ConnectorProvider,

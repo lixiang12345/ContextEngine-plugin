@@ -430,7 +430,12 @@ success. Missing configuration returns `503`; reader permissions are hidden as
 Replication targets are injected through `HttpServerOptions.snapshotReplicationTargets`
 or `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` as a JSON object mapping stable
 target ids to store locations. Credentials are never persisted in PostgreSQL;
-target status is derived from the latest durable replication jobs.
+target status is derived from the latest durable replication jobs and includes
+queued/running/succeeded/failed counts, retry count, average duration, last
+success/failure timestamps, and replication lag. Replication failures retry
+automatically with bounded exponential backoff; configure
+`CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` and
+`CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` to tune the policy.
 
 ### 2. Plan a file manifest change
 
@@ -719,6 +724,8 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_BITBUCKET_WEBHOOK_SECRET` | Bitbucket `repo:push` HMAC secret; minimum 16 characters |
 | `CONTEXTENGINE_SNAPSHOT_STORE` | Filesystem directory or `s3://bucket/prefix` for owner-managed snapshots; disabled when unset |
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` | JSON object of target id to filesystem or `s3://bucket/prefix` store location; credentials remain in the host environment |
+| `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` | Automatic replication attempts per job (default 3, maximum 10) |
+| `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` | Initial automatic retry delay (default 1000 ms, maximum 60000 ms) |
 | `CONTEXTENGINE_S3_ENDPOINT` / `_FORCE_PATH_STYLE` | Optional S3-compatible service endpoint and path-style mode |
 | `CONTEXTENGINE_S3_SSE` / `_KMS_KEY_ID` | Optional `AES256` or `aws:kms` server-side encryption |
 

@@ -155,3 +155,12 @@ by the primary store. Owners queue a copy with
 latest status per target and snapshot through
 `GET /v1/workspaces/{workspaceId}/snapshot-replication-targets`. Failed copies
 use the standard snapshot-job retry endpoint.
+
+Replication jobs automatically retry transient target failures up to three
+attempts by default, with exponential delays capped at five minutes. The job
+payload exposes `next_attempt_at` while waiting, and the target status endpoint
+reports retry count, terminal failures, average duration, and lag since the
+last successful copy. `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` and
+`CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` bound this policy.
+An explicit retry of a terminal replication job starts a fresh bounded attempt
+budget; non-replication jobs retain their cumulative attempt count.

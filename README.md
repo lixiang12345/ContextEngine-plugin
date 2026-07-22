@@ -339,6 +339,8 @@ return durable PostgreSQL job records with polling and SSE status endpoints;
 CLI snapshot commands remain synchronous. Configure
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` or inject target stores to enable
 owner-triggered asynchronous replication.
+Replication failures use bounded automatic exponential retry before becoming
+terminal failures.
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).

@@ -13,18 +13,19 @@ import type {
   SnapshotObjectStore,
 } from "../src/snapshots/object-store.js";
 
-class FailOnceSnapshotStore implements SnapshotObjectStore {
-  private shouldFail = true;
-
-  constructor(private readonly inner: SnapshotObjectStore) {}
+class FailingSnapshotStore implements SnapshotObjectStore {
+  constructor(
+    private readonly inner: SnapshotObjectStore,
+    private remainingFailures: number,
+  ) {}
 
   async put(
     key: string,
     source: Readable,
     metadata?: SnapshotObjectMetadata,
   ): Promise<void> {
-    if (this.shouldFail) {
-      this.shouldFail = false;
+    if (this.remainingFailures > 0) {
+      this.remainingFailures--;
       source.destroy();
       throw new Error("replication target temporarily unavailable");
     }
@@ -89,10 +90,17 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       snapshotStore: new FilesystemSnapshotStore(directory),
       snapshotReplicationTargets: {
         "region-backup": replicaStore,
-        flaky: new FailOnceSnapshotStore(
+        flaky: new FailingSnapshotStore(
           new FilesystemSnapshotStore(flakyReplicaDirectory),
+          1,
+        ),
+        offline: new FailingSnapshotStore(
+          new FilesystemSnapshotStore(flakyReplicaDirectory),
+          Number.POSITIVE_INFINITY,
         ),
       },
+      snapshotReplicationMaxAttempts: 3,
+      snapshotReplicationRetryBaseMs: 10,
     });
   });
 
@@ -182,7 +190,11 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       }
     ).snapshots;
     assert.equal(snapshotCapabilities.configured, true);
-    assert.deepEqual(snapshotCapabilities.replication_targets, ["flaky", "region-backup"]);
+    assert.deepEqual(snapshotCapabilities.replication_targets, [
+      "flaky",
+      "offline",
+      "region-backup",
+    ]);
 
     const invalid = await request(
       "alice",
@@ -259,18 +271,34 @@ describePostgres("owner-managed snapshot HTTP API", () => {
     );
     assert.equal(flakyReplication.status, 202);
     const flakyJobId = ((await flakyReplication.json()) as { job: { id: string } }).job.id;
-    const failedReplication = await waitSnapshotJob("alice", aliceWorkspace, flakyJobId);
-    assert.equal(failedReplication.status, "failed");
-    assert.match(failedReplication.error ?? "", /temporarily unavailable/);
-    const retriedReplication = await request(
-      "alice",
-      `/v1/workspaces/${aliceWorkspace}/snapshot-jobs/${flakyJobId}/retry`,
-      { method: "POST", body: "{}" },
-    );
-    assert.equal(retriedReplication.status, 202);
     const recoveredReplication = await waitSnapshotJob("alice", aliceWorkspace, flakyJobId);
     assert.equal(recoveredReplication.status, "succeeded", recoveredReplication.error ?? undefined);
     assert.equal(recoveredReplication.attempts, 2);
+
+    const offlineReplication = await request(
+      "alice",
+      `/v1/workspaces/${aliceWorkspace}/snapshots/team-main/replicate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target_id: "offline" }),
+      },
+    );
+    assert.equal(offlineReplication.status, 202);
+    const offlineJobId = ((await offlineReplication.json()) as { job: { id: string } }).job.id;
+    const failedReplication = await waitSnapshotJob("alice", aliceWorkspace, offlineJobId);
+    assert.equal(failedReplication.status, "failed");
+    assert.equal(failedReplication.attempts, 3);
+    assert.match(failedReplication.error ?? "", /temporarily unavailable/);
+    const retriedOffline = await request(
+      "alice",
+      `/v1/workspaces/${aliceWorkspace}/snapshot-jobs/${offlineJobId}/retry`,
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(retriedOffline.status, 202);
+    const failedAgain = await waitSnapshotJob("alice", aliceWorkspace, offlineJobId);
+    assert.equal(failedAgain.status, "failed");
+    assert.equal(failedAgain.attempts, 3);
 
     const targetStatus = await request(
       "alice",
@@ -281,6 +309,13 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       targets: Array<{
         id: string;
         configured: boolean;
+        metrics: {
+          succeeded: number;
+          failed: number;
+          retries: number;
+          average_duration_ms: number | null;
+          replication_lag_ms: number | null;
+        };
         replications: Array<{ status: string; snapshot_name: string }>;
       }>;
     };
@@ -290,12 +325,29 @@ describePostgres("owner-managed snapshot HTTP API", () => {
         configured: target.configured,
         status: target.replications[0]?.status,
         snapshot: target.replications[0]?.snapshot_name,
+        succeeded: target.metrics.succeeded,
+        failed: target.metrics.failed,
+        retries: target.metrics.retries,
       })),
       [
-        { id: "flaky", configured: true, status: "succeeded", snapshot: "team-main" },
-        { id: "region-backup", configured: true, status: "succeeded", snapshot: "team-main" },
+        {
+          id: "flaky", configured: true, status: "succeeded", snapshot: "team-main",
+          succeeded: 1, failed: 0, retries: 1,
+        },
+        {
+          id: "offline", configured: true, status: "failed", snapshot: "team-main",
+          succeeded: 0, failed: 1, retries: 2,
+        },
+        {
+          id: "region-backup", configured: true, status: "succeeded", snapshot: "team-main",
+          succeeded: 1, failed: 0, retries: 0,
+        },
       ],
     );
+    for (const target of targets.targets.filter((entry) => entry.metrics.succeeded)) {
+      assert.ok(target.metrics.average_duration_ms !== null);
+      assert.ok(target.metrics.replication_lag_ms !== null);
+    }
     const unknownTarget = await request(
       "alice",
       `/v1/workspaces/${aliceWorkspace}/snapshots/team-main/replicate`,

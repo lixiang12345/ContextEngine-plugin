@@ -7,7 +7,7 @@
 当前数据库：PostgreSQL schema v12
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `198/198` 通过。
+全量测试 `199/199` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -90,6 +90,11 @@ Phase 12 状态（2026-07-22）：已完成复制控制面的第一版。schema 
 或 `CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS` 提供，数据库不保存凭据；workspace hash
 前缀、attempt fencing、失败重试和 manifest-last 发布继续生效。下一步是每目标调度策略、
 带退避的自动重试和复制延迟/容量指标。
+
+Phase 13 状态（2026-07-22）：复制失败已支持有界自动重试和数据库时钟退避，runner
+只对具备目标能力的实例 claim；目标状态返回成功/失败/重试计数、平均耗时、最近终态和
+复制延迟。下一步是按目标配置定时策略（例如 nightly/interval）和更细的 artifact
+吞吐、容量与告警指标。
 
 ## 1. 目标
 

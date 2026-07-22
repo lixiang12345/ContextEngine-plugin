@@ -106,6 +106,8 @@ import {
 const DEFAULT_MAX_BLOB_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_MCP_MAX_SESSIONS = 128;
+const DEFAULT_SNAPSHOT_REPLICATION_MAX_ATTEMPTS = 3;
+const DEFAULT_SNAPSHOT_REPLICATION_RETRY_BASE_MS = 1_000;
 const MAX_BATCH_BLOBS = 16;
 const snapshotNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/);
 const snapshotPruneSchema = z.object({
@@ -164,6 +166,8 @@ export interface HttpServerOptions {
   snapshotReplicationTargets?:
     | ReadonlyMap<string, SnapshotObjectStore>
     | Readonly<Record<string, SnapshotObjectStore>>;
+  snapshotReplicationMaxAttempts?: number;
+  snapshotReplicationRetryBaseMs?: number;
 }
 
 export interface HttpServerHandle {
@@ -410,6 +414,12 @@ function positiveOption(value: number, name: string): number {
   return normalized;
 }
 
+function boundedPositiveOption(value: number, name: string, max: number): number {
+  const normalized = positiveOption(value, name);
+  if (normalized > max) throw new Error(`${name} must not exceed ${max}`);
+  return normalized;
+}
+
 function mcpSessionStoreFromEnv(value: string | undefined): McpSessionStoreKind {
   const normalized = value?.trim().toLowerCase() || "postgres";
   if (normalized === "postgres" || normalized === "memory") return normalized;
@@ -605,6 +615,7 @@ function snapshotJobPayload(job: StoredSnapshotJob): Record<string, unknown> {
     result: job.result,
     error: job.error,
     attempts: job.attempts,
+    next_attempt_at: job.nextAttemptAt,
     created_at: job.createdAt,
     started_at: job.startedAt,
     completed_at: job.completedAt,
@@ -1051,6 +1062,8 @@ class HttpContextService {
     string,
     SnapshotObjectStore
   >;
+  private readonly snapshotReplicationMaxAttempts: number;
+  private readonly snapshotReplicationRetryBaseMs: number;
   private readonly mcpSessions = new Map<string, McpHttpSession>();
   private readonly mcpSessionCleanupTimer: NodeJS.Timeout;
   private pendingMcpInitializations = 0;
@@ -1077,6 +1090,8 @@ class HttpContextService {
         | "websiteTimeoutMs"
         | "webhookPollIntervalMs"
         | "webhookMaxAttempts"
+        | "snapshotReplicationMaxAttempts"
+        | "snapshotReplicationRetryBaseMs"
         | "corsOrigins"
       >
     > &
@@ -1130,6 +1145,8 @@ class HttpContextService {
     this.snapshotReplicationTargets = normalizeSnapshotReplicationTargets(
       options.snapshotReplicationTargets,
     );
+    this.snapshotReplicationMaxAttempts = options.snapshotReplicationMaxAttempts;
+    this.snapshotReplicationRetryBaseMs = options.snapshotReplicationRetryBaseMs;
     this.runner = new IndexJobRunner({
       repository,
       engineFor: (workspace) => this.engineFor(workspace),
@@ -1145,6 +1162,8 @@ class HttpContextService {
         this.requireSnapshotReplicationTarget(workspaceId, targetId),
       hasReplicationTarget: (targetId) =>
         this.snapshotReplicationTargets.has(targetId),
+      replicationMaxAttempts: options.snapshotReplicationMaxAttempts,
+      replicationRetryBaseMs: options.snapshotReplicationRetryBaseMs,
       onImportCompleted: (workspaceId) => this.closeEngine(workspaceId),
     });
     const github = new GitHubConnectorClient({
@@ -1340,6 +1359,24 @@ class HttpContextService {
                 process.cwd(),
               )
             : options.snapshotReplicationTargets,
+        snapshotReplicationMaxAttempts: boundedPositiveOption(
+          options.snapshotReplicationMaxAttempts ??
+            numberFromEnv(
+              process.env.CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS,
+              DEFAULT_SNAPSHOT_REPLICATION_MAX_ATTEMPTS,
+            ),
+          "snapshotReplicationMaxAttempts",
+          10,
+        ),
+        snapshotReplicationRetryBaseMs: boundedPositiveOption(
+          options.snapshotReplicationRetryBaseMs ??
+            numberFromEnv(
+              process.env.CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS,
+              DEFAULT_SNAPSHOT_REPLICATION_RETRY_BASE_MS,
+            ),
+          "snapshotReplicationRetryBaseMs",
+          60_000,
+        ),
         corsOrigins: normalizeCorsOrigins(
           options.corsOrigins ??
             (process.env.CONTEXTENGINE_HTTP_CORS_ORIGINS ?? "").split(","),
@@ -1517,6 +1554,11 @@ class HttpContextService {
                     : []),
                 ],
             replication_targets: [...this.snapshotReplicationTargets.keys()],
+            replication_retry: {
+              max_attempts: this.snapshotReplicationMaxAttempts,
+              base_delay_ms: this.snapshotReplicationRetryBaseMs,
+              strategy: "exponential",
+            },
           },
           retrieval: ["search", "context", "file", "codebase-retrieval"],
           mcp: {
@@ -1874,7 +1916,11 @@ class HttpContextService {
       if (request.method === "GET" && snapshotReplicationTargetsMatch) {
         const workspaceId = decodeURIComponent(snapshotReplicationTargetsMatch[1]);
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
-        const latest = await this.repository.listLatestSnapshotReplicationJobs(workspaceId);
+        const [latest, metrics] = await Promise.all([
+          this.repository.listLatestSnapshotReplicationJobs(workspaceId),
+          this.repository.snapshotReplicationMetrics(workspaceId),
+        ]);
+        const metricsByTarget = new Map(metrics.map((entry) => [entry.targetId, entry]));
         const targetIds = new Set(this.snapshotReplicationTargets.keys());
         for (const job of latest) {
           const targetId = job.parameters.target_id;
@@ -1884,6 +1930,35 @@ class HttpContextService {
           targets: [...targetIds].sort().map((targetId) => ({
             id: targetId,
             configured: this.snapshotReplicationTargets.has(targetId),
+            metrics: (() => {
+              const metric = metricsByTarget.get(targetId);
+              if (!metric) {
+                return {
+                  queued: 0,
+                  running: 0,
+                  succeeded: 0,
+                  failed: 0,
+                  retries: 0,
+                  average_duration_ms: null,
+                  last_succeeded_at: null,
+                  last_failed_at: null,
+                  replication_lag_ms: null,
+                };
+              }
+              return {
+                queued: metric.queued,
+                running: metric.running,
+                succeeded: metric.succeeded,
+                failed: metric.failed,
+                retries: metric.retries,
+                average_duration_ms: metric.averageDurationMs,
+                last_succeeded_at: metric.lastSucceededAt,
+                last_failed_at: metric.lastFailedAt,
+                replication_lag_ms: metric.lastSucceededAt
+                  ? Math.max(0, Date.now() - Date.parse(metric.lastSucceededAt))
+                  : null,
+              };
+            })(),
             replications: latest
               .filter((job) => job.parameters.target_id === targetId)
               .map(snapshotJobPayload),
