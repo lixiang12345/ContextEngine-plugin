@@ -309,6 +309,9 @@ allow/deny 与嵌套路径前缀规则；Search、Context、File Read 和 Remote
 认证、Connector/ACL 路由。
 宿主可以通过 `connectorPlugins` 注册其他来源，详见
 [docs/PLUGINS.md](./docs/PLUGINS.md)。
+Source 级 CI Trigger Token 可让 GitHub Actions、GitLab CI 与 Bitbucket Pipelines
+只刷新指定来源而无需拿到工作区级 API Key，详见 [docs/HTTP_API.md](./docs/HTTP_API.md)
+中的 CI Trigger 小节。
 
 完整的客户端协议、入参出参、SSE 索引进度以及已检查 IntelliJ 插件的适配映射
 见 [docs/HTTP_API.md](./docs/HTTP_API.md)。

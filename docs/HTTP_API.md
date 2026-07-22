@@ -280,6 +280,52 @@ must be recent, and are checked before JSON parsing. During migration,
 the same durable, idempotent inbox flow; deleted pushes and non-push events are
 ignored after authentication.
 
+### Source-scoped CI triggers
+
+Owners can issue a source-scoped CI token without granting a CI runner access
+to the workspace API:
+
+```http
+POST /v1/workspaces/{workspaceId}/sources/{sourceId}/ci-tokens
+Authorization: Bearer <workspace-owner-key>
+Content-Type: application/json
+
+{"name":"GitHub Actions","expires_in_days":90}
+```
+
+The response contains the `ceci_...` credential exactly once. Store it as a
+GitHub Actions secret, GitLab CI variable, or Bitbucket secured variable. The
+runner then sends only the source-scoped token and an idempotent delivery id:
+
+```http
+POST /ci/sync
+Authorization: Bearer ceci_<secret>
+X-ContextEngine-Delivery: <provider-run-id>
+Content-Type: application/json
+
+{}
+```
+
+Tokens are stored only as SHA-256 hashes, expire in 1–365 days, can be listed
+without revealing their value, and can be revoked with
+`DELETE /v1/workspaces/{workspaceId}/sources/{sourceId}/ci-tokens/{tokenId}`.
+Each token is limited to 20 active credentials and 60 deliveries per ten
+minutes; delivery/body replay conflicts return `409`. The durable webhook inbox
+then uses the normal connector lease, cursor fencing, retry, and index-job
+pipeline. This endpoint intentionally does not accept a workspace-wide API key.
+
+Minimal provider-neutral CI step:
+
+```yaml
+# GitHub Actions, GitLab CI, and Bitbucket Pipelines can use the same shell step.
+- name: Refresh ContextEngine source
+  run: |
+    curl --fail-with-body --retry 3 -X POST "$CONTEXTENGINE_URL/ci/sync" \
+      -H "Authorization: Bearer $CONTEXTENGINE_CI_TOKEN" \
+      -H "X-ContextEngine-Delivery: ${CI_PIPELINE_ID:-${GITHUB_RUN_ID:-$BITBUCKET_BUILD_NUMBER}}" \
+      -H 'Content-Type: application/json' --data '{}'
+```
+
 The built-in Bitbucket Cloud plugin uses workspace/repository slugs:
 
 ```http

@@ -147,6 +147,17 @@ export interface StoredConnectorWebhookEvent {
   completedAt: string | null;
 }
 
+export interface StoredConnectorCiToken {
+  id: string;
+  sourceId: string;
+  name: string;
+  expiresAt: string;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+  createdBy: string;
+  createdAt: string;
+}
+
 export interface StoredSourceDocument {
   path: string;
   content: string;
@@ -284,6 +295,17 @@ interface ConnectorWebhookEventRow extends QueryResultRow {
   completed_at: string | Date | null;
 }
 
+interface ConnectorCiTokenRow extends QueryResultRow {
+  id: string;
+  source_id: string;
+  name: string;
+  expires_at: string | Date;
+  revoked_at: string | Date | null;
+  last_used_at: string | Date | null;
+  created_by: string;
+  created_at: string | Date;
+}
+
 type AdvisoryLockClient = PoolClient;
 
 export class WorkspaceNotFoundError extends Error {
@@ -332,6 +354,13 @@ export class ConnectorWebhookReplayError extends Error {
   constructor() {
     super("Webhook delivery id was reused with a different payload");
     this.name = "ConnectorWebhookReplayError";
+  }
+}
+
+export class ConnectorCiRateLimitError extends Error {
+  constructor() {
+    super("CI trigger rate limit exceeded for this source token");
+    this.name = "ConnectorCiRateLimitError";
   }
 }
 
@@ -461,6 +490,19 @@ function webhookEventFromRow(
     createdAt: iso(row.created_at)!,
     updatedAt: iso(row.updated_at)!,
     completedAt: iso(row.completed_at),
+  };
+}
+
+function ciTokenFromRow(row: ConnectorCiTokenRow): StoredConnectorCiToken {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    name: row.name,
+    expiresAt: iso(row.expires_at)!,
+    revokedAt: iso(row.revoked_at),
+    lastUsedAt: iso(row.last_used_at),
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at)!,
   };
 }
 
@@ -1255,6 +1297,153 @@ export class WorkspaceRepository {
       return {
         accepted: inserted.rowCount ?? 0,
         duplicates: input.sourceIds.length - (inserted.rowCount ?? 0),
+      };
+    });
+  }
+
+  async createConnectorCiToken(input: {
+    workspaceId: string;
+    sourceId: string;
+    tokenHash: string;
+    name: string;
+    expiresAt: Date;
+    createdBy: string;
+  }): Promise<StoredConnectorCiToken> {
+    return this.withTransaction(async (client) => {
+      const source = await client.query<{ id: string }>(
+        `SELECT id FROM ce_connector_sources
+         WHERE workspace_id = $1 AND id = $2
+         FOR UPDATE`,
+        [input.workspaceId, input.sourceId],
+      );
+      if (!source.rows[0]) throw new WorkspaceNotFoundError(input.workspaceId);
+      const active = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+         FROM ce_connector_ci_tokens
+         WHERE source_id = $1 AND revoked_at IS NULL
+           AND expires_at > clock_timestamp()`,
+        [input.sourceId],
+      );
+      if (Number(active.rows[0]?.count ?? 0) >= 20) {
+        throw new Error("Connector source already has 20 active CI tokens");
+      }
+      const id = randomUUID();
+      const result = await client.query<ConnectorCiTokenRow>(
+        `INSERT INTO ce_connector_ci_tokens(
+           id, source_id, token_hash, name, expires_at, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, source_id, name, expires_at, revoked_at,
+                   last_used_at, created_by, created_at`,
+        [id, input.sourceId, input.tokenHash, input.name, input.expiresAt, input.createdBy],
+      );
+      return ciTokenFromRow(result.rows[0]);
+    });
+  }
+
+  async listConnectorCiTokens(
+    workspaceId: string,
+    sourceId: string,
+  ): Promise<StoredConnectorCiToken[]> {
+    const result = await this.pool.query<ConnectorCiTokenRow>(
+      `SELECT token.id, token.source_id, token.name, token.expires_at,
+              token.revoked_at, token.last_used_at, token.created_by,
+              token.created_at
+       FROM ce_connector_ci_tokens AS token
+       JOIN ce_connector_sources AS source ON source.id = token.source_id
+       WHERE source.workspace_id = $1 AND source.id = $2
+       ORDER BY token.created_at DESC, token.id`,
+      [workspaceId, sourceId],
+    );
+    return result.rows.map(ciTokenFromRow);
+  }
+
+  async revokeConnectorCiToken(
+    workspaceId: string,
+    sourceId: string,
+    tokenId: string,
+  ): Promise<StoredConnectorCiToken | null> {
+    const result = await this.pool.query<ConnectorCiTokenRow>(
+      `UPDATE ce_connector_ci_tokens AS token
+       SET revoked_at = COALESCE(token.revoked_at, clock_timestamp())
+       FROM ce_connector_sources AS source
+       WHERE token.id = $3 AND token.source_id = source.id
+         AND source.workspace_id = $1 AND source.id = $2
+       RETURNING token.id, token.source_id, token.name, token.expires_at,
+                 token.revoked_at, token.last_used_at, token.created_by,
+                 token.created_at`,
+      [workspaceId, sourceId, tokenId],
+    );
+    return result.rows[0] ? ciTokenFromRow(result.rows[0]) : null;
+  }
+
+  async authenticateCiTokenAndEnqueue(input: {
+    tokenHash: string;
+    deliveryId: string;
+    bodyHash: string;
+  }): Promise<{
+    token: StoredConnectorCiToken;
+    workspaceId: string;
+    provider: string;
+    accepted: number;
+    duplicates: number;
+  } | null> {
+    return this.withTransaction(async (client) => {
+      const authenticated = await client.query<ConnectorCiTokenRow & {
+        workspace_id: string;
+        provider: string;
+      }>(
+        `SELECT token.id, token.source_id, token.name, token.expires_at,
+                token.revoked_at, token.last_used_at, token.created_by,
+                token.created_at, source.workspace_id, source.provider
+         FROM ce_connector_ci_tokens AS token
+         JOIN ce_connector_sources AS source ON source.id = token.source_id
+         WHERE token.token_hash = $1 AND token.revoked_at IS NULL
+           AND token.expires_at > clock_timestamp()
+         FOR UPDATE OF token`,
+        [input.tokenHash],
+      );
+      const row = authenticated.rows[0];
+      if (!row) return null;
+      await client.query(
+        `UPDATE ce_connector_ci_tokens
+         SET last_used_at = clock_timestamp()
+         WHERE id = $1`,
+        [row.id],
+      );
+      const eventId = `ci:${row.id}:${input.deliveryId}`;
+      const recent = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+         FROM ce_connector_webhook_events
+         WHERE source_id = $1 AND event_id LIKE $2
+           AND created_at > clock_timestamp() - interval '10 minutes'`,
+        [row.source_id, `ci:${row.id}:%`],
+      );
+      if (Number(recent.rows[0]?.count ?? 0) >= 60) {
+        throw new ConnectorCiRateLimitError();
+      }
+      const inserted = await client.query(
+        `INSERT INTO ce_connector_webhook_events(
+           source_id, event_id, provider, body_hash
+         ) VALUES ($1, $2, 'ci', $3)
+         ON CONFLICT(source_id, event_id) DO NOTHING
+         RETURNING source_id`,
+        [row.source_id, eventId, input.bodyHash],
+      );
+      const persisted = await client.query<{ body_hash: string }>(
+        `SELECT body_hash FROM ce_connector_webhook_events
+         WHERE source_id = $1 AND event_id = $2
+         FOR UPDATE`,
+        [row.source_id, eventId],
+      );
+      if (persisted.rows[0]?.body_hash !== input.bodyHash) {
+        throw new ConnectorWebhookReplayError();
+      }
+      return {
+        token: { ...ciTokenFromRow(row), lastUsedAt: new Date().toISOString() },
+        workspaceId: row.workspace_id,
+        provider: row.provider,
+        accepted: inserted.rowCount ?? 0,
+        duplicates: inserted.rowCount ? 0 : 1,
       };
     });
   }

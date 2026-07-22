@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -40,6 +40,7 @@ import {
 } from "./server/connector-sync.js";
 import {
   createHttpAuthenticator,
+  parseBearerAuthorization,
   type HttpApiKeyConfig,
   type HttpPrincipal,
   type HttpRequestAuthenticator,
@@ -71,8 +72,10 @@ import {
   SyncPlanExpiredError,
   SourceAccessPolicyTargetError,
   ConnectorWebhookReplayError,
+  ConnectorCiRateLimitError,
   type StoredIndexJob,
   type StoredConnectorSource,
+  type StoredConnectorCiToken,
   type StoredWorkspace,
   type WorkspacePermission,
   WorkspaceNotFoundError,
@@ -205,6 +208,13 @@ const modelConnectionTestSchema = z.discriminatedUnion("target", [
     reranker: rerankerConfigurationSchema,
   }),
 ]);
+const createConnectorCiTokenSchema = z.object({
+  name: z.string().trim().min(1).max(100).regex(
+    /^[^\u0000-\u001f\u007f]+$/,
+    "CI token name must not contain control characters",
+  ),
+  expires_in_days: z.number().int().min(1).max(365).default(90),
+});
 
 function embeddingConfigurationUpdate(
   input: z.infer<typeof embeddingConfigurationSchema>,
@@ -530,6 +540,19 @@ function connectorSourcePayload(source: StoredConnectorSource): Record<string, u
   };
 }
 
+function connectorCiTokenPayload(token: StoredConnectorCiToken): Record<string, unknown> {
+  return {
+    id: token.id,
+    source_id: token.sourceId,
+    name: token.name,
+    expires_at: token.expiresAt,
+    revoked_at: token.revokedAt,
+    last_used_at: token.lastUsedAt,
+    created_by: token.createdBy,
+    created_at: token.createdAt,
+  };
+}
+
 function hitPayload(hit: SearchHit): Record<string, unknown> {
   return {
     path: hit.chunk.path,
@@ -758,6 +781,9 @@ function openApiDocument(): Record<string, unknown> {
       "/webhooks/{provider}": {
         post: { summary: "Receive a provider-signed connector event" },
       },
+      "/ci/sync": {
+        post: { summary: "Trigger one source sync with a source-scoped CI token" },
+      },
       "/dashboard": { get: { summary: "Embedded observability dashboard" } },
       "/v1/capabilities": { get: { summary: "Service capabilities" } },
       "/v1/observability/overview": {
@@ -805,6 +831,13 @@ function openApiDocument(): Record<string, unknown> {
       },
       "/v1/workspaces/{workspaceId}/sources/{sourceId}/sync": {
         post: { summary: "Synchronize and queue indexing for a connector source" },
+      },
+      "/v1/workspaces/{workspaceId}/sources/{sourceId}/ci-tokens": {
+        get: { summary: "List source-scoped CI trigger tokens" },
+        post: { summary: "Create a source-scoped CI trigger token" },
+      },
+      "/v1/workspaces/{workspaceId}/sources/{sourceId}/ci-tokens/{tokenId}": {
+        delete: { summary: "Revoke a source-scoped CI trigger token" },
       },
       "/v1/blobs/{sha256}": {
         put: { summary: "Upload a raw source Blob after SHA-256 verification" },
@@ -1206,6 +1239,10 @@ class HttpContextService {
         json(response, 200, openApiDocument());
         return;
       }
+      if (request.method === "POST" && pathname === "/ci/sync") {
+        await this.handleConnectorCiSync(request, response);
+        return;
+      }
       const webhookMatch = /^\/webhooks\/([^/]+)$/.exec(pathname);
       if (request.method === "POST" && webhookMatch) {
         await this.handleConnectorWebhook(
@@ -1274,6 +1311,12 @@ class HttpContextService {
               .list()
               .filter((item) => this.connectorRegistry.get(item.provider)?.webhook)
               .map((item) => item.provider),
+          },
+          ci_sync: {
+            source_scoped_tokens: true,
+            endpoint: "/ci/sync",
+            token_hashing: "sha256",
+            max_active_tokens_per_source: 20,
           },
           indexing: {
             async_jobs: true,
@@ -1797,6 +1840,58 @@ class HttpContextService {
         return;
       }
 
+      const ciTokensMatch = /^\/v1\/workspaces\/([^/]+)\/sources\/([^/]+)\/ci-tokens$/.exec(
+        pathname,
+      );
+      if (ciTokensMatch && (request.method === "GET" || request.method === "POST")) {
+        const workspaceId = decodeURIComponent(ciTokensMatch[1]);
+        const sourceId = decodeURIComponent(ciTokensMatch[2]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const source = await this.repository.getConnectorSource(workspaceId, sourceId);
+        if (!source) throw new HttpError(404, "Connector source not found");
+        if (request.method === "GET") {
+          const tokens = await this.repository.listConnectorCiTokens(workspaceId, sourceId);
+          json(response, 200, { tokens: tokens.map(connectorCiTokenPayload) });
+          return;
+        }
+        const parsed = createConnectorCiTokenSchema.safeParse(await readJsonBody(request, 16 * 1024));
+        if (!parsed.success) throw new HttpError(400, parsed.error.issues[0]?.message ?? "Invalid CI token request");
+        const rawToken = `ceci_${randomBytes(32).toString("base64url")}`;
+        const expiresAt = new Date(Date.now() + parsed.data.expires_in_days * 24 * 60 * 60 * 1000);
+        let created: StoredConnectorCiToken;
+        try {
+          created = await this.repository.createConnectorCiToken({
+            workspaceId,
+            sourceId,
+            tokenHash: sha256(rawToken),
+            name: parsed.data.name,
+            expiresAt,
+            createdBy: principal.principalId,
+          });
+        } catch (error) {
+          throw new HttpError(409, error instanceof Error ? error.message : String(error));
+        }
+        json(response, 201, { token: rawToken, metadata: connectorCiTokenPayload(created) });
+        return;
+      }
+
+      const ciTokenItemMatch = /^\/v1\/workspaces\/([^/]+)\/sources\/([^/]+)\/ci-tokens\/([^/]+)$/.exec(
+        pathname,
+      );
+      if (request.method === "DELETE" && ciTokenItemMatch) {
+        const workspaceId = decodeURIComponent(ciTokenItemMatch[1]);
+        const sourceId = decodeURIComponent(ciTokenItemMatch[2]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const revoked = await this.repository.revokeConnectorCiToken(
+          workspaceId,
+          sourceId,
+          decodeURIComponent(ciTokenItemMatch[3]),
+        );
+        if (!revoked) throw new HttpError(404, "CI token not found");
+        json(response, 200, { token: connectorCiTokenPayload(revoked) });
+        return;
+      }
+
       const sourceSyncMatch =
         /^\/v1\/workspaces\/([^/]+)\/sources\/([^/]+)\/sync$/.exec(pathname);
       if (request.method === "POST" && sourceSyncMatch) {
@@ -2176,6 +2271,60 @@ class HttpContextService {
     }
     this.webhookProcessor.notify();
     json(response, 202, { ...queued, ignored: false });
+  }
+
+  private async handleConnectorCiSync(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const token = parseBearerAuthorization(request.headers.authorization);
+    if (!token || !token.startsWith("ceci_")) {
+      response.setHeader("www-authenticate", "Bearer");
+      throw new HttpError(401, "Missing or invalid CI trigger credential");
+    }
+    const delivery = String(request.headers["x-contextengine-delivery"] ?? "").trim();
+    if (!delivery || delivery.length > 120 || !/^[A-Za-z0-9._:-]+$/.test(delivery)) {
+      throw new HttpError(400, "X-ContextEngine-Delivery is required and invalid");
+    }
+    const body = await readRequestBody(request, 32 * 1024);
+    if (body.length) {
+      try {
+        const parsed: unknown = JSON.parse(body.toString("utf8"));
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+          throw new Error();
+        }
+      } catch {
+        throw new HttpError(400, "CI trigger body must be a JSON object");
+      }
+    }
+    let queued: Awaited<ReturnType<WorkspaceRepository["authenticateCiTokenAndEnqueue"]>>;
+    try {
+      queued = await this.repository.authenticateCiTokenAndEnqueue({
+        tokenHash: sha256(token),
+        deliveryId: delivery,
+        bodyHash: sha256(body),
+      });
+    } catch (error) {
+      if (error instanceof ConnectorWebhookReplayError) {
+        throw new HttpError(409, "CI delivery id conflicts with an earlier payload");
+      }
+      if (error instanceof ConnectorCiRateLimitError) {
+        throw new HttpError(429, error.message);
+      }
+      throw error;
+    }
+    if (!queued) {
+      response.setHeader("www-authenticate", "Bearer");
+      throw new HttpError(401, "Missing or invalid CI trigger credential");
+    }
+    this.webhookProcessor.notify();
+    json(response, 202, {
+      accepted: queued.accepted,
+      duplicates: queued.duplicates,
+      ignored: false,
+      source_id: queued.token.sourceId,
+      workspace_id: queued.workspaceId,
+    });
   }
 
   private applyCors(request: IncomingMessage, response: ServerResponse): boolean {

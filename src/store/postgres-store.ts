@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -1889,6 +1889,41 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [8],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 9) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_connector_ci_tokens (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES ce_connector_sources(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+        name TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        last_used_at TIMESTAMPTZ,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        CHECK (char_length(name) BETWEEN 1 AND 100)
+      );
+      CREATE INDEX IF NOT EXISTS ce_connector_ci_tokens_source_idx
+        ON ce_connector_ci_tokens(source_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS ce_connector_ci_tokens_active_idx
+        ON ce_connector_ci_tokens(token_hash, expires_at)
+        WHERE revoked_at IS NULL;
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [9],
             );
             await client.query("COMMIT");
           } catch (error) {

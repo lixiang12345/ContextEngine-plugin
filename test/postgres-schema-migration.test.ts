@@ -221,7 +221,11 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            ORDER BY workspace_id, blob_hash`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 8 }]);
+        assert.deepEqual(marker.rows, [{ version: 9 }]);
+        const ciTokens = await schemaPool.query<{ table_name: string | null }>(
+          `SELECT to_regclass('ce_connector_ci_tokens')::text AS table_name`,
+        );
+        assert.deepEqual(ciTokens.rows, [{ table_name: "ce_connector_ci_tokens" }]);
         assert.deepEqual(grants.rows, [
           { workspace_id: workspaceId, blob_hash: referencedHash },
         ]);
@@ -253,7 +257,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await admin.query<{ version: number }>(
           `SELECT version FROM ${quotedSchema}.ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 8 }]);
+        assert.deepEqual(marker.rows, [{ version: 9 }]);
 
         const mcpSessionColumns = await admin.query<{ column_name: string }>(
           `SELECT column_name
@@ -474,7 +478,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v2'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 8 }]);
+        assert.deepEqual(marker.rows, [{ version: 9 }]);
         assert.deepEqual(source.rows, [
           {
             id: "source-v2",
@@ -632,7 +636,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v3'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 8 }]);
+        assert.deepEqual(marker.rows, [{ version: 9 }]);
         assert.deepEqual(source.rows, [
           {
             status: "syncing",
@@ -659,7 +663,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
   );
 
   it(
-    "adds durable MCP, plugins, source ACL, and webhook inbox when migrating v4 to v8",
+    "adds durable MCP, plugins, source ACL, webhook inbox, and CI tokens when migrating v4 to v9",
     { timeout: 15_000 },
     async () => {
       const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
@@ -717,7 +721,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await schemaPool.query<{ version: number }>(
           `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 8 }]);
+        assert.deepEqual(marker.rows, [{ version: 9 }]);
         await schemaPool.query(
           `INSERT INTO ce_connector_sources(
              id, workspace_id, provider, external_id, created_by
@@ -769,11 +773,11 @@ describePostgres("PostgreSQL schema migration coordination", () => {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         INSERT INTO ${quotedSchema}.ce_schema_version(singleton, version)
-        VALUES (TRUE, 9);
+        VALUES (TRUE, 10);
       `);
       await assert.rejects(
         runEnsureSchemaInFreshProcess(schemaUrl),
-        /schema version 9 is newer than this build \(8\)/,
+        /schema version 10 is newer than this build \(9\)/,
       );
     } finally {
       try {

@@ -328,6 +328,9 @@ synchronization pipeline. See
 connector, and ACL routes in the HTTP API guide.
 Embedded hosts can register additional providers through `connectorPlugins`;
 see [docs/PLUGINS.md](./docs/PLUGINS.md).
+Source-scoped CI trigger tokens let GitHub Actions, GitLab CI, and Bitbucket
+Pipelines refresh one source without receiving a workspace-wide API key; see
+the CI trigger section in [docs/HTTP_API.md](./docs/HTTP_API.md).
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).

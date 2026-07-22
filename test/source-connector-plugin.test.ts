@@ -115,6 +115,8 @@ describePostgres("source connector plugin contract", () => {
   let handle: HttpServerHandle;
   let workspaceId = "";
   let sourceId = "";
+  let memoryWorkspaceId = "";
+  let memorySourceId = "";
   let websiteVersion = 1;
   const websiteServer = createServer((request, response) => {
     if (request.url === "/robots.txt") {
@@ -257,6 +259,7 @@ describePostgres("source connector plugin contract", () => {
     });
     assert.equal(created.status, 201);
     workspaceId = (await created.json() as { workspace: { id: string } }).workspace.id;
+    memoryWorkspaceId = workspaceId;
 
     const attached = await request(`/v1/workspaces/${workspaceId}/sources/memory_docs`, {
       method: "POST",
@@ -265,6 +268,7 @@ describePostgres("source connector plugin contract", () => {
     });
     assert.equal(attached.status, 201);
     sourceId = (await attached.json() as { source: { id: string } }).source.id;
+    memorySourceId = sourceId;
     await sync();
 
     const firstSearch = await request(`/v1/workspaces/${workspaceId}/search`, {
@@ -383,5 +387,80 @@ describePostgres("source connector plugin contract", () => {
       )).status,
       404,
     );
+  });
+
+  it("issues source-scoped CI tokens with rotation, idempotency, and revocation", async () => {
+    const created = await request(`/v1/workspaces/${memoryWorkspaceId}/sources/${memorySourceId}/ci-tokens`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "GitHub Actions", expires_in_days: 30 }),
+    });
+    assert.equal(created.status, 201);
+    const payload = await created.json() as {
+      token: string;
+      metadata: { id: string; name: string };
+    };
+    assert.match(payload.token, /^ceci_[A-Za-z0-9_-]+$/);
+    assert.equal(payload.metadata.name, "GitHub Actions");
+    const listed = await request(`/v1/workspaces/${memoryWorkspaceId}/sources/${memorySourceId}/ci-tokens`);
+    assert.equal(listed.status, 200);
+    assert.doesNotMatch(await listed.text(), new RegExp(payload.token));
+
+    const trigger = (delivery: string, body = "{}") => fetch(`${handle.url}/ci/sync`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${payload.token}`,
+        "x-contextengine-delivery": delivery,
+        "content-type": "application/json",
+      },
+      body,
+    });
+    const accepted = await trigger("ci-delivery-1");
+    assert.equal(accepted.status, 202);
+    assert.deepEqual(
+      ((await accepted.json()) as { accepted: number; duplicates: number }).accepted,
+      1,
+    );
+    const duplicate = await trigger("ci-delivery-1");
+    assert.equal(duplicate.status, 202);
+    assert.equal(((await duplicate.json()) as { duplicates: number }).duplicates, 1);
+    assert.equal((await trigger("ci-delivery-1", '{"changed":true}')).status, 409);
+
+    const revoked = await request(
+      `/v1/workspaces/${memoryWorkspaceId}/sources/${memorySourceId}/ci-tokens/${payload.metadata.id}`,
+      { method: "DELETE" },
+    );
+    assert.equal(revoked.status, 200);
+    assert.equal((await trigger("ci-delivery-2")).status, 401);
+
+    const expiring = await request(
+      `/v1/workspaces/${memoryWorkspaceId}/sources/${memorySourceId}/ci-tokens`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Rotated token", expires_in_days: 1 }),
+      },
+    );
+    assert.equal(expiring.status, 201);
+    const expiringPayload = await expiring.json() as {
+      token: string;
+      metadata: { id: string };
+    };
+    await admin.query(
+      `UPDATE ${quoteIdentifier(schema)}.ce_connector_ci_tokens
+       SET expires_at = clock_timestamp() - interval '1 second'
+       WHERE id = $1`,
+      [expiringPayload.metadata.id],
+    );
+    const expiredTrigger = await fetch(`${handle.url}/ci/sync`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${expiringPayload.token}`,
+        "x-contextengine-delivery": "ci-expired",
+        "content-type": "application/json",
+      },
+      body: "{}",
+    });
+    assert.equal(expiredTrigger.status, 401);
   });
 });
