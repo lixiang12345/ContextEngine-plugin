@@ -2967,6 +2967,7 @@ class HttpContextService {
             top_k: positiveInteger.max(40).optional(),
             max_tokens: positiveInteger.optional(),
             path_prefix: z.string().min(1).max(4096).optional(),
+            packing: z.enum(["raw", "extractive"]).optional(),
           })
           .parse(await readJsonBody(request, 128 * 1024));
         const task = input.task ?? input.information_request ?? input.informationRequest;
@@ -2980,6 +2981,7 @@ class HttpContextService {
           pathPrefix: input.path_prefix,
           sourceAccess,
           diversify: true,
+          packing: input.packing,
         });
         const index = await engine.indexStatus();
         json(response, 200, {
@@ -2989,6 +2991,8 @@ class HttpContextService {
           packed_text: packed.packedText,
           estimated_tokens: packed.estimatedTokens,
           truncated: packed.truncated,
+          packing: packed.packing,
+          trace: packed.trace,
           hits: packed.hits.map(hitPayload),
         });
         return;

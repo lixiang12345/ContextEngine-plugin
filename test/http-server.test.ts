@@ -314,6 +314,15 @@ describePostgres("ContextEngine HTTP service", () => {
     const contextPayload = (await context.json()) as {
       index: { generation_id: string; indexed_revision: string };
       packed_text: string;
+      packing: string;
+      trace: {
+        intent: string;
+        channels: string[];
+        candidate_count?: number;
+        packedCount?: number;
+        generationId?: string;
+        indexedRevision?: string;
+      };
     };
     assert.equal(
       contextPayload.index.generation_id,
@@ -321,6 +330,31 @@ describePostgres("ContextEngine HTTP service", () => {
     );
     assert.equal(contextPayload.index.indexed_revision, "1");
     assert.match(contextPayload.packed_text, /requirePermission/);
+    assert.equal(contextPayload.packing, "raw");
+    assert.ok(contextPayload.trace, "context response carries a retrieval trace");
+    assert.ok(contextPayload.trace.channels.length >= 1);
+    assert.equal(
+      contextPayload.trace.generationId,
+      searchPayload.index.generation_id,
+    );
+    assert.equal(contextPayload.trace.indexedRevision, "1");
+
+    const extractiveContext = await request(
+      `/v1/workspaces/${workspaceId}/context`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          information_request: "Find requirePermission authorization checks",
+          packing: "extractive",
+        }),
+      },
+    );
+    assert.equal(extractiveContext.status, 200);
+    const extractivePayload = (await extractiveContext.json()) as {
+      packing: string;
+    };
+    assert.equal(extractivePayload.packing, "extractive");
 
     const mcpHeaders = {
       "content-type": "application/json",

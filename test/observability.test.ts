@@ -136,6 +136,11 @@ describe("observability dashboard", () => {
     assert.match(dashboard, /aria-label="Embedding base URL"/);
     assert.match(dashboard, /aria-label="Reranker base URL"/);
     assert.match(dashboard, /aria-label=\\"Copy location /);
+    // Retrieval probe can pack context and render the reproducible trace.
+    assert.match(dashboard, /id="probeView"/);
+    assert.match(dashboard, /\/context/);
+    assert.match(dashboard, /packing: view/);
+    assert.match(dashboard, /function renderTrace/);
     assert.doesNotMatch(dashboard, /<script[^>]+src=/i);
     assert.doesNotMatch(dashboard, /<link[^>]+href=["']https?:/i);
 

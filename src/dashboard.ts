@@ -257,11 +257,21 @@ export function observabilityDashboardHtml(): string {
     .latency-track { width: 100%; height: 5px; margin-top: 5px; background: #e8ebed; }
     .latency-fill { height: 100%; background: var(--info); }
     .empty { border: 1px dashed var(--line-strong); color: var(--muted); padding: 24px; text-align: center; }
-    .probe-form { display: grid; grid-template-columns: minmax(220px, 0.8fr) minmax(280px, 2fr) 95px 120px auto; gap: 8px; align-items: end; }
+    .probe-form { display: grid; grid-template-columns: minmax(200px, 0.75fr) minmax(240px, 2fr) 84px 118px 148px auto; gap: 8px; align-items: end; }
     .field { min-width: 0; }
     .field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
     .field .control { width: 100%; }
     .probe-meta { margin: 12px 0 8px; color: var(--muted); font-size: 12px; min-height: 18px; }
+    .trace-panel { display: none; margin: 4px 0 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 12px 14px; }
+    .trace-panel.visible { display: block; }
+    .trace-grid { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+    .trace-item { min-width: 0; }
+    .trace-key { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 650; letter-spacing: 0.02em; }
+    .trace-value { margin-top: 3px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .trace-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+    .trace-chip { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 9px; font-size: 11px; font-weight: 600; }
+    .trace-chip.warn { border-color: var(--warning); color: var(--warning); }
+    .packed-block { margin-top: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 13px 14px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px; line-height: 1.55; max-height: 520px; overflow-y: auto; }
     .result-list { border: 1px solid var(--line); background: var(--surface); }
     .result { padding: 13px 14px; border-bottom: 1px solid var(--line); }
     .result:last-child { border-bottom: 0; }
@@ -437,7 +447,7 @@ export function observabilityDashboardHtml(): string {
       .config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .config-panel:nth-child(2) { border-right: 0; }
       .config-panel:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
-      .probe-form { grid-template-columns: 1fr 2fr 90px 110px; }
+      .probe-form { grid-template-columns: 1fr 2fr 90px 110px 120px; }
       .probe-form .button { grid-column: 1 / -1; justify-self: start; }
     }
     @media (max-width: 760px) {
@@ -610,9 +620,11 @@ export function observabilityDashboardHtml(): string {
         <div class="field"><label for="probeQuery">Query</label><input id="probeQuery" class="control" required maxlength="20000" placeholder="Find authorization checks before access is granted"></div>
         <div class="field"><label for="probeTopK">Top K</label><input id="probeTopK" class="control" type="number" min="1" max="40" value="8"></div>
         <div class="field"><label for="probeMode">Mode</label><select id="probeMode" class="control"><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="bm25">BM25</option><option value="semantic">Semantic</option></select></div>
+        <div class="field"><label for="probeView">View</label><select id="probeView" class="control"><option value="hits">Ranked hits</option><option value="raw">Packed · raw</option><option value="extractive">Packed · extractive</option></select></div>
         <button id="probeSubmit" class="button primary" type="submit">Run search</button>
       </form>
       <div id="probeMeta" class="probe-meta" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="probeTrace" class="trace-panel" aria-live="polite"></div>
       <div id="probeResults" class="empty" aria-busy="false">No probe results yet.</div>
     </section>
   </main>
@@ -1196,37 +1208,88 @@ export function observabilityDashboardHtml(): string {
     }
   });
 
+  function renderTrace(trace) {
+    var panel = byId("probeTrace");
+    if (!trace) { panel.className = "trace-panel"; panel.innerHTML = ""; return; }
+    var channelChips = (trace.channels || []).map(function (name) {
+      return "<span class=\"trace-chip\">" + escapeHtml(name) + "</span>";
+    }).join("");
+    var degradedChips = (trace.degradedChannels || trace.degraded_channels || []).map(function (name) {
+      return "<span class=\"trace-chip warn\">" + escapeHtml(name) + "</span>";
+    }).join("");
+    var candidateCount = trace.candidateCount == null ? trace.candidate_count : trace.candidateCount;
+    var packedCount = trace.packedCount == null ? trace.packed_count : trace.packedCount;
+    var fileCount = trace.fileCount == null ? trace.file_count : trace.fileCount;
+    var generationId = trace.generationId || trace.generation_id;
+    var items = [
+      ["Intent", escapeHtml(trace.intent || "--")],
+      ["Packing", escapeHtml(trace.packing || "raw")],
+      ["Candidates", number(candidateCount) + " → " + number(packedCount) + " packed"],
+      ["Files", number(fileCount)],
+      ["Est. tokens", number(trace.estimatedTokens == null ? trace.estimated_tokens : trace.estimatedTokens) + (trace.truncated ? " · capped" : "")],
+      ["Channels", "<div class=\"trace-chips\">" + (channelChips || "<span class=\"section-note\">none</span>") + "</div>"],
+    ];
+    if (degradedChips) items.push(["Degraded", "<div class=\"trace-chips\">" + degradedChips + "</div>"]);
+    if (generationId) items.push(["Generation", "<span class=\"mono\">" + escapeHtml(String(generationId).slice(0, 12)) + "</span>"]);
+    panel.className = "trace-panel visible";
+    panel.innerHTML = "<div class=\"trace-grid\">" + items.map(function (row) {
+      return "<div class=\"trace-item\"><div class=\"trace-key\">" + row[0] + "</div><div class=\"trace-value\">" + row[1] + "</div></div>";
+    }).join("") + "</div>";
+  }
+
   byId("probeForm").addEventListener("submit", async function (event) {
     event.preventDefault();
     var workspaceId = byId("probeWorkspace").value;
     var query = byId("probeQuery").value.trim();
     if (!workspaceId || !query) return;
+    var view = byId("probeView").value;
     var button = byId("probeSubmit");
     button.disabled = true;
-    byId("probeMeta").textContent = "Searching...";
+    byId("probeMeta").textContent = view === "hits" ? "Searching..." : "Packing context...";
+    renderTrace(null);
     var started = performance.now();
     try {
-      var payload = await api("/v1/workspaces/" + encodeURIComponent(workspaceId) + "/search", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query: query, top_k: Number(byId("probeTopK").value || 8), mode: byId("probeMode").value })
-      });
-      var elapsed = performance.now() - started;
-      byId("probeMeta").textContent = payload.count + " results in " + duration(elapsed);
-      if (!payload.results.length) { byId("probeResults").className = "empty"; byId("probeResults").textContent = "No results returned."; }
-      else {
-        byId("probeResults").className = "result-list";
-        byId("probeResults").innerHTML = payload.results.map(function (result) {
-          var label = result.path + ":" + result.start_line + "-" + result.end_line;
-          return "<article class=\"result\"><div class=\"result-head\"><div class=\"result-path mono\" title=\"" + escapeHtml(label) + "\">" + escapeHtml(label) + "</div><div class=\"result-actions\"><div class=\"result-score\">" + escapeHtml(result.source) + " / " + Number(result.score || 0).toFixed(4) + "</div><button class=\"button ghost compact copy-result\" type=\"button\" data-copy=\"" + escapeHtml(label) + "\" aria-label=\"Copy location " + escapeHtml(label) + "\">Copy</button></div></div><div class=\"result-preview\">" + escapeHtml(result.preview || result.content || "") + "</div></article>";
-        }).join("");
-        Array.prototype.forEach.call(document.querySelectorAll(".copy-result"), function (button) {
-          button.addEventListener("click", function () { void copyText(button.dataset.copy || ""); });
+      if (view === "hits") {
+        var payload = await api("/v1/workspaces/" + encodeURIComponent(workspaceId) + "/search", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ query: query, top_k: Number(byId("probeTopK").value || 8), mode: byId("probeMode").value })
         });
+        var elapsed = performance.now() - started;
+        byId("probeMeta").textContent = payload.count + " results in " + duration(elapsed);
+        if (!payload.results.length) { byId("probeResults").className = "empty"; byId("probeResults").textContent = "No results returned."; }
+        else {
+          byId("probeResults").className = "result-list";
+          byId("probeResults").innerHTML = payload.results.map(function (result) {
+            var label = result.path + ":" + result.start_line + "-" + result.end_line;
+            return "<article class=\"result\"><div class=\"result-head\"><div class=\"result-path mono\" title=\"" + escapeHtml(label) + "\">" + escapeHtml(label) + "</div><div class=\"result-actions\"><div class=\"result-score\">" + escapeHtml(result.source) + " / " + Number(result.score || 0).toFixed(4) + "</div><button class=\"button ghost compact copy-result\" type=\"button\" data-copy=\"" + escapeHtml(label) + "\" aria-label=\"Copy location " + escapeHtml(label) + "\">Copy</button></div></div><div class=\"result-preview\">" + escapeHtml(result.preview || result.content || "") + "</div></article>";
+          }).join("");
+          Array.prototype.forEach.call(document.querySelectorAll(".copy-result"), function (button) {
+            button.addEventListener("click", function () { void copyText(button.dataset.copy || ""); });
+          });
+        }
+      } else {
+        var packed = await api("/v1/workspaces/" + encodeURIComponent(workspaceId) + "/context", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ information_request: query, top_k: Number(byId("probeTopK").value || 8), packing: view })
+        });
+        var packedElapsed = performance.now() - started;
+        byId("probeMeta").textContent = (packed.hits ? packed.hits.length : 0) + " passages packed in " + duration(packedElapsed);
+        renderTrace(packed.trace);
+        var text = packed.packed_text || "";
+        if (!text) { byId("probeResults").className = "empty"; byId("probeResults").textContent = "No context packed."; }
+        else {
+          byId("probeResults").className = "";
+          byId("probeResults").innerHTML = "<div class=\"result-head\" style=\"margin-bottom:8px\"><div class=\"section-note\">Packed context (" + escapeHtml(view) + ")</div><button class=\"button ghost compact copy-result\" type=\"button\" data-copy-packed=\"1\" aria-label=\"Copy packed context\">Copy all</button></div><div class=\"packed-block\">" + escapeHtml(text) + "</div>";
+          var copyPacked = byId("probeResults").querySelector("[data-copy-packed]");
+          if (copyPacked) copyPacked.addEventListener("click", function () { void copyText(text); });
+        }
       }
       setTimeout(refresh, 150);
     } catch (error) {
-      byId("probeMeta").textContent = "Search failed";
+      byId("probeMeta").textContent = view === "hits" ? "Search failed" : "Packing failed";
+      renderTrace(null);
       byId("probeResults").className = "empty";
       byId("probeResults").textContent = error.message;
     } finally { button.disabled = false; }
