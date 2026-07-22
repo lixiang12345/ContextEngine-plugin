@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Made the `extractive` packing policy pack across passages instead of stopping
+  at the first reduced block. A clean salient-line elision keeps every
+  query-relevant line, so under a tight token budget it now fits the salient
+  lines of more distinct files; only a lossy mid-content cut still ends packing.
+  This lets `extractive` carry more task-relevant evidence per budget than `raw`.
+- Added a failure-injection test for the search-races-promotion retry: when a
+  generation is promoted between a query's preflight check and its post-search
+  staleness check, the engine must refresh and retry once rather than pair hits
+  with a retired generation's provenance. The test forces that exact interleaving
+  and fails if the single retry is removed.
 - Added an optional `--trace` mode to `contextengine eval`. Each case captures a
   reproducible retrieval trace (intent, contributing channels, degraded channels,
   packed tokens, serving generation) and the report gains a `traceSummary`:

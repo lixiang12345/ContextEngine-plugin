@@ -42,7 +42,7 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 - `src/connectors/website.ts` 提供内置静态网站来源：生产默认仅允许公网 HTTPS，DNS 校验后固定连接地址，限制同源/路径/robots/重定向/页面/深度/字节，并用 ETag/Last-Modified 与有界 cursor 增量同步 HTML 文本。
 - `src/store/postgres-store.ts` 使用 copy-on-write generation、原子 promotion、revision guard 和过期 generation GC；搜索响应带 `generation_id`、source/indexed/pending revision。
 - `src/search/postgres-hybrid.ts` 为 semantic 和 rerank 设置超时、AbortSignal、独立 circuit breaker；模型失败时返回 lexical 结果并标注 `degraded_channels`。
-- `src/engine.ts` 的 context packer 按文件做多样化排序，去掉重复段落，并对 `maxTokens` 做硬字符上限；预算收紧时可选 `extractive` 策略只保留命中查询词的行（附一行上下文），把预算留给任务相关证据，`raw` 仍是默认。这是可靠的传输预算与无外部模型的抽取式压缩，但还不是模型摘要式压缩。
+- `src/engine.ts` 的 context packer 按文件做多样化排序，去掉重复段落，并对 `maxTokens` 做硬字符上限；预算收紧时可选 `extractive` 策略只保留命中查询词的行（附一行上下文），把预算留给任务相关证据，`raw` 仍是默认。抽取式的干净省略（保留所有命中行、只删无关行）是无损的，因此打包会继续纳入更多文件的命中行，而不是在第一个被裁剪的段落处停止；只有真正切断内容的硬裁剪才会停止。这是可靠的传输预算与无外部模型的抽取式压缩，但还不是模型摘要式压缩。
 - `src/dashboard.ts` 已有 dark mode、主题持久化、loading/toast、快捷检索、移动端布局、generation/revision 和 indexing 状态。
 - `src/eval/pr-harness.ts` 已提供 V1 PR 编排：固定 base/gold commit、`sanitized`/`shared-history` Git 隔离、按 repetition 的 baseline/context 成对运行、测试门禁、patch 统计和可选 agent metrics；`benchmarks/pr-history` 提供 3 个已验证 fail-to-pass 的固定历史任务。它们仍不是已完成的真实模型 benchmark。
 
@@ -75,7 +75,7 @@ Augment 产品页中的“数十万文件”“更少 token 仍达到相近 solv
 - 将 3 个内部历史任务扩展为公开、多仓库、固定 commit 的 PR task corpus，并在相同 agent、模型、提示词、预算和重复次数下运行 baseline/context 成对实验。
 - 已完成：`PackedContext.trace` 为每个响应记录 intent、contributing channel、degraded channel、candidate/packed/file 计数、packed token estimate、packing policy 以及 generation/indexed/source/pending revision 与 indexed_at，形成可比较的 retrieval trace（`context --json` 与 MCP JSON 均可读取，`context` 摘要行也会打印）。`eval --trace` 现把该 trace 落进每个 case 并汇总成 `traceSummary`（channel 命中 case 计数、degraded channel、平均 packed token、涉及的 generation），使跨运行对比可复现。下一步：把 traceSummary 纳入 CI 输出与历史归档。
 - 把字符预算升级成可插拔的 packing policy：`raw` 与 `extractive` 已实现（`extractive` 在预算收紧时保留查询相关行、省略无关行，CLI `--packing` 与 MCP `packing` 参数已贯通）；`model-summary` 仍待实现，默认仍使用无外部模型的 hard cap。
-- 增加失败注入测试：模型超时、索引 promotion 中断、旧 generation reader、重复 webhook、Blob 重放。
+- 失败注入测试已覆盖：模型超时与独立 circuit breaker（`postgres-hybrid.test.ts`）、旧 generation reader 刷新与 promotion 中途竞争重试（`generation-lifecycle.test.ts`）、重复 webhook 幂等（`connector-webhook.test.ts`）、retired generation GC 保留窗口。仍待补：Blob 重放与索引 promotion 写入中断的注入。
 
 ### P1：连接与远程部署
 

@@ -275,4 +275,43 @@ describe("context packing", () => {
 
     assert.equal(result.packing, "raw");
   });
+
+  test("extractive packing fits salient lines from more files than raw", async () => {
+    // Two files, each with a salient line buried under filler. Under a tight
+    // budget, raw fills up on the first file's leading characters and stops;
+    // extractive elides each file's unrelated lines so both salient lines fit.
+    const bulk = (tag: string) =>
+      `${"const filler = 0;\n".repeat(30)}export function ${tag}Handler(req) {\n  return handle(req);\n}\n${"const more = 1;\n".repeat(10)}`;
+    const engine = new StubContextEngine([
+      hit("first", "src/first.ts", bulk("payment"), 0.98, {
+        startLine: 1,
+        endLine: 44,
+      }),
+      hit("second", "src/second.ts", bulk("refund"), 0.95, {
+        startLine: 1,
+        endLine: 44,
+      }),
+    ]);
+
+    const raw = await engine.getTaskContext({
+      task: "paymentHandler refundHandler",
+      topK: 2,
+      maxTokens: 260,
+      packing: "raw",
+    });
+    const extractive = await engine.getTaskContext({
+      task: "paymentHandler refundHandler",
+      topK: 2,
+      maxTokens: 260,
+      packing: "extractive",
+    });
+
+    // Raw stops after the first file; extractive keeps both files' salient lines.
+    assert.equal(raw.hits.length, 1);
+    assert.ok(extractive.hits.length >= 2);
+    assert.match(extractive.packedText, /paymentHandler\(req\)/);
+    assert.match(extractive.packedText, /refundHandler\(req\)/);
+    assert.ok(extractive.trace);
+    assert.ok(extractive.trace.fileCount >= 2);
+  });
 });

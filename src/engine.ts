@@ -206,7 +206,9 @@ export class ContextEngine {
       used.push(hit);
       if (block.truncated) {
         truncated = true;
-        break;
+        // A clean salient-line elision keeps every query-relevant line, so more
+        // passages can still be packed. A hard mid-content cut is lossy — stop.
+        if (!block.elided) break;
       }
     }
 
@@ -444,6 +446,12 @@ interface IndexFreshness {
 interface FormattedHit {
   text: string;
   truncated: boolean;
+  /**
+   * True when the passage was reduced by dropping only unrelated lines
+   * (extractive elision) so every query-salient line survives. Such a block is
+   * safe to follow with more passages; a hard mid-content cut is not.
+   */
+  elided?: boolean;
 }
 
 /**
@@ -590,7 +598,11 @@ function formatHitWithinChars(
     const extractive = extractSalientContent(content, salientTerms);
     if (extractive && extractive !== content) {
       const candidate = formatHit(hit, freshness, extractive, true);
-      if (candidate.length <= maxChars) return { text: candidate, truncated: true };
+      // A clean elision keeps every salient line, so packing can continue with
+      // more passages instead of stopping at the first reduced block.
+      if (candidate.length <= maxChars) {
+        return { text: candidate, truncated: true, elided: true };
+      }
     }
   }
 
