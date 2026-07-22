@@ -402,11 +402,25 @@ Content-Type: application/json
 POST /v1/workspaces/{workspaceId}/snapshots:gc
 Content-Type: application/json
 {}
+
+GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}
+
+GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/events
+
+POST /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry
+Content-Type: application/json
+{}
 ```
 
-Import verifies the artifact before promotion and refreshes the cached engine.
-Missing configuration returns `503`; reader permissions are hidden as `404`.
-Prune and GC fail closed on malformed manifests or an active publication.
+Export, import, prune, and GC return `202` with a durable `job` payload. Poll the
+status endpoint or subscribe to its SSE endpoint; the payload includes operation,
+attempt count, phase progress, result, and a terminal error. Failed jobs can be
+requeued through the retry endpoint. A PostgreSQL claim
+uses `FOR UPDATE SKIP LOCKED` plus a lease token, so multiple HTTP instances can
+share the queue and an expired worker cannot overwrite a newer attempt. Import
+verifies the artifact before promotion and refreshes the cached engine after
+success. Missing configuration returns `503`; reader permissions are hidden as
+`404`. Prune and GC fail closed on malformed manifests or an active publication.
 
 ### 2. Plan a file manifest change
 
@@ -733,9 +747,10 @@ marker on restart and cannot claim events. Drain v7 HTTP instances before
 enabling webhook delivery; schema v8 workers can safely share the inbox and use
 `SKIP LOCKED` plus connector leases across instances.
 
-Schema v9 adds source-scoped CI credentials, and schema v10 adds optional
-validated provenance to inbox events. Older instances reject either newer
-marker; drain them before issuing CI credentials or accepting CI deliveries.
+Schema v9 adds source-scoped CI credentials, schema v10 adds optional validated
+provenance to inbox events, and schema v11 adds leased snapshot jobs. Older
+instances reject a newer marker; drain them before issuing CI credentials,
+accepting CI deliveries, or creating snapshot jobs.
 
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former

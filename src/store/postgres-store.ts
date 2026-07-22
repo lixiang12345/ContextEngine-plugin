@@ -8,7 +8,7 @@ import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
 
 export const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
@@ -2148,6 +2148,48 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [10],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 11) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      CREATE TABLE IF NOT EXISTS ce_snapshot_jobs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+        principal_id TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('export', 'import', 'prune', 'gc')),
+        snapshot_name TEXT,
+        parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+        progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+        result JSONB,
+        error TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        locked_at TIMESTAMPTZ,
+        lock_token TEXT,
+        next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS ce_snapshot_jobs_runnable_idx
+        ON ce_snapshot_jobs(status, next_attempt_at, created_at)
+        WHERE status IN ('queued', 'running');
+      CREATE INDEX IF NOT EXISTS ce_snapshot_jobs_workspace_idx
+        ON ce_snapshot_jobs(workspace_id, created_at DESC);
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [11],
             );
             await client.query("COMMIT");
           } catch (error) {

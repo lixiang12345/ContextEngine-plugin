@@ -101,3 +101,19 @@ credentials, ACLs, local root paths, source Blob objects, and binary files. It
 is a retrieval snapshot, not a source repository backup. In particular, an
 HTTP workspace imported from a snapshot can search and pack context, while
 `/file` still requires that workspace's own source Blob data.
+
+## HTTP Jobs
+
+The HTTP service keeps list and delete synchronous. Export, import, prune, and
+GC create PostgreSQL-backed jobs and return `202` immediately. The creating
+workspace owner can poll
+`GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}` or stream the same
+state from the `/events` SSE endpoint.
+
+`POST /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry` requeues a
+failed job and preserves its attempt count and audit history fields.
+
+Jobs survive process restarts. A claim increments `attempts` and assigns a new
+lease token; progress and terminal writes must present that token, which fences
+off a worker whose lease was replaced by another server instance. CLI commands
+remain synchronous for scripting and maintenance workflows.

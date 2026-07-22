@@ -334,7 +334,9 @@ the CI trigger section in [docs/HTTP_API.md](./docs/HTTP_API.md).
 Active index generations can also be shared through versioned, checksum-verified
 filesystem or S3-compatible snapshots; see [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.md).
 Configure `CONTEXTENGINE_SNAPSHOT_STORE` to expose the same owner-managed
-snapshot operations through the HTTP service.
+snapshot operations through the HTTP service. Export, import, prune, and GC
+return durable PostgreSQL job records with polling and SSE status endpoints;
+CLI snapshot commands remain synchronous.
 
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).

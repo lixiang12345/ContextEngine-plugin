@@ -4,10 +4,10 @@
 
 起始基线：`3420ddf` (`main`)
 
-当前数据库：PostgreSQL schema v10
+当前数据库：PostgreSQL schema v11
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `196/196` 通过。
+全量测试 `197/197` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -74,8 +74,13 @@ Phase 10 状态（2026-07-22）：已完成 owner 管理的 HTTP snapshot API。
 `CONTEXTENGINE_SNAPSHOT_STORE` 或注入 `SnapshotObjectStore` 后，workspace owner 可通过
 `GET/POST /v1/workspaces/{id}/snapshots`、`POST .../{name}/import`、DELETE、prune 和
 GC 路由管理快照；每 workspace 使用 hash 前缀隔离共享 bucket，reader 访问隐藏为 404，
-import 后自动刷新 engine cache，未配置 store 返回 503。下一步补跨区域复制/复制状态和
-异步 job 化，避免大仓库同步 HTTP 请求占用连接。
+import 后自动刷新 engine cache，未配置 store 返回 503。
+
+Phase 11 状态（2026-07-22）：export/import/prune/GC 已改为 PostgreSQL 持久异步任务，
+HTTP 创建返回 202，并提供 workspace-scoped 状态轮询与 SSE。schema v11 使用
+`FOR UPDATE SKIP LOCKED` claim、过期 lease 接管、attempt token fencing、阶段进度、
+终态结果与错误审计；多实例不会重复领取同一 attempt，旧 worker 也不能覆盖新终态。
+CLI 仍保留同步语义。下一步为 snapshot 增加跨区域复制目标、目标级状态与可恢复重试。
 
 ## 1. 目标
 

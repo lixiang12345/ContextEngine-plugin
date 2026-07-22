@@ -47,6 +47,7 @@ import {
   type OidcAuthenticatorOptions,
 } from "./server/http-auth.js";
 import { IndexJobRunner } from "./server/index-job-runner.js";
+import { SnapshotJobRunner } from "./server/snapshot-job-runner.js";
 import { ConnectorWebhookProcessor } from "./server/connector-webhook.js";
 import {
   testEmbeddingConnection,
@@ -74,6 +75,7 @@ import {
   ConnectorWebhookReplayError,
   ConnectorCiRateLimitError,
   type StoredIndexJob,
+  type StoredSnapshotJob,
   type StoredConnectorSource,
   type StoredConnectorCiToken,
   type StoredWorkspace,
@@ -89,11 +91,7 @@ import type { IndexGenerationStatus } from "./store/postgres-store.js";
 import { sha256 } from "./util/hash.js";
 import {
   deleteIndexSnapshot,
-  exportIndexSnapshot,
-  garbageCollectSnapshotArtifacts,
-  importIndexSnapshot,
   listIndexSnapshots,
-  pruneIndexSnapshots,
   SnapshotNotFoundError,
 } from "./snapshots/snapshot.js";
 import {
@@ -557,6 +555,23 @@ function jobPayload(job: StoredIndexJob): Record<string, unknown> {
   };
 }
 
+function snapshotJobPayload(job: StoredSnapshotJob): Record<string, unknown> {
+  return {
+    id: job.id,
+    workspace_id: job.workspaceId,
+    operation: job.operation,
+    snapshot_name: job.snapshotName,
+    status: job.status,
+    progress: job.progress,
+    result: job.result,
+    error: job.error,
+    attempts: job.attempts,
+    created_at: job.createdAt,
+    started_at: job.startedAt,
+    completed_at: job.completedAt,
+  };
+}
+
 function connectorSourcePayload(source: StoredConnectorSource): Record<string, unknown> {
   return {
     id: source.id,
@@ -899,6 +914,15 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/snapshots:gc": {
         post: { summary: "Delete unreferenced snapshot artifacts" },
       },
+      "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}": {
+        get: { summary: "Get snapshot job status" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/events": {
+        get: { summary: "Stream snapshot job state over server-sent events" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry": {
+        post: { summary: "Retry a failed snapshot job" },
+      },
       "/v1/blobs/{sha256}": {
         put: { summary: "Upload a raw source Blob after SHA-256 verification" },
       },
@@ -945,6 +969,7 @@ interface McpHttpSession {
 class HttpContextService {
   private readonly repository: WorkspaceRepository;
   private readonly runner: IndexJobRunner;
+  private readonly snapshotRunner: SnapshotJobRunner;
   private readonly connectorSync: ConnectorSyncCoordinator;
   private readonly webhookProcessor: ConnectorWebhookProcessor;
   private readonly connectorRegistry: SourceConnectorRegistry;
@@ -1055,6 +1080,15 @@ class HttpContextService {
     this.runner = new IndexJobRunner({
       repository,
       engineFor: (workspace) => this.engineFor(workspace),
+    });
+    this.snapshotRunner = new SnapshotJobRunner({
+      repository,
+      databaseUrl: this.databaseUrl,
+      storeFor: (workspaceId, requiresList) =>
+        requiresList
+          ? this.requireSnapshotListStore(workspaceId)
+          : this.requireSnapshotStore(workspaceId),
+      onImportCompleted: (workspaceId) => this.closeEngine(workspaceId),
     });
     const github = new GitHubConnectorClient({
       token: options.githubToken,
@@ -1249,6 +1283,7 @@ class HttpContextService {
       },
     );
     await service.runner.start();
+    await service.snapshotRunner.start();
     service.webhookProcessor.start();
     return service;
   }
@@ -1256,6 +1291,7 @@ class HttpContextService {
   async close(): Promise<void> {
     clearInterval(this.mcpSessionCleanupTimer);
     await this.webhookProcessor.close();
+    await this.snapshotRunner.close();
     const sessions = [...new Set(this.mcpSessions.values())];
     this.mcpSessions.clear();
     await Promise.all(
@@ -1707,7 +1743,7 @@ class HttpContextService {
       ) {
         const workspaceId = decodeURIComponent(snapshotCollectionMatch[1]);
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
-        const store = this.requireSnapshotStore(workspaceId);
+        this.requireSnapshotStore(workspaceId);
         if (request.method === "GET") {
           json(response, 200, {
             snapshots: await listIndexSnapshots(this.requireSnapshotListStore(workspaceId)),
@@ -1717,14 +1753,14 @@ class HttpContextService {
         const input = z.object({ name: snapshotNameSchema }).strict().parse(
           await readJsonBody(request, 16 * 1024),
         );
-        json(response, 201, {
-          snapshot: (await exportIndexSnapshot({
-            databaseUrl: this.databaseUrl,
-            workspaceId,
-            name: input.name,
-            store,
-          })).manifest,
+        const job = await this.repository.createSnapshotJob({
+          workspaceId,
+          principalId: principal.principalId,
+          operation: "export",
+          snapshotName: input.name,
         });
+        this.snapshotRunner.enqueue(job.id);
+        json(response, 202, { job: snapshotJobPayload(job) });
         return;
       }
 
@@ -1732,14 +1768,22 @@ class HttpContextService {
       if (request.method === "POST" && snapshotPruneMatch) {
         const workspaceId = decodeURIComponent(snapshotPruneMatch[1]);
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
-        const store = this.requireSnapshotListStore(workspaceId);
+        this.requireSnapshotListStore(workspaceId);
         const input = snapshotPruneSchema.parse(await readJsonBody(request, 16 * 1024));
         const olderThanMs = input.older_than_days === undefined
           ? undefined
           : input.older_than_days * 24 * 60 * 60 * 1000;
-        json(response, 200, {
-          deleted: await pruneIndexSnapshots({ store, keepLatest: input.keep, olderThanMs }),
+        const job = await this.repository.createSnapshotJob({
+          workspaceId,
+          principalId: principal.principalId,
+          operation: "prune",
+          parameters: {
+            keep_latest: input.keep,
+            ...(olderThanMs === undefined ? {} : { older_than_ms: olderThanMs }),
+          },
         });
+        this.snapshotRunner.enqueue(job.id);
+        json(response, 202, { job: snapshotJobPayload(job) });
         return;
       }
 
@@ -1747,11 +1791,15 @@ class HttpContextService {
       if (request.method === "POST" && snapshotGcMatch) {
         const workspaceId = decodeURIComponent(snapshotGcMatch[1]);
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
-        const store = this.requireSnapshotListStore(workspaceId);
+        this.requireSnapshotListStore(workspaceId);
         emptySnapshotRequestSchema.parse(await readJsonBody(request, 16 * 1024));
-        json(response, 200, {
-          deleted_artifacts: await garbageCollectSnapshotArtifacts(store),
+        const job = await this.repository.createSnapshotJob({
+          workspaceId,
+          principalId: principal.principalId,
+          operation: "gc",
         });
+        this.snapshotRunner.enqueue(job.id);
+        json(response, 202, { job: snapshotJobPayload(job) });
         return;
       }
 
@@ -1760,16 +1808,64 @@ class HttpContextService {
         const workspaceId = decodeURIComponent(snapshotImportMatch[1]);
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
         const name = snapshotNameSchema.parse(decodeURIComponent(snapshotImportMatch[2]));
-        const store = this.requireSnapshotStore(workspaceId);
+        this.requireSnapshotStore(workspaceId);
         emptySnapshotRequestSchema.parse(await readJsonBody(request, 16 * 1024));
-        await this.closeEngine(workspaceId);
-        const result = await importIndexSnapshot({
-          databaseUrl: this.databaseUrl,
+        const job = await this.repository.createSnapshotJob({
           workspaceId,
-          name,
-          store,
+          principalId: principal.principalId,
+          operation: "import",
+          snapshotName: name,
         });
-        json(response, 200, { snapshot: result.manifest, generation_id: result.generationId });
+        this.snapshotRunner.enqueue(job.id);
+        json(response, 202, { job: snapshotJobPayload(job) });
+        return;
+      }
+
+      const snapshotJobEventMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshot-jobs\/([^/]+)\/events$/.exec(pathname);
+      if (request.method === "GET" && snapshotJobEventMatch) {
+        const workspaceId = decodeURIComponent(snapshotJobEventMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const job = await this.repository.getSnapshotJob(
+          decodeURIComponent(snapshotJobEventMatch[2]),
+        );
+        if (!job || job.workspaceId !== workspaceId) {
+          throw new HttpError(404, "Snapshot job not found");
+        }
+        this.streamSnapshotJobEvents(request, response, job);
+        return;
+      }
+
+      const snapshotJobRetryMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshot-jobs\/([^/]+)\/retry$/.exec(pathname);
+      if (request.method === "POST" && snapshotJobRetryMatch) {
+        const workspaceId = decodeURIComponent(snapshotJobRetryMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        emptySnapshotRequestSchema.parse(await readJsonBody(request, 16 * 1024));
+        const jobId = decodeURIComponent(snapshotJobRetryMatch[2]);
+        const existing = await this.repository.getSnapshotJob(jobId);
+        if (!existing || existing.workspaceId !== workspaceId) {
+          throw new HttpError(404, "Snapshot job not found");
+        }
+        const job = await this.repository.retrySnapshotJob(jobId);
+        if (!job) throw new HttpError(409, "Only failed snapshot jobs can be retried");
+        this.snapshotRunner.enqueue(job.id);
+        json(response, 202, { job: snapshotJobPayload(job) });
+        return;
+      }
+
+      const snapshotJobMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshot-jobs\/([^/]+)$/.exec(pathname);
+      if (request.method === "GET" && snapshotJobMatch) {
+        const workspaceId = decodeURIComponent(snapshotJobMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const job = await this.repository.getSnapshotJob(
+          decodeURIComponent(snapshotJobMatch[2]),
+        );
+        if (!job || job.workspaceId !== workspaceId) {
+          throw new HttpError(404, "Snapshot job not found");
+        }
+        json(response, 200, { job: snapshotJobPayload(job) });
         return;
       }
 
@@ -3150,6 +3246,32 @@ class HttpContextService {
     };
     send(initial);
     const unsubscribe = this.runner.subscribe(initial.id, send);
+    const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 15_000);
+    request.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+      response.end();
+    });
+  }
+
+  private streamSnapshotJobEvents(
+    request: IncomingMessage,
+    response: ServerResponse,
+    initial: StoredSnapshotJob,
+  ): void {
+    response.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    const send = (job: StoredSnapshotJob): void => {
+      response.write(
+        `event: job\ndata: ${JSON.stringify({ job: snapshotJobPayload(job) })}\n\n`,
+      );
+    };
+    send(initial);
+    const unsubscribe = this.snapshotRunner.subscribe(initial.id, send);
     const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 15_000);
     request.on("close", () => {
       clearInterval(heartbeat);

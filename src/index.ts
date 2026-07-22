@@ -81,6 +81,11 @@ export {
   MissingBlobError,
   sourcePathAllowed,
 } from "./server/workspace-repository.js";
+export {
+  SnapshotJobRunner,
+  type SnapshotJobRunnerOptions,
+  type SnapshotJobListener,
+} from "./server/snapshot-job-runner.js";
 export { migrateSqliteIndex } from "./store/migrate-sqlite.js";
 export {
   createEmbeddingProvider,
@@ -192,6 +197,10 @@ export type {
 export type {
   IndexJobMode,
   IndexJobStatus,
+  SnapshotJobOperation,
+  SnapshotJobStatus,
+  StoredSnapshotJob,
+  ClaimedSnapshotJob,
   ConnectorProvider,
   ConnectorWebhookEventStatus,
   ConnectorSyncAttempt,

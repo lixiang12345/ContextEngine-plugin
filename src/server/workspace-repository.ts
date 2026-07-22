@@ -13,6 +13,8 @@ export type WorkspaceSourceMode = "blob" | "local";
 export type SyncOperation = "upsert" | "delete" | "rename";
 export type IndexJobMode = "incremental" | "rebuild";
 export type IndexJobStatus = "queued" | "running" | "succeeded" | "failed";
+export type SnapshotJobOperation = "export" | "import" | "prune" | "gc";
+export type SnapshotJobStatus = "queued" | "running" | "succeeded" | "failed";
 export type WorkspacePermission = "reader" | "writer" | "owner";
 /** Lowercase provider id registered by a SourceConnectorPlugin. */
 export type ConnectorProvider = string;
@@ -193,6 +195,29 @@ export interface StoredIndexJob {
   completedAt: string | null;
 }
 
+export interface StoredSnapshotJob {
+  id: string;
+  workspaceId: string;
+  principalId: string;
+  operation: SnapshotJobOperation;
+  snapshotName: string | null;
+  parameters: Record<string, unknown>;
+  status: SnapshotJobStatus;
+  progress: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  attempts: number;
+  lockedAt: string | null;
+  nextAttemptAt: string;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface ClaimedSnapshotJob extends StoredSnapshotJob {
+  attemptToken: string;
+}
+
 interface WorkspaceRow extends QueryResultRow {
   id: string;
   name: string;
@@ -254,6 +279,26 @@ interface JobRow extends QueryResultRow {
   progress: unknown;
   result: unknown;
   error: string | null;
+  created_at: string | Date;
+  started_at: string | Date | null;
+  completed_at: string | Date | null;
+}
+
+interface SnapshotJobRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  principal_id: string;
+  operation: SnapshotJobOperation;
+  snapshot_name: string | null;
+  parameters: unknown;
+  status: SnapshotJobStatus;
+  progress: unknown;
+  result: unknown;
+  error: string | null;
+  attempts: string | number;
+  locked_at: string | Date | null;
+  lock_token: string | null;
+  next_attempt_at: string | Date;
   created_at: string | Date;
   started_at: string | Date | null;
   completed_at: string | Date | null;
@@ -415,6 +460,27 @@ function jobFromRow(row: JobRow): StoredIndexJob {
     progress: asObject(row.progress),
     result: asObject(row.result),
     error: row.error,
+    createdAt: iso(row.created_at)!,
+    startedAt: iso(row.started_at),
+    completedAt: iso(row.completed_at),
+  };
+}
+
+function snapshotJobFromRow(row: SnapshotJobRow): StoredSnapshotJob {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    principalId: row.principal_id,
+    operation: row.operation,
+    snapshotName: row.snapshot_name,
+    parameters: asObject(row.parameters) ?? {},
+    status: row.status,
+    progress: asObject(row.progress),
+    result: asObject(row.result),
+    error: row.error,
+    attempts: Number(row.attempts),
+    lockedAt: iso(row.locked_at),
+    nextAttemptAt: iso(row.next_attempt_at)!,
     createdAt: iso(row.created_at)!,
     startedAt: iso(row.started_at),
     completedAt: iso(row.completed_at),
@@ -2669,6 +2735,196 @@ export class WorkspaceRepository {
       [jobId, message.slice(0, 4000)],
     );
     return result.rows[0] ? jobFromRow(result.rows[0]) : null;
+  }
+
+  async createSnapshotJob(input: {
+    workspaceId: string;
+    principalId: string;
+    operation: SnapshotJobOperation;
+    snapshotName?: string | null;
+    parameters?: Record<string, unknown>;
+  }): Promise<StoredSnapshotJob> {
+    const id = randomUUID();
+    const result = await this.pool.query<SnapshotJobRow>(
+      `INSERT INTO ce_snapshot_jobs(
+         id, workspace_id, principal_id, operation, snapshot_name,
+         parameters, status, progress
+       )
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'queued', $7::jsonb)
+       RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                 parameters, status, progress, result, error, attempts,
+                 locked_at, lock_token, next_attempt_at, created_at,
+                 started_at, completed_at`,
+      [
+        id,
+        input.workspaceId,
+        input.principalId,
+        input.operation,
+        input.snapshotName ?? null,
+        JSON.stringify(input.parameters ?? {}),
+        JSON.stringify({ phase: "queued" }),
+      ],
+    );
+    return snapshotJobFromRow(result.rows[0]);
+  }
+
+  async getSnapshotJob(jobId: string): Promise<StoredSnapshotJob | null> {
+    const result = await this.pool.query<SnapshotJobRow>(
+      `SELECT id, workspace_id, principal_id, operation, snapshot_name,
+              parameters, status, progress, result, error, attempts,
+              locked_at, lock_token, next_attempt_at, created_at,
+              started_at, completed_at
+       FROM ce_snapshot_jobs WHERE id = $1`,
+      [jobId],
+    );
+    return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+  }
+
+  async listQueuedSnapshotJobs(leaseMs = 5 * 60_000): Promise<StoredSnapshotJob[]> {
+    const result = await this.pool.query<SnapshotJobRow>(
+      `SELECT id, workspace_id, principal_id, operation, snapshot_name,
+              parameters, status, progress, result, error, attempts,
+              locked_at, lock_token, next_attempt_at, created_at,
+              started_at, completed_at
+       FROM ce_snapshot_jobs
+       WHERE (status = 'queued' AND next_attempt_at <= clock_timestamp())
+          OR (status = 'running' AND locked_at < clock_timestamp() - ($1::bigint * interval '1 millisecond'))
+       ORDER BY created_at, id`,
+      [leaseMs],
+    );
+    return result.rows.map(snapshotJobFromRow);
+  }
+
+  async claimSnapshotJob(
+    jobId: string,
+    leaseMs = 60_000,
+  ): Promise<ClaimedSnapshotJob | null> {
+    const client = await this.pool.connect();
+    const token = randomUUID();
+    try {
+      await client.query("BEGIN");
+      const selected = await client.query<SnapshotJobRow>(
+        `SELECT id, workspace_id, principal_id, operation, snapshot_name,
+                parameters, status, progress, result, error, attempts,
+                locked_at, lock_token, next_attempt_at, created_at,
+                started_at, completed_at
+         FROM ce_snapshot_jobs
+         WHERE id = $1
+           AND ((status = 'queued' AND next_attempt_at <= clock_timestamp())
+             OR (status = 'running' AND locked_at < clock_timestamp() - ($2::bigint * interval '1 millisecond')))
+         FOR UPDATE SKIP LOCKED`,
+        [jobId, leaseMs],
+      );
+      const row = selected.rows[0];
+      if (!row) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      const updated = await client.query<SnapshotJobRow>(
+        `UPDATE ce_snapshot_jobs
+         SET status = 'running', attempts = attempts + 1, locked_at = clock_timestamp(),
+             lock_token = $2, started_at = COALESCE(started_at, clock_timestamp()),
+             progress = $3::jsonb, error = NULL, completed_at = NULL
+         WHERE id = $1
+         RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                   parameters, status, progress, result, error, attempts,
+                   locked_at, lock_token, next_attempt_at, created_at,
+                   started_at, completed_at`,
+        [jobId, token, JSON.stringify({ phase: "starting" })],
+      );
+      await client.query("COMMIT");
+      const claimed = updated.rows[0];
+      if (!claimed) return null;
+      return { ...snapshotJobFromRow(claimed), attemptToken: token };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async updateSnapshotJobProgress(
+    jobId: string,
+    attemptToken: string,
+    progress: Record<string, unknown>,
+  ): Promise<StoredSnapshotJob | null> {
+    const result = await this.pool.query<SnapshotJobRow>(
+      `UPDATE ce_snapshot_jobs SET progress = $3::jsonb, locked_at = clock_timestamp()
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                 parameters, status, progress, result, error, attempts,
+                 locked_at, lock_token, next_attempt_at, created_at,
+                 started_at, completed_at`,
+      [jobId, attemptToken, JSON.stringify(progress)],
+    );
+    return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+  }
+
+  async renewSnapshotJobLease(
+    jobId: string,
+    attemptToken: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE ce_snapshot_jobs SET locked_at = clock_timestamp()
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'`,
+      [jobId, attemptToken],
+    );
+    return (result.rowCount ?? 0) === 1;
+  }
+
+  async completeSnapshotJob(
+    jobId: string,
+    attemptToken: string,
+    resultPayload: Record<string, unknown>,
+  ): Promise<StoredSnapshotJob | null> {
+    const result = await this.pool.query<SnapshotJobRow>(
+      `UPDATE ce_snapshot_jobs
+       SET status = 'succeeded', result = $3::jsonb, progress = $4::jsonb,
+           completed_at = clock_timestamp(), locked_at = NULL, lock_token = NULL
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                 parameters, status, progress, result, error, attempts,
+                 locked_at, lock_token, next_attempt_at, created_at,
+                 started_at, completed_at`,
+      [jobId, attemptToken, JSON.stringify(resultPayload), JSON.stringify({ phase: "done" })],
+    );
+    return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+  }
+
+  async failSnapshotJob(
+    jobId: string,
+    attemptToken: string,
+    message: string,
+  ): Promise<StoredSnapshotJob | null> {
+    const result = await this.pool.query<SnapshotJobRow>(
+      `UPDATE ce_snapshot_jobs
+       SET status = 'failed', error = $3, completed_at = clock_timestamp(),
+           locked_at = NULL, lock_token = NULL, progress = $4::jsonb
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                 parameters, status, progress, result, error, attempts,
+                 locked_at, lock_token, next_attempt_at, created_at,
+                 started_at, completed_at`,
+      [jobId, attemptToken, message.slice(0, 4000), JSON.stringify({ phase: "failed" })],
+    );
+    return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+  }
+
+  async retrySnapshotJob(jobId: string): Promise<StoredSnapshotJob | null> {
+    const result = await this.pool.query<SnapshotJobRow>(
+      `UPDATE ce_snapshot_jobs
+       SET status = 'queued', next_attempt_at = clock_timestamp(),
+           error = NULL, completed_at = NULL, locked_at = NULL,
+           lock_token = NULL, progress = $2::jsonb
+       WHERE id = $1 AND status = 'failed'
+       RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                 parameters, status, progress, result, error, attempts,
+                 locked_at, lock_token, next_attempt_at, created_at,
+                 started_at, completed_at`,
+      [jobId, JSON.stringify({ phase: "queued", retry: true })],
+    );
+    return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
   }
 
   async countSourceFiles(

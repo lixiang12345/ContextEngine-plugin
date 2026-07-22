@@ -87,6 +87,39 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       .id;
   }
 
+  async function waitSnapshotJob(
+    actor: keyof typeof tokens,
+    workspaceId: string,
+    jobId: string,
+  ): Promise<{
+    status: "succeeded" | "failed";
+    result: Record<string, unknown> | null;
+    error: string | null;
+    attempts: number;
+  }> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const response = await request(
+        actor,
+        `/v1/workspaces/${workspaceId}/snapshot-jobs/${jobId}`,
+      );
+      assert.equal(response.status, 200);
+      const job = (await response.json()) as {
+        job: {
+          status: "queued" | "running" | "succeeded" | "failed";
+          result: Record<string, unknown> | null;
+          error: string | null;
+          attempts: number;
+        };
+      };
+      if (job.job.status === "succeeded" || job.job.status === "failed") {
+        return job.job;
+      }
+      if (Date.now() >= deadline) throw new Error(`snapshot job ${jobId} timed out`);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
   it("isolates snapshots by workspace and requires owner permission", async () => {
     const aliceWorkspace = await createWorkspace("alice", "Alice snapshots");
     const bobWorkspace = await createWorkspace("bob", "Bob snapshots");
@@ -118,10 +151,22 @@ describePostgres("owner-managed snapshot HTTP API", () => {
         body: JSON.stringify({ name: "team-main" }),
       },
     );
-    assert.equal(exported.status, 201);
+    assert.equal(exported.status, 202);
+    const exportJobId = ((await exported.json()) as { job: { id: string } }).job.id;
+    const exportJob = await waitSnapshotJob("alice", aliceWorkspace, exportJobId);
+    assert.equal(exportJob.status, "succeeded", exportJob.error ?? undefined);
     assert.equal(
-      ((await exported.json()) as { snapshot: { counts: { files: number } } })
-        .snapshot.counts.files,
+      (
+        await request(
+          "bob",
+          `/v1/workspaces/${aliceWorkspace}/snapshot-jobs/${exportJobId}`,
+        )
+      ).status,
+      404,
+    );
+    assert.equal(
+      ((exportJob.result as { snapshot: { counts: { files: number } } })
+        .snapshot.counts.files),
       0,
     );
     const aliceList = await request(
@@ -134,16 +179,25 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       `/v1/workspaces/${bobWorkspace}/snapshots`,
     );
     assert.deepEqual(await bobList.json(), { snapshots: [] });
-    assert.equal(
-      (
-        await request(
-          "alice",
-          `/v1/workspaces/${aliceWorkspace}/snapshots/missing/import`,
-          { method: "POST", body: "{}" },
-        )
-      ).status,
-      404,
+    const missingImport = await request(
+      "alice",
+      `/v1/workspaces/${aliceWorkspace}/snapshots/missing/import`,
+      { method: "POST", body: "{}" },
     );
+    assert.equal(missingImport.status, 202);
+    const missingJobId = ((await missingImport.json()) as { job: { id: string } }).job.id;
+    const missingJob = await waitSnapshotJob("alice", aliceWorkspace, missingJobId);
+    assert.equal(missingJob.status, "failed");
+    assert.match(missingJob.error ?? "", /not found/i);
+    const retried = await request(
+      "alice",
+      `/v1/workspaces/${aliceWorkspace}/snapshot-jobs/${missingJobId}/retry`,
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(retried.status, 202);
+    const retryJob = await waitSnapshotJob("alice", aliceWorkspace, missingJobId);
+    assert.equal(retryJob.status, "failed");
+    assert.equal(retryJob.attempts, 2);
 
     const grant = await request(
       "alice",
@@ -166,9 +220,12 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       `/v1/workspaces/${aliceWorkspace}/snapshots/team-main/import`,
       { method: "POST", body: "{}" },
     );
-    assert.equal(imported.status, 200);
+    assert.equal(imported.status, 202);
+    const importJobId = ((await imported.json()) as { job: { id: string } }).job.id;
+    const importJob = await waitSnapshotJob("alice", aliceWorkspace, importJobId);
+    assert.equal(importJob.status, "succeeded", importJob.error ?? undefined);
     assert.match(
-      ((await imported.json()) as { generation_id: string }).generation_id,
+      (importJob.result as { generation_id: string }).generation_id,
       /^[0-9a-f-]{36}$/,
     );
     const pruned = await request(
@@ -180,8 +237,11 @@ describePostgres("owner-managed snapshot HTTP API", () => {
         body: JSON.stringify({ keep: 1 }),
       },
     );
-    assert.equal(pruned.status, 200);
-    assert.deepEqual(await pruned.json(), { deleted: [] });
+    assert.equal(pruned.status, 202);
+    const pruneJobId = ((await pruned.json()) as { job: { id: string } }).job.id;
+    const pruneJob = await waitSnapshotJob("alice", aliceWorkspace, pruneJobId);
+    assert.equal(pruneJob.status, "succeeded", pruneJob.error ?? undefined);
+    assert.deepEqual(pruneJob.result, { deleted: [] });
     const deleted = await request(
       "alice",
       `/v1/workspaces/${aliceWorkspace}/snapshots/team-main`,
@@ -193,9 +253,12 @@ describePostgres("owner-managed snapshot HTTP API", () => {
       `/v1/workspaces/${aliceWorkspace}/snapshots:gc`,
       { method: "POST", body: "{}" },
     );
-    assert.equal(gc.status, 200);
+    assert.equal(gc.status, 202);
+    const gcJobId = ((await gc.json()) as { job: { id: string } }).job.id;
+    const gcJob = await waitSnapshotJob("alice", aliceWorkspace, gcJobId);
+    assert.equal(gcJob.status, "succeeded", gcJob.error ?? undefined);
     assert.equal(
-      ((await gc.json()) as { deleted_artifacts: string[] }).deleted_artifacts
+      (gcJob.result as { deleted_artifacts: string[] }).deleted_artifacts
         .length,
       1,
     );
