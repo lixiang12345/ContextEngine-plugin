@@ -280,6 +280,10 @@ export function observabilityDashboardHtml(): string {
     .result-score { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
     .revision-cell { max-width: 150px; white-space: nowrap; }
     .result-preview { margin-top: 7px; color: #3c4850; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.5; }
+    .channel-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+    .channel-chip { display: inline-flex; align-items: baseline; gap: 4px; border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 8px; font-size: 10px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+    .channel-chip .channel-pct { font-variant-numeric: tabular-nums; color: var(--text); }
+    .channel-chip.warn { border-color: var(--warning); color: var(--warning); }
     .skeleton { color: transparent; background: #e8ebed; border-radius: 3px; animation: pulse 1.4s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: 0.55; } }
     @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
@@ -1208,6 +1212,24 @@ export function observabilityDashboardHtml(): string {
     }
   });
 
+  function renderChannels(result) {
+    var channels = result.channels;
+    if (!channels) return "";
+    var order = ["fts", "symbol", "path", "semantic", "graph", "neural"];
+    var labels = { fts: "keyword", symbol: "symbol", path: "path", semantic: "semantic", graph: "graph", neural: "neural" };
+    var chips = order.filter(function (name) {
+      return channels[name] != null;
+    }).map(function (name) {
+      var pct = Math.round(Math.max(0, Math.min(1, Number(channels[name]))) * 100);
+      return "<span class=\"channel-chip\" title=\"" + escapeHtml(name) + " score " + Number(channels[name]).toFixed(3) + "\">" + escapeHtml(labels[name] || name) + " <span class=\"channel-pct\">" + pct + "%</span></span>";
+    });
+    (result.degraded_channels || []).forEach(function (name) {
+      chips.push("<span class=\"channel-chip warn\" title=\"" + escapeHtml(name) + " channel degraded\">" + escapeHtml(name) + " degraded</span>");
+    });
+    if (!chips.length) return "";
+    return "<div class=\"channel-chips\">" + chips.join("") + "</div>";
+  }
+
   function renderTrace(trace) {
     var panel = byId("probeTrace");
     if (!trace) { panel.className = "trace-panel"; panel.innerHTML = ""; return; }
@@ -1262,7 +1284,7 @@ export function observabilityDashboardHtml(): string {
           byId("probeResults").className = "result-list";
           byId("probeResults").innerHTML = payload.results.map(function (result) {
             var label = result.path + ":" + result.start_line + "-" + result.end_line;
-            return "<article class=\"result\"><div class=\"result-head\"><div class=\"result-path mono\" title=\"" + escapeHtml(label) + "\">" + escapeHtml(label) + "</div><div class=\"result-actions\"><div class=\"result-score\">" + escapeHtml(result.source) + " / " + Number(result.score || 0).toFixed(4) + "</div><button class=\"button ghost compact copy-result\" type=\"button\" data-copy=\"" + escapeHtml(label) + "\" aria-label=\"Copy location " + escapeHtml(label) + "\">Copy</button></div></div><div class=\"result-preview\">" + escapeHtml(result.preview || result.content || "") + "</div></article>";
+            return "<article class=\"result\"><div class=\"result-head\"><div class=\"result-path mono\" title=\"" + escapeHtml(label) + "\">" + escapeHtml(label) + "</div><div class=\"result-actions\"><div class=\"result-score\">" + escapeHtml(result.source) + " / " + Number(result.score || 0).toFixed(4) + "</div><button class=\"button ghost compact copy-result\" type=\"button\" data-copy=\"" + escapeHtml(label) + "\" aria-label=\"Copy location " + escapeHtml(label) + "\">Copy</button></div></div>" + renderChannels(result) + "<div class=\"result-preview\">" + escapeHtml(result.preview || result.content || "") + "</div></article>";
           }).join("");
           Array.prototype.forEach.call(document.querySelectorAll(".copy-result"), function (button) {
             button.addEventListener("click", function () { void copyText(button.dataset.copy || ""); });

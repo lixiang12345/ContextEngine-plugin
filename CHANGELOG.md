@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Surfaced per-channel retrieval confidence in the dashboard retrieval probe.
+  Each ranked hit now shows which channels matched it (keyword/symbol/path/
+  semantic/graph/neural) with their normalized score as a percentage, plus a
+  degraded-channel marker — the "why did I get this result" breakdown, from the
+  per-channel scores the search API already returns.
 - Made the `extractive` packing policy pack across passages instead of stopping
   at the first reduced block. A clean salient-line elision keeps every
   query-relevant line, so under a tight token budget it now fits the salient

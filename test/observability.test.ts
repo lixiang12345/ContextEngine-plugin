@@ -141,6 +141,9 @@ describe("observability dashboard", () => {
     assert.match(dashboard, /\/context/);
     assert.match(dashboard, /packing: view/);
     assert.match(dashboard, /function renderTrace/);
+    // Ranked hits show a per-channel score breakdown (keyword/semantic/etc).
+    assert.match(dashboard, /function renderChannels/);
+    assert.match(dashboard, /channel-chips/);
     assert.doesNotMatch(dashboard, /<script[^>]+src=/i);
     assert.doesNotMatch(dashboard, /<link[^>]+href=["']https?:/i);
 
