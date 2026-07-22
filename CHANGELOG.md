@@ -23,7 +23,7 @@
 - Added versioned team index snapshots with MVCC-consistent paged export,
   content-addressed gzip artifacts, strict manifest/record/checksum validation,
   atomic generation import, pluggable filesystem/S3-compatible stores, and
-  safe list/delete plus unreferenced-artifact garbage collection.
+  safe list/delete, age/count retention pruning, and unreferenced-artifact GC.
 - Added schema v8 persistent connector webhook events, a provider-neutral signed
   webhook contract, GitHub HMAC-SHA256 push handling, delivery/body replay
   protection, database-clock worker recovery, bounded retries, and attempt

@@ -352,7 +352,7 @@ contextengine watch [root] [--debounce 800]   # live re-index
 contextengine serve [--auto-index]            # MCP stdio
 contextengine http [--host 127.0.0.1] [--port 8787]  # authenticated HTTP service
 contextengine ci-template <github|gitlab|bitbucket>  # print an installable CI workflow
-contextengine snapshot export|import|list|delete|gc [name] [--store path|s3://bucket/prefix]
+contextengine snapshot export|import|list|delete|prune|gc [name] [--store path|s3://bucket/prefix]
 contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
 ```

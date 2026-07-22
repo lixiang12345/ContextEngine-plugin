@@ -15,6 +15,7 @@ contextengine snapshot import team-main --root /srv/copy
 contextengine snapshot list --root /srv/repo
 contextengine snapshot delete team-main --root /srv/repo
 contextengine snapshot gc --root /srv/repo
+contextengine snapshot prune --keep 3 --older-than-days 30 --root /srv/repo
 ```
 
 For an existing HTTP workspace, use its id instead of the local root namespace:
@@ -45,6 +46,10 @@ Optional server-side encryption settings are
 content-addressed artifacts that are no longer referenced by any valid
 manifest. GC fails closed when a manifest is unreadable or invalid, so damaged
 metadata cannot cause a still-needed artifact to be deleted.
+
+`snapshot prune` can retain the newest `--keep` snapshots, enforce
+`--older-than-days`, or combine both so a snapshot must cross both boundaries
+before deletion. It fails on malformed manifests.
 
 ## Publication Model
 

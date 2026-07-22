@@ -12,6 +12,7 @@ import {
   garbageCollectSnapshotArtifacts,
   importIndexSnapshot,
   listIndexSnapshots,
+  pruneIndexSnapshots,
 } from "../src/snapshots/snapshot.js";
 import { PostgresStore } from "../src/store/postgres-store.js";
 
@@ -147,7 +148,18 @@ describePostgres("portable index snapshots", () => {
     assert.equal(await rejected.chunkCount(), 0);
     await rejected.close();
 
-    await deleteIndexSnapshot({ name: "team-main", store: objectStore });
+    await exportIndexSnapshot({
+      databaseUrl: schemaUrl,
+      workspaceId: sourceWorkspace,
+      name: "team-new",
+      store: objectStore,
+    });
+    assert.deepEqual(
+      await pruneIndexSnapshots({ store: objectStore, keepLatest: 1 }),
+      ["team-main"],
+    );
+    assert.deepEqual(await listIndexSnapshots(objectStore), ["team-new"]);
+    await deleteIndexSnapshot({ name: "team-new", store: objectStore });
     assert.deepEqual(await listIndexSnapshots(objectStore), []);
     assert.deepEqual(await garbageCollectSnapshotArtifacts(objectStore), [
       exported.manifest.artifact.key,

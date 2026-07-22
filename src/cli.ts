@@ -12,6 +12,7 @@ import {
   garbageCollectSnapshotArtifacts,
   importIndexSnapshot,
   listIndexSnapshots,
+  pruneIndexSnapshots,
 } from "./snapshots/snapshot.js";
 import type { SnapshotObjectStore } from "./snapshots/object-store.js";
 
@@ -103,6 +104,30 @@ snapshot
   .action(async (opts: Omit<SnapshotCliOptions, "workspaceId">) => {
     const root = path.resolve(opts.root);
     console.log(JSON.stringify(await garbageCollectSnapshotArtifacts(snapshotStore(opts.store, root)), null, 2));
+  });
+
+snapshot
+  .command("prune")
+  .description("Delete old snapshots by age while retaining the newest snapshots")
+  .option("-r, --root <dir>", "local workspace root", process.cwd())
+  .option("--store <location>", "directory or s3://bucket/prefix")
+  .option("--keep <count>", "number of newest snapshots to retain", "0")
+  .option("--older-than-days <days>", "delete snapshots at least this old")
+  .action(async (opts: Omit<SnapshotCliOptions, "workspaceId"> & { keep: string; olderThanDays?: string }) => {
+    const root = path.resolve(opts.root);
+    const keepLatest = Number(opts.keep);
+    const olderThanMs = opts.olderThanDays === undefined
+      ? undefined
+      : Number(opts.olderThanDays) * 24 * 60 * 60 * 1000;
+    console.log(JSON.stringify(
+      await pruneIndexSnapshots({
+        store: snapshotStore(opts.store, root),
+        keepLatest,
+        olderThanMs,
+      }),
+      null,
+      2,
+    ));
   });
 
 program

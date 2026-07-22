@@ -127,6 +127,59 @@ export async function garbageCollectSnapshotArtifacts(
   return deleted.sort();
 }
 
+export async function pruneIndexSnapshots(options: {
+  store: SnapshotObjectStore;
+  keepLatest?: number;
+  olderThanMs?: number;
+}): Promise<string[]> {
+  const keepLatest = options.keepLatest ?? 0;
+  if (!Number.isInteger(keepLatest) || keepLatest < 0 || keepLatest > 10_000) {
+    throw new Error("Snapshot keepLatest must be an integer from 0 to 10000");
+  }
+  if (options.olderThanMs === undefined && keepLatest === 0) {
+    throw new Error("Snapshot prune requires keepLatest or olderThanMs");
+  }
+  if (
+    options.olderThanMs !== undefined &&
+    (!Number.isFinite(options.olderThanMs) || options.olderThanMs < 0)
+  ) {
+    throw new Error("Snapshot olderThanMs must be non-negative");
+  }
+  if (!options.store.list)
+    throw new Error("Snapshot object store does not support listing");
+  const manifests = await Promise.all(
+    (await listIndexSnapshots(options.store)).map(async (name) => ({
+      name,
+      manifest: manifestSchema.parse(
+        JSON.parse(
+          await readObject(
+            options.store,
+            `snapshots/${name}/manifest.json`,
+            MAX_MANIFEST_BYTES,
+          ),
+        ),
+      ),
+    })),
+  );
+  manifests.sort((left, right) =>
+    right.manifest.created_at.localeCompare(left.manifest.created_at),
+  );
+  const cutoff =
+    options.olderThanMs === undefined ? null : Date.now() - options.olderThanMs;
+  const deleted: string[] = [];
+  for (let index = 0; index < manifests.length; index++) {
+    const entry = manifests[index];
+    const beyondKeep = index >= keepLatest;
+    const beyondAge =
+      cutoff === null || Date.parse(entry.manifest.created_at) <= cutoff;
+    if (beyondKeep && beyondAge) {
+      await deleteIndexSnapshot({ name: entry.name, store: options.store });
+      deleted.push(entry.name);
+    }
+  }
+  return deleted.sort();
+}
+
 export async function exportIndexSnapshot(options: {
   databaseUrl: string;
   workspaceId: string;
