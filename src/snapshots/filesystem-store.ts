@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
@@ -45,6 +45,20 @@ export class FilesystemSnapshotStore implements SnapshotObjectStore {
     await rm(this.resolveKey(key), { force: true });
   }
 
+  async list(prefix = ""): Promise<string[]> {
+    const safePrefix = prefix
+      ? validateSnapshotObjectKey(
+          `${prefix.replace(/\/+$/, "")}/placeholder`,
+        ).replace(/\/placeholder$/, "")
+      : "";
+    const directory = safePrefix ? this.resolveKey(safePrefix) : this.root;
+    const output: string[] = [];
+    await walk(directory, this.root, output);
+    return output.filter(
+      (key) => !safePrefix || key.startsWith(`${safePrefix}/`),
+    );
+  }
+
   private resolveKey(key: string): string {
     const validated = validateSnapshotObjectKey(key);
     const resolved = path.resolve(this.root, ...validated.split("/"));
@@ -55,5 +69,27 @@ export class FilesystemSnapshotStore implements SnapshotObjectStore {
       throw new Error(`Snapshot object escapes store root: ${key}`);
     }
     return resolved;
+  }
+}
+
+async function walk(
+  directory: string,
+  root: string,
+  output: string[],
+): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) await walk(absolute, root, output);
+    else if (entry.isFile()) {
+      output.push(path.relative(root, absolute).split(path.sep).join("/"));
+    }
   }
 }

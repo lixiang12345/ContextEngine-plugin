@@ -26,6 +26,9 @@ describe("snapshot object stores", () => {
       await streamText(await store.get("snapshots/team/manifest.json")),
       "manifest",
     );
+    assert.deepEqual(await store.list("snapshots"), [
+      "snapshots/team/manifest.json",
+    ]);
     await assert.rejects(
       store.put("../escape", Readable.from(["bad"])),
       /Invalid snapshot object key/,
@@ -47,6 +50,13 @@ describe("snapshot object stores", () => {
         if (command.constructor.name === "GetObjectCommand") {
           return { Body: Readable.from(["body"]) };
         }
+        if (command.constructor.name === "ListObjectsV2Command") {
+          return {
+            Contents: [
+              { Key: "contextengine/shared/snapshots/team/manifest.json" },
+            ],
+          };
+        }
         return {};
       },
     };
@@ -62,10 +72,18 @@ describe("snapshot object stores", () => {
       checksumSha256: "00".repeat(32),
     });
     assert.equal(await streamText(await store.get("objects/a")), "body");
+    assert.deepEqual(await store.list("snapshots"), [
+      "snapshots/team/manifest.json",
+    ]);
     await store.delete("objects/a");
     assert.deepEqual(
       commands.map((command) => command.constructor.name),
-      ["PutObjectCommand", "GetObjectCommand", "DeleteObjectCommand"],
+      [
+        "PutObjectCommand",
+        "GetObjectCommand",
+        "ListObjectsV2Command",
+        "DeleteObjectCommand",
+      ],
     );
     assert.equal(commands[0].input.Bucket, "team-indexes");
     assert.equal(commands[0].input.Key, "contextengine/shared/objects/a");
@@ -75,6 +93,7 @@ describe("snapshot object stores", () => {
       commands[0].input.ChecksumSHA256,
       Buffer.alloc(32).toString("base64"),
     );
+    assert.equal(commands[2].input.Prefix, "contextengine/shared/snapshots/");
   });
 
   it("rejects unsafe S3 configuration", () => {

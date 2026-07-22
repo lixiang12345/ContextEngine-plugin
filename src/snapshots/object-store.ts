@@ -16,6 +16,8 @@ export interface SnapshotObjectStore {
   ): Promise<void>;
   get(key: string): Promise<Readable>;
   delete(key: string): Promise<void>;
+  /** Optional listing capability used by lifecycle and garbage collection. */
+  list?(prefix?: string): Promise<string[]>;
 }
 
 export function validateSnapshotObjectKey(key: string): string {

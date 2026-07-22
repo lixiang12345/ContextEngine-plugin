@@ -6,7 +6,13 @@ import { ContextEngine } from "./engine.js";
 import { renderCiTemplate, type CiTemplateProvider } from "./ci/templates.js";
 import { FilesystemSnapshotStore } from "./snapshots/filesystem-store.js";
 import { S3SnapshotStore } from "./snapshots/s3-store.js";
-import { exportIndexSnapshot, importIndexSnapshot } from "./snapshots/snapshot.js";
+import {
+  deleteIndexSnapshot,
+  exportIndexSnapshot,
+  garbageCollectSnapshotArtifacts,
+  importIndexSnapshot,
+  listIndexSnapshots,
+} from "./snapshots/snapshot.js";
 import type { SnapshotObjectStore } from "./snapshots/object-store.js";
 
 loadDotEnv();
@@ -67,6 +73,36 @@ snapshot
       store: snapshotStore(opts.store, root),
     });
     console.log(JSON.stringify(result, null, 2));
+  });
+
+snapshot
+  .command("list")
+  .option("-r, --root <dir>", "local workspace root", process.cwd())
+  .option("--store <location>", "directory or s3://bucket/prefix")
+  .action(async (opts: Omit<SnapshotCliOptions, "workspaceId">) => {
+    const root = path.resolve(opts.root);
+    console.log(JSON.stringify(await listIndexSnapshots(snapshotStore(opts.store, root)), null, 2));
+  });
+
+snapshot
+  .command("delete")
+  .argument("<name>", "snapshot name")
+  .option("-r, --root <dir>", "local workspace root", process.cwd())
+  .option("--store <location>", "directory or s3://bucket/prefix")
+  .action(async (name: string, opts: Omit<SnapshotCliOptions, "workspaceId">) => {
+    const root = path.resolve(opts.root);
+    await deleteIndexSnapshot({ name, store: snapshotStore(opts.store, root) });
+    console.log(JSON.stringify({ deleted: name }));
+  });
+
+snapshot
+  .command("gc")
+  .description("Delete unreferenced content-addressed snapshot artifacts")
+  .option("-r, --root <dir>", "local workspace root", process.cwd())
+  .option("--store <location>", "directory or s3://bucket/prefix")
+  .action(async (opts: Omit<SnapshotCliOptions, "workspaceId">) => {
+    const root = path.resolve(opts.root);
+    console.log(JSON.stringify(await garbageCollectSnapshotArtifacts(snapshotStore(opts.store, root)), null, 2));
   });
 
 program

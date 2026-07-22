@@ -333,7 +333,7 @@ contextengine watch [root] [--debounce 800]   # 实时重建索引
 contextengine serve [--auto-index]            # MCP stdio
 contextengine http [--host 127.0.0.1] [--port 8787]  # 带鉴权 HTTP 服务
 contextengine ci-template <github|gitlab|bitbucket>  # 输出可安装 CI workflow
-contextengine snapshot export|import <name> [--store path|s3://bucket/prefix]
+contextengine snapshot export|import|list|delete|gc [name] [--store path|s3://bucket/prefix]
 contextengine eval [--self | --cases file.json] [--reindex]
 contextengine profile list|add|use …
 ```

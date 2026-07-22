@@ -24,12 +24,12 @@ ContextEngine 的明确优势仍然成立：MIT、可自托管、可离线运行
 | 混合/语义检索 | 官方强调语义理解、代码关系和任务相关上下文；具体模型实现未公开 | PostgreSQL FTS、symbol/path、pgvector、RRF、MMR、可选 neural rerank；模型 BYO | 高：检索模型质量与大规模验证不足 |
 | 多仓库/工作区上下文 | IDE 可添加额外仓库和文件夹，并显示同步状态 | `CONTEXTENGINE_EXTRA_ROOTS`、profiles、HTTP workspace 与 revision/generation 状态 | 中：没有 IDE 活跃文件/编辑状态上下文 |
 | 历史和关系 | 官方宣传 commit history、codebase patterns、服务依赖和跨 repo 关系 | git commit chunks、symbol/import graph expansion | 中到高：缺跨仓库关系图和更深的 lineage |
-| Connectors | 官方提供 GitHub/GitLab/Bitbucket、网站、webhook、GitHub Actions、S3，以及 custom indexer/client/store | provider-neutral `SourceConnectorPlugin`、内置四类来源、schema v10 CI trigger/provenance，以及可插拔 team snapshot store（filesystem/S3-compatible） | 低到中：缺 snapshot 托管管理 API |
+| Connectors | 官方提供 GitHub/GitLab/Bitbucket、网站、webhook、GitHub Actions、S3，以及 custom indexer/client/store | provider-neutral `SourceConnectorPlugin`、内置四类来源、schema v10 CI trigger/provenance，以及可插拔 team snapshot store（filesystem/S3-compatible） | 低到中：缺 snapshot 托管 HTTP API |
 | SDK / 自定义来源 | `DirectContext` 可把 API、数据库、memory、磁盘内容加入索引并保存状态 | TypeScript `ContextEngine` API；输入主要是本地树或 HTTP Blob | 中到高 |
 | 规则和团队知识 | CLI 支持 `AGENTS.md`、`CLAUDE.md`、`.augment/rules`、用户规则和 agent-requested 规则 | 仓库可读取代码/文档，但没有规则解析、优先级和持久化 memory 层 | 高 |
 | 权限 | Auggie/Cosmos 支持 allow/deny、脚本或 webhook policy、工具级匹配和审计语义 | API Key/OIDC principal、workspace ACL、schema v7 source/path ACL、local-root allowlist、模型 URL SSRF 防护、路径边界校验 | 中到高：缺 connector 权限快照、外部策略 webhook 和完整审计流 |
 | 自动更新 | Remote default branch 随 push 更新；Connectors 提供 webhook/GitHub Actions | 本地 watcher、签名 GitHub/GitLab/Bitbucket push webhook、可安装 source-scoped CI workflow、CI provenance 与 HTTP sync/index jobs | 低：缺托管安装 API |
-| 团队索引共享 | 官方文档给出 S3 store/team sharing | 可共享 PostgreSQL workspace；版本化 snapshot 支持 content-addressed gzip、checksum、atomic generation import、filesystem/S3-compatible store | 低到中：缺 list/delete、保留/GC 与跨区域复制策略 |
+| 团队索引共享 | 官方文档给出 S3 store/team sharing | 可共享 PostgreSQL workspace；版本化 snapshot 支持 content-addressed gzip、checksum、atomic generation import、filesystem/S3-compatible store 和安全 list/delete/GC | 低到中：缺自动保留策略与跨区域复制 |
 | 评测 | Augment 公开过端到端 PR 评测和 token/tool-call 叙述 | 有 Recall/MRR/nDCG、多仓库脚本、重复成对 `eval-pr` 和 3 个固定历史任务 | 高：缺公共大样本 corpus、受控真实模型结果和可比结论 |
 
 ## 当前实现核对
@@ -79,7 +79,7 @@ Augment 产品页中的“数十万文件”“更少 token 仍达到相近 solv
 
 ### P1：连接与远程部署
 
-- provider-neutral connector interface、GitHub/GitLab/Bitbucket 与静态网站已完成；schema v10 source-scoped CI trigger、严格 CI provenance 与三平台可安装 workflow 已完成；team snapshot 已提供 filesystem/S3-compatible store、完整性校验与 generation 原子导入，下一步补生命周期管理 API。
+- provider-neutral connector interface、GitHub/GitLab/Bitbucket 与静态网站已完成；schema v10 source-scoped CI trigger、严格 CI provenance 与三平台可安装 workflow 已完成；team snapshot 已提供 filesystem/S3-compatible store、完整性校验、generation 原子导入与 list/delete/GC，下一步补自动保留和托管管理 API。
 - 签名校验、幂等 event id 和持久化队列已完成；继续把 GitHub Actions 作为无常驻服务的备选，并增加其他 provider adapter。
 - Remote MCP 的 CORS allowlist 和 OAuth/OIDC 已完成；如果未来需要 GET/SSE 或 server-initiated notification，再增加外部 event store 或带内部转发的 owner lease。
 - generation GC 增加空间指标、失败重试和跨进程 job lease；对超大 monorepo 做分片/分区压力测试。

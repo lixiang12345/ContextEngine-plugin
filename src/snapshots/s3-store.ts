@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
   type S3ClientConfig,
@@ -107,6 +108,42 @@ export class S3SnapshotStore implements SnapshotObjectStore {
         Key: this.key(key),
       }),
     );
+  }
+
+  async list(prefix = ""): Promise<string[]> {
+    const normalized = prefix.replace(/\/+$/, "");
+    const listedPrefix = normalized
+      ? `${this.key(normalized)}/`
+      : `${this.prefix}/`;
+    const output: string[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const result = (await this.client.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: listedPrefix,
+          ContinuationToken: continuationToken,
+        }),
+      )) as {
+        Contents?: Array<{ Key?: string }>;
+        IsTruncated?: boolean;
+        NextContinuationToken?: string;
+      };
+      for (const item of result.Contents ?? []) {
+        if (item.Key?.startsWith(`${this.prefix}/`)) {
+          output.push(item.Key.slice(this.prefix.length + 1));
+        }
+      }
+      if (result.IsTruncated && !result.NextContinuationToken) {
+        throw new Error(
+          "S3 snapshot listing was truncated without a continuation token",
+        );
+      }
+      continuationToken = result.IsTruncated
+        ? result.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+    return output;
   }
 
   private key(key: string): string {

@@ -56,6 +56,9 @@ export type {
 export {
   exportIndexSnapshot,
   importIndexSnapshot,
+  listIndexSnapshots,
+  deleteIndexSnapshot,
+  garbageCollectSnapshotArtifacts,
   SNAPSHOT_FORMAT_VERSION,
 } from "./snapshots/snapshot.js";
 export type {

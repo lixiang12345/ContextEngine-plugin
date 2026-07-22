@@ -12,6 +12,9 @@ The default store is `<root>/.contextengine/snapshots`:
 ```bash
 contextengine snapshot export team-main --root /srv/repo
 contextengine snapshot import team-main --root /srv/copy
+contextengine snapshot list --root /srv/repo
+contextengine snapshot delete team-main --root /srv/repo
+contextengine snapshot gc --root /srv/repo
 ```
 
 For an existing HTTP workspace, use its id instead of the local root namespace:
@@ -37,6 +40,11 @@ export CONTEXTENGINE_S3_FORCE_PATH_STYLE=true
 Optional server-side encryption settings are
 `CONTEXTENGINE_S3_SSE=AES256` or `CONTEXTENGINE_S3_SSE=aws:kms` with
 `CONTEXTENGINE_S3_KMS_KEY_ID`.
+
+`snapshot delete` removes only the named manifest. Run `snapshot gc` to remove
+content-addressed artifacts that are no longer referenced by any valid
+manifest. GC fails closed when a manifest is unreadable or invalid, so damaged
+metadata cannot cause a still-needed artifact to be deleted.
 
 ## Publication Model
 

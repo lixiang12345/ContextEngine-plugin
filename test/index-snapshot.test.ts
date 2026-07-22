@@ -7,8 +7,11 @@ import { Pool } from "pg";
 import { after, before, describe, it } from "node:test";
 import { FilesystemSnapshotStore } from "../src/snapshots/filesystem-store.js";
 import {
+  deleteIndexSnapshot,
   exportIndexSnapshot,
+  garbageCollectSnapshotArtifacts,
   importIndexSnapshot,
+  listIndexSnapshots,
 } from "../src/snapshots/snapshot.js";
 import { PostgresStore } from "../src/store/postgres-store.js";
 
@@ -100,6 +103,7 @@ describePostgres("portable index snapshots", () => {
     assert.equal(exported.manifest.counts.chunks, 1);
     assert.equal(exported.manifest.counts.embeddings, 1);
     assert.doesNotMatch(JSON.stringify(exported.manifest), /private\/source/);
+    assert.deepEqual(await listIndexSnapshots(objectStore), ["team-main"]);
 
     const imported = await importIndexSnapshot({
       databaseUrl: schemaUrl,
@@ -142,5 +146,12 @@ describePostgres("portable index snapshots", () => {
     });
     assert.equal(await rejected.chunkCount(), 0);
     await rejected.close();
+
+    await deleteIndexSnapshot({ name: "team-main", store: objectStore });
+    assert.deepEqual(await listIndexSnapshots(objectStore), []);
+    assert.deepEqual(await garbageCollectSnapshotArtifacts(objectStore), [
+      exported.manifest.artifact.key,
+    ]);
+    assert.deepEqual(await garbageCollectSnapshotArtifacts(objectStore), []);
   });
 });

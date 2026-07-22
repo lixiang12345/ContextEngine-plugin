@@ -64,6 +64,69 @@ export interface SnapshotImportResult {
   generationId: string;
 }
 
+export async function listIndexSnapshots(
+  store: SnapshotObjectStore,
+): Promise<string[]> {
+  if (!store.list)
+    throw new Error("Snapshot object store does not support listing");
+  const names = new Set<string>();
+  for (const key of await store.list("snapshots")) {
+    const match =
+      /^snapshots\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/manifest\.json$/.exec(
+        key,
+      );
+    if (match) names.add(match[1]);
+  }
+  return [...names].sort();
+}
+
+export async function deleteIndexSnapshot(options: {
+  name: string;
+  store: SnapshotObjectStore;
+}): Promise<void> {
+  const name = snapshotNameSchema.parse(options.name);
+  await options.store.delete(`snapshots/${name}/manifest.json`);
+}
+
+/** Remove unreferenced content-addressed artifacts after snapshot deletion. */
+export async function garbageCollectSnapshotArtifacts(
+  store: SnapshotObjectStore,
+): Promise<string[]> {
+  if (!store.list)
+    throw new Error("Snapshot object store does not support listing");
+  const referenced = new Set<string>();
+  for (const name of await listIndexSnapshots(store)) {
+    try {
+      const manifest = manifestSchema.parse(
+        JSON.parse(
+          await readObject(
+            store,
+            `snapshots/${name}/manifest.json`,
+            MAX_MANIFEST_BYTES,
+          ),
+        ),
+      );
+      referenced.add(manifest.artifact.key);
+    } catch (error) {
+      throw new Error(
+        `Cannot garbage collect while snapshot ${name} has an invalid manifest`,
+        {
+          cause: error,
+        },
+      );
+    }
+  }
+  const deleted: string[] = [];
+  for (const key of await store.list("objects/sha256")) {
+    if (!/^objects\/sha256\/[0-9a-f]{64}\.ndjson\.gz$/.test(key)) continue;
+    if (!referenced.has(key)) {
+      await store.delete(key);
+      deleted.push(key);
+    }
+  }
+  return deleted.sort();
+}
+
 export async function exportIndexSnapshot(options: {
   databaseUrl: string;
   workspaceId: string;
