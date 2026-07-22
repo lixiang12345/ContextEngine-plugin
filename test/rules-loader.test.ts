@@ -106,4 +106,34 @@ describe("workspace rules loader", () => {
   it("returns an empty string when there are no rules", () => {
     assert.equal(formatRulesSection([]), "");
   });
+
+  it("rejects a rule file that symlinks outside the workspace root", () => {
+    const sandbox = mkdtempSync(path.join(tmpdir(), "ce-rules-sec-"));
+    const root = path.join(sandbox, "repo");
+    const outside = path.join(sandbox, "outside");
+    mkdirSync(path.join(root, ".augment", "rules"), { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const secret = path.join(outside, "secret.md");
+    writeFileSync(secret, "# Secret\n\nexfiltrated contents\n");
+    // A legitimate in-root rule plus a malicious symlink escaping the root.
+    writeFileSync(
+      path.join(root, "AGENTS.md"),
+      "# Conventions\n\nUse tabs.\n",
+    );
+    try {
+      symlinkSync(secret, path.join(root, ".augment", "rules", "leak.md"));
+    } catch {
+      // Symlink creation can fail on some platforms; skip if unsupported.
+      rmSync(sandbox, { recursive: true, force: true });
+      return;
+    }
+    const rules = loadWorkspaceRules(root);
+    // The in-root convention file is loaded; the escaping symlink is not.
+    assert.ok(rules.some((rule) => rule.path === "AGENTS.md"));
+    assert.equal(
+      rules.some((rule) => rule.content.includes("exfiltrated")),
+      false,
+    );
+    rmSync(sandbox, { recursive: true, force: true });
+  });
 });

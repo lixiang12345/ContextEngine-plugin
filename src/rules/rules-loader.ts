@@ -1,5 +1,5 @@
 import path from "node:path";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { readTextFile } from "../util/fs.js";
 
 /**
@@ -60,9 +60,22 @@ export function loadWorkspaceRules(
   const rules: WorkspaceRule[] = [];
   const seen = new Set<string>();
 
+  // Canonicalize the root once so every rule file can be checked against it.
+  // A malicious repo can plant a rule file that is a symlink to a secret
+  // outside the workspace (e.g. ~/.ssh/id_rsa); reading it would leak the
+  // target into packed context. Mirror the realpath containment discipline
+  // that getFileContext already enforces for on-demand file reads.
+  const absoluteRoot = path.resolve(root);
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync.native(absoluteRoot);
+  } catch {
+    return [];
+  }
+
   for (const fileName of ROOT_RULE_FILES) {
-    const abs = path.join(root, fileName);
-    const rule = readRuleFile(abs, fileName, maxBytes, "always");
+    const abs = path.join(absoluteRoot, fileName);
+    const rule = readRuleFile(abs, fileName, maxBytes, "always", canonicalRoot);
     if (rule && !seen.has(rule.path)) {
       seen.add(rule.path);
       rules.push(rule);
@@ -70,11 +83,17 @@ export function loadWorkspaceRules(
   }
 
   for (const dir of RULE_DIRECTORIES) {
-    const absDir = path.join(root, dir);
+    const absDir = path.join(absoluteRoot, dir);
     for (const entry of listRuleFiles(absDir)) {
       const rel = path.join(dir, entry);
-      const abs = path.join(root, rel);
-      const rule = readRuleFile(abs, rel, maxBytes, "agent-requested");
+      const abs = path.join(absoluteRoot, rel);
+      const rule = readRuleFile(
+        abs,
+        rel,
+        maxBytes,
+        "agent-requested",
+        canonicalRoot,
+      );
       if (rule && !seen.has(rule.path)) {
         seen.add(rule.path);
         rules.push(rule);
@@ -129,9 +148,19 @@ function readRuleFile(
   relPath: string,
   maxBytes: number,
   defaultScope: WorkspaceRule["scope"],
+  canonicalRoot: string,
 ): WorkspaceRule | null {
   if (!existsSync(abs)) return null;
-  const raw = readTextFile(abs);
+  // Resolve the real path and reject anything that escapes the workspace root
+  // (e.g. a rule file that is a symlink to a secret elsewhere on disk).
+  let canonicalFile: string;
+  try {
+    canonicalFile = realpathSync.native(abs);
+  } catch {
+    return null;
+  }
+  if (!isPathWithin(canonicalRoot, canonicalFile)) return null;
+  const raw = readTextFile(canonicalFile);
   if (raw === null) return null;
   const bounded = raw.length > maxBytes ? raw.slice(0, maxBytes) : raw;
   const { body, alwaysApply } = stripFrontmatter(bounded);
@@ -171,4 +200,15 @@ function stripFrontmatter(text: string): {
     if (match) alwaysApply = match[1].toLowerCase() === "true";
   }
   return { body: rest, alwaysApply };
+}
+
+/** True when `candidate` is the root itself or nested within it. */
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
 }

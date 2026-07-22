@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Hardened the workspace rules loader against symlink escape. Rule files are now
+  canonicalized with `realpathSync` and rejected when their real path falls
+  outside the workspace root, mirroring the containment discipline `getFileContext`
+  already enforces. Prevents a malicious repo from planting a rule file that
+  symlinks to a secret elsewhere on disk (e.g. `~/.ssh/id_rsa`) and leaking its
+  contents into packed context.
 - Scoped the workspace rules scan by source mode over HTTP. Blob-backed
   workspaces have a synthetic root that never holds `AGENTS.md` / `.augment/rules`
   files, so `POST /context` no longer runs a per-request rules disk scan for them
