@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Updated `COMPARISON.md` to reflect shipped capability: added honest
+  "Context curation / packing" and "Retrieval transparency" rows to the feature
+  table, and corrected the roadmap so extractive packing with explicit token
+  budgets is marked shipped (model-backed summarization stays deliberately
+  deferred to preserve exact path+line+content provenance).
+
 - Added a `--summary` flag to `contextengine eval` that prints a compact,
   scannable report to stderr (pass rate, mean recall/MRR/nDCG, top-1/3/5,
   mean/p95 latency, and a per-case line) while keeping the full JSON on stdout

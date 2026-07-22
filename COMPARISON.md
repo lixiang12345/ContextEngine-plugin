@@ -28,6 +28,8 @@ For the detailed capability-to-code audit and staged roadmap, see
 | MCP for Claude Code / Cursor / Zed | ✅ stdio MCP, `codebase-retrieval`, default live watcher | ✅ local + hosted MCP with multi-client setup | Low–Medium |
 | Remote MCP over HTTP | ✅ workspace-scoped Streamable HTTP, Bearer auth, bounded session lifecycle | ✅ hosted/connector HTTP MCP with OAuth/API key and deployment options | **Medium** |
 | Hybrid lexical + semantic search | ✅ PostgreSQL FTS + pgvector + symbol + path + RRF + feature rerank | ✅ specialized semantic retrieval | **Medium** (model still theirs) |
+| Context curation / packing | ✅ MMR diversity + token budget + pluggable `raw`/`extractive` policy (extractive keeps query-salient lines across passages) | ✅ "compresses context without losing critical information" | Low–Medium |
+| Retrieval transparency | ✅ per-response trace (intent, understood concepts, contributing/degraded channels, candidate→packed counts, token budget, generation) across CLI/HTTP/dashboard/eval | ✅ product UI shows intent, match-type confidence, coverage, token usage | Low |
 | Code-native embeddings | ⚠️ BYO OpenAI-compatible; two-stage rerank | ✅ **paired / trained retrieval models** for code | **High** |
 | Real-time local indexing | ✅ hash incremental + `watch` | ✅ local indexer, “next query reflects edits” | Medium |
 | Large monorepo scale | ⚠️ PostgreSQL + pgvector; avoids full vector maps, still needs scale testing | ✅ production indexing at monorepo scale | **High** |
@@ -141,7 +143,7 @@ If this project continues, the highest ROI vs Augment is **not** “more MCP too
 2. **Connector and webhook SDK** (Git providers, websites, tickets, external docs)
 3. **Source-level ACL and provenance proof** before exposing shared indexes
 4. **Structure-first retrieval and stronger code embeddings** (SCIP/LSIF/call graph + hard negatives)
-5. **Task-aware packing** with extractive/model-backed policies and explicit budgets
+5. **Task-aware packing**: extractive policy and explicit token budgets shipped; model-backed summarization still open (deliberately deferred — it would trade away the exact path+line+content provenance agents rely on)
 6. **Distributed generation storage and remote index sharing** for very large monorepos
 
 ---
