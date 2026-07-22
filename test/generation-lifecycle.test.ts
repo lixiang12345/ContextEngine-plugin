@@ -92,6 +92,81 @@ describePostgres("index generation lifecycle", () => {
     }
   });
 
+  it("retries once when a generation is promoted mid-search", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ce-search-race-"));
+    const workspaceId = `search-race-${Date.now()}-${process.pid}`;
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    const sourcePath = path.join(root, "src", "race.ts");
+    writeFileSync(
+      sourcePath,
+      `export function raceHandlerOne() { return "one"; }\n`,
+    );
+
+    const writer = ContextEngine.open({ root, workspaceId, databaseUrl });
+    const reader = ContextEngine.open({ root, workspaceId, databaseUrl });
+    try {
+      await writer.index();
+      // Warm the reader so its cached searcher and preflight both see the
+      // first generation as current.
+      assert.equal(
+        (await reader.search({ query: "raceHandlerOne", mode: "bm25" })).some(
+          (hit) => hit.chunk.content.includes("raceHandlerOne"),
+        ),
+        true,
+      );
+      const firstGeneration = (await reader.indexStatus()).generationId;
+
+      writeFileSync(
+        sourcePath,
+        `export function raceHandlerTwo() { return "two"; }\n`,
+      );
+
+      // Inject the race: let the preflight check pass as current, then promote
+      // a new generation before the post-search staleness check runs. The
+      // engine must refresh and retry once rather than pair hits with the
+      // retired generation's provenance.
+      const store = (reader as unknown as {
+        ensureStore: () => Promise<PostgresStore>;
+      });
+      const liveStore = await store.ensureStore();
+      const originalIsCurrent = liveStore.isCurrentGeneration.bind(liveStore);
+      let checks = 0;
+      let promoted = false;
+      (liveStore as unknown as {
+        isCurrentGeneration: () => Promise<boolean>;
+      }).isCurrentGeneration = async () => {
+        checks++;
+        // First call is the preflight (report current); promote right after so
+        // the post-search check observes a retired generation exactly once.
+        if (checks === 1) return true;
+        if (!promoted) {
+          promoted = true;
+          await writer.index();
+          return false;
+        }
+        return originalIsCurrent();
+      };
+
+      const hits = await reader.search({
+        query: "raceHandlerTwo",
+        mode: "bm25",
+      });
+      assert.ok(checks >= 2, "post-search staleness check should run");
+      assert.equal(
+        hits.some((hit) => hit.chunk.content.includes("raceHandlerTwo")),
+        true,
+      );
+      // After the forced retry the reader serves the promoted generation.
+      assert.notEqual(
+        (await reader.indexStatus()).generationId,
+        firstGeneration,
+      );
+    } finally {
+      await Promise.all([reader.close(), writer.close()]);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("garbage-collects retired generations only after the retention window", async () => {
     const workspaceId = `generation-gc-${Date.now()}-${process.pid}`;
     const initial = await PostgresStore.open({
