@@ -1670,6 +1670,8 @@ class HttpContextService {
             principals: true,
             workspace_acl: this.aclEnabled,
             permissions: ["reader", "writer", "owner"],
+            connector_installation:
+              this.aclEnabled ? "operator-only" : "workspace-owner",
             source_acl: {
               enabled: true,
               effects: ["allow", "deny"],
@@ -2602,6 +2604,17 @@ class HttpContextService {
         const workspaceId = decodeURIComponent(createSourceMatch[1]);
         const provider = decodeURIComponent(createSourceMatch[2]);
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        // Built-in connectors use credentials injected at the service level.
+        // In a multi-principal deployment, allowing any workspace owner to
+        // choose an arbitrary upstream would turn that shared credential into
+        // a confused deputy. Keep installation operator-controlled until a
+        // connector can prove a principal-bound provider installation.
+        if (this.aclEnabled && !principal.admin) {
+          throw new HttpError(
+            403,
+            "Connector installation requires operator access in multi-principal mode",
+          );
+        }
         const connector = this.connectorRegistry.get(provider);
         if (!connector) throw new HttpError(404, "Connector provider not found");
         let config: Record<string, unknown>;

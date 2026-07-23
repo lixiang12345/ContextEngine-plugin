@@ -283,8 +283,18 @@ describePostgres("principal ACL and GitHub connector", () => {
 
   it("syncs GitHub incrementally and applies grant/revoke to HTTP and MCP", async () => {
     const workspaceId = await createWorkspace("alice", "Alice GitHub workspace");
-    const createdSource = await request(
+    const userInstallAttempt = await request(
       "alice",
+      `/v1/workspaces/${workspaceId}/sources/github`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ owner: "octo-owner", repository: "context-repo", ref: "main" }),
+      },
+    );
+    assert.equal(userInstallAttempt.status, 403);
+    const createdSource = await request(
+      "admin",
       `/v1/workspaces/${workspaceId}/sources/github`,
       {
         method: "POST",
@@ -638,7 +648,7 @@ describePostgres("principal ACL and GitHub connector", () => {
   it("enforces connector ownership of sync plans inside the workspace transaction", async () => {
     const workspaceId = await createWorkspace("alice", "Connector transaction guard");
     const createdSource = await request(
-      "alice",
+      "admin",
       `/v1/workspaces/${workspaceId}/sources/github`,
       {
         method: "POST",
