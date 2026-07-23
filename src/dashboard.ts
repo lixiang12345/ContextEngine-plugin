@@ -1303,6 +1303,8 @@ export function observabilityDashboardHtml(): string {
     var button = byId("probeSubmit");
     button.disabled = true;
     byId("probeResults").setAttribute("aria-busy", "true");
+    byId("probeResults").className = "";
+    byId("probeResults").innerHTML = "";
     byId("probeMeta").textContent = view === "hits" ? "Searching..." : "Packing context...";
     renderTrace(null);
     var started = performance.now();
