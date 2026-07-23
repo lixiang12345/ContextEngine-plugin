@@ -1083,7 +1083,8 @@ export function observabilityDashboardHtml(): string {
     renderWorkspaces(data);
     renderJobs(data);
     renderRequests(data);
-    byId("updatedAt").textContent = "Updated " + new Date(data.generated_at).toLocaleTimeString();
+    var ts = data.generated_at ? new Date(data.generated_at) : null;
+    byId("updatedAt").textContent = ts && !isNaN(ts.getTime()) ? "Updated " + ts.toLocaleTimeString() : "Updated just now";
   }
 
   function setRefreshState(loading) {
