@@ -1136,6 +1136,9 @@ export function observabilityDashboardHtml(): string {
   });
   byId("refresh").addEventListener("click", function () { refresh(true); });
   byId("autoRefresh").addEventListener("change", schedule);
+  byId("probeView").addEventListener("change", function () {
+    byId("probeMaxTokensField").hidden = byId("probeView").value === "hits";
+  });
 
   Array.prototype.forEach.call(document.querySelectorAll("#modelConfigForm input, #modelConfigForm select, #modelConfigForm textarea"), function (control) {
     control.addEventListener("input", function () {

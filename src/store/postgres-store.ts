@@ -1182,33 +1182,35 @@ export class PostgresStore {
     limit: number,
     filter?: StoreSearchFilter,
   ): Promise<Array<{ id: string; score: number }>> {
-    const scores = new Map<string, number>();
-    for (const hint of hints) {
-      const normalized = hint.trim().toLowerCase();
-      if (normalized.length < 2) continue;
-      const escaped = normalized.replace(/[\\%_]/g, "\\$&");
-      const params: unknown[] = [this.workspaceId, `%${escaped}%`];
-      const where = this.filterSql(params, filter, "c");
-      params.push(limit * 2);
-      const result = await this.query<{ id: string; path: string }>(
-        `SELECT c.id, c.path
+    const normalized = hints.map((h) => h.trim().toLowerCase()).filter((h) => h.length >= 2);
+    if (!normalized.length) return [];
+    const patterns = normalized.map((h) => `%${h.replace(/[\\%_]/g, "\\$&")}%`);
+    const params: unknown[] = [this.workspaceId, patterns, normalized];
+    const where = this.filterSql(params, filter, "c");
+    params.push(limit * 2);
+    const result = await this.query<{ id: string; path: string; hint: string }>(
+      `SELECT c.id, c.path, h.hint
+       FROM unnest($2::text[], $3::text[]) AS h(pattern, hint)
+       CROSS JOIN LATERAL (
+         SELECT c.id, c.path
          FROM ce_chunks c
-         WHERE ${where} AND lower(c.path) LIKE $2 ESCAPE '\\'
+         WHERE ${where} AND lower(c.path) LIKE h.pattern ESCAPE '\\'
          ORDER BY length(c.path), c.path
-         LIMIT $${params.length}`,
-        params,
-      );
-      for (const row of result.rows) {
-        const base = path.basename(row.path).toLowerCase();
-        const stem = base.replace(/\.[^.]+$/, "");
-        const score =
-          stem === normalized
-            ? 3.2
-            : base.startsWith(`${normalized}.`)
-              ? 3
-              : 2;
-        scores.set(row.id, Math.max(scores.get(row.id) ?? 0, score));
-      }
+         LIMIT $${params.length}
+       ) c`,
+      params,
+    );
+    const scores = new Map<string, number>();
+    for (const row of result.rows) {
+      const base = path.basename(row.path).toLowerCase();
+      const stem = base.replace(/\.[^.]+$/, "");
+      const score =
+        stem === row.hint
+          ? 3.2
+          : base.startsWith(`${row.hint}.`)
+            ? 3
+            : 2;
+      scores.set(row.id, Math.max(scores.get(row.id) ?? 0, score));
     }
     return [...scores.entries()]
       .map(([id, score]) => ({ id, score }))
