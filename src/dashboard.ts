@@ -739,9 +739,9 @@ export function observabilityDashboardHtml(): string {
     var text = String(value || "unknown");
     var tone = "neutral";
     if (["online", "indexed", "current", "succeeded", "200", "enabled", "bearer"].indexOf(text) >= 0) tone = "good";
-    else if (["queued", "running", "partial", "indexing", "stale", "building"].indexOf(text) >= 0) tone = "warn";
+    else if (["queued", "running", "partial", "indexing", "stale", "building", "unknown"].indexOf(text) >= 0) tone = "warn";
     else if (["failed", "offline", "error", "unavailable"].indexOf(text) >= 0) tone = "bad";
-    else if (["blob", "local", "incremental", "rebuild", "none", "effective"].indexOf(text) >= 0) tone = "info";
+    else if (["blob", "local", "incremental", "rebuild", "none", "effective", "empty"].indexOf(text) >= 0) tone = "info";
     else if (["disabled_by_server"].indexOf(text) >= 0) tone = "warn";
     return "<span class=\"badge " + tone + "\">" + escapeHtml(text) + "</span>";
   }
