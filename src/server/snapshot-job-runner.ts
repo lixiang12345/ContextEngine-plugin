@@ -252,12 +252,16 @@ export class SnapshotJobRunner {
     if (job.operation === "export") {
       if (!job.snapshotName) throw new Error("Snapshot export job has no snapshot name");
       await this.progress(job, "exporting");
-      const result = await exportIndexSnapshot({
-        databaseUrl: this.databaseUrl,
-        workspaceId: job.workspaceId,
-        name: job.snapshotName,
-        store,
-      });
+      const result = await this.repository.withSnapshotArtifactGuard(
+        job.workspaceId,
+        () =>
+          exportIndexSnapshot({
+            databaseUrl: this.databaseUrl,
+            workspaceId: job.workspaceId,
+            name: job.snapshotName!,
+            store,
+          }),
+      );
       return { snapshot: result.manifest, manifest_key: result.manifestKey };
     }
     if (job.operation === "import") {
@@ -313,7 +317,7 @@ export class SnapshotJobRunner {
         throw new Error("Snapshot job lease is no longer active");
       }
       const result =
-        await this.repository.withSnapshotReplicationArtifactGuard(
+        await this.repository.withSnapshotArtifactGuard(
           job.workspaceId,
           () =>
             replicateIndexSnapshot({
@@ -374,7 +378,7 @@ export class SnapshotJobRunner {
       };
     }
     await this.progress(job, "garbage_collecting");
-    return this.repository.withSnapshotReplicationArtifactGuard(
+    return this.repository.withSnapshotArtifactGuard(
       job.workspaceId,
       async () => {
         const preserveArtifactKeys =

@@ -26,6 +26,10 @@ const PAGE_SIZE = 500;
 const PUBLICATION_MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MANIFEST_PUBLICATION_TIMEOUT_MS = 30_000;
 
+const operationMarkerSchema = z
+  .object({ created_at: z.string().datetime() })
+  .strict();
+
 const snapshotNameSchema = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/);
@@ -445,6 +449,35 @@ async function runWithPublicationGuard<T>(
     : { executed: true, value: result.value };
 }
 
+async function activeSnapshotOperationMarkers(
+  store: SnapshotObjectStore,
+  kind: "publish" | "gc",
+): Promise<string[]> {
+  if (!store.list) {
+    throw new Error("Snapshot object store does not support listing");
+  }
+  const pattern =
+    kind === "publish"
+      ? /^operations\/publish-[0-9a-f-]{36}\.json$/
+      : /^operations\/gc-[0-9a-f-]{36}\.json$/;
+  const active: string[] = [];
+  for (const key of await store.list("operations")) {
+    if (!pattern.test(key)) continue;
+    const marker = operationMarkerSchema.parse(
+      JSON.parse(await readObject(store, key, MAX_MANIFEST_BYTES)),
+    );
+    if (
+      Date.now() - Date.parse(marker.created_at) <=
+      PUBLICATION_MARKER_TTL_MS
+    ) {
+      active.push(key);
+    } else {
+      await store.delete(key);
+    }
+  }
+  return active.sort();
+}
+
 /** Remove unreferenced content-addressed artifacts after snapshot deletion. */
 export async function garbageCollectSnapshotArtifacts(
   store: SnapshotObjectStore,
@@ -452,54 +485,61 @@ export async function garbageCollectSnapshotArtifacts(
 ): Promise<string[]> {
   if (!store.list)
     throw new Error("Snapshot object store does not support listing");
-  for (const key of await store.list("operations")) {
-    if (!/^operations\/publish-[0-9a-f-]{36}\.json$/.test(key)) continue;
-    const marker = z
-      .object({ created_at: z.string().datetime() })
-      .strict()
-      .parse(JSON.parse(await readObject(store, key, MAX_MANIFEST_BYTES)));
-    if (
-      Date.now() - Date.parse(marker.created_at) <=
-      PUBLICATION_MARKER_TTL_MS
-    ) {
+  const garbageCollectionMarkerKey = `operations/gc-${randomUUID()}.json`;
+  const markerBody = JSON.stringify({ created_at: new Date().toISOString() });
+  try {
+    await store.put(
+      garbageCollectionMarkerKey,
+      Readable.from([markerBody]),
+      {
+        contentType: "application/json",
+        contentLength: Buffer.byteLength(markerBody),
+      },
+    );
+    if ((await activeSnapshotOperationMarkers(store, "publish")).length) {
       throw new Error(
         "Cannot garbage collect while a snapshot publication is active",
       );
     }
-    await store.delete(key);
-  }
-  const preserved = new Set(options.preserveArtifactKeys ?? []);
-  const referenced = new Set<string>();
-  for (const name of await listIndexSnapshots(store)) {
-    try {
-      const manifest = manifestSchema.parse(
-        JSON.parse(
-          await readObject(
-            store,
-            `snapshots/${name}/manifest.json`,
-            MAX_MANIFEST_BYTES,
+    const preserved = new Set(options.preserveArtifactKeys ?? []);
+    const referenced = new Set<string>();
+    for (const name of await listIndexSnapshots(store)) {
+      try {
+        const manifest = manifestSchema.parse(
+          JSON.parse(
+            await readObject(
+              store,
+              `snapshots/${name}/manifest.json`,
+              MAX_MANIFEST_BYTES,
+            ),
           ),
-        ),
-      );
-      referenced.add(manifest.artifact.key);
-    } catch (error) {
-      throw new Error(
-        `Cannot garbage collect while snapshot ${name} has an invalid manifest`,
-        {
-          cause: error,
-        },
-      );
+        );
+        referenced.add(manifest.artifact.key);
+      } catch (error) {
+        throw new Error(
+          `Cannot garbage collect while snapshot ${name} has an invalid manifest`,
+          {
+            cause: error,
+          },
+        );
+      }
+    }
+    const deleted: string[] = [];
+    for (const key of await store.list("objects/sha256")) {
+      if (!/^objects\/sha256\/[0-9a-f]{64}\.ndjson\.gz$/.test(key)) continue;
+      if (!referenced.has(key) && !preserved.has(key)) {
+        await store.delete(key);
+        deleted.push(key);
+      }
+    }
+    return deleted.sort();
+  } finally {
+    try {
+      await store.delete(garbageCollectionMarkerKey);
+    } catch {
+      // A stale marker blocks publication and expires after the bounded TTL.
     }
   }
-  const deleted: string[] = [];
-  for (const key of await store.list("objects/sha256")) {
-    if (!/^objects\/sha256\/[0-9a-f]{64}\.ndjson\.gz$/.test(key)) continue;
-    if (!referenced.has(key) && !preserved.has(key)) {
-      await store.delete(key);
-      deleted.push(key);
-    }
-  }
-  return deleted.sort();
 }
 
 export async function pruneIndexSnapshots(options: {
@@ -669,6 +709,17 @@ export async function exportIndexSnapshot(options: {
       contentType: "application/json",
       contentLength: Buffer.byteLength(markerBody),
     });
+    // Publication and GC use a bilateral marker handshake. Whichever marker is
+    // written second observes the first operation and backs off, closing the
+    // window where GC could scan markers before this publication starts.
+    if (
+      options.store.list &&
+      (await activeSnapshotOperationMarkers(options.store, "gc")).length
+    ) {
+      throw new Error(
+        "Cannot publish a snapshot while artifact garbage collection is active",
+      );
+    }
     await options.store.put(artifactKey, createReadStream(temporary), {
       contentType: "application/x-ndjson",
       contentEncoding: "gzip",

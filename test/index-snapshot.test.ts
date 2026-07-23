@@ -17,6 +17,12 @@ import {
   replicateIndexSnapshot,
 } from "../src/snapshots/snapshot.js";
 import { PostgresStore } from "../src/store/postgres-store.js";
+import type {
+  SnapshotObjectMetadata,
+  SnapshotObjectRequestOptions,
+  SnapshotObjectStore,
+  SnapshotObjectVersion,
+} from "../src/snapshots/object-store.js";
 
 const databaseUrl =
   process.env.CONTEXTENGINE_TEST_DATABASE_URL ??
@@ -33,17 +39,134 @@ function databaseUrlForSchema(baseUrl: string, schema: string): string {
   return parsed.toString();
 }
 
+class PublicationRaceStore implements SnapshotObjectStore {
+  private operationListCalls = 0;
+  private readonly publicationCheckStarted: Promise<void>;
+  private startPublicationCheck!: () => void;
+  private readonly continuePublicationCheck: Promise<void>;
+  private continuePublication!: () => void;
+
+  constructor(private readonly inner: SnapshotObjectStore) {
+    this.publicationCheckStarted = new Promise((resolve) => {
+      this.startPublicationCheck = resolve;
+    });
+    this.continuePublicationCheck = new Promise((resolve) => {
+      this.continuePublication = resolve;
+    });
+  }
+
+  put(
+    key: string,
+    source: Readable,
+    metadata?: SnapshotObjectMetadata,
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<void> {
+    return this.inner.put(key, source, metadata, options);
+  }
+
+  get(key: string, options?: SnapshotObjectRequestOptions): Promise<Readable> {
+    return this.inner.get(key, options);
+  }
+
+  delete(key: string, options?: SnapshotObjectRequestOptions): Promise<void> {
+    return this.inner.delete(key, options);
+  }
+
+  async list(
+    prefix = "",
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<string[]> {
+    if (prefix === "operations" && ++this.operationListCalls === 1) {
+      this.startPublicationCheck();
+      await this.continuePublicationCheck;
+    }
+    return this.inner.list!(prefix, options);
+  }
+
+  head(
+    key: string,
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<SnapshotObjectVersion | null> {
+    return this.inner.head!(key, options);
+  }
+
+  waitForPublicationCheck(): Promise<void> {
+    return this.publicationCheckStarted;
+  }
+
+  releasePublicationCheck(): void {
+    this.continuePublication();
+  }
+}
+
+class GarbageCollectionRaceStore implements SnapshotObjectStore {
+  private snapshotScanCaptured = false;
+  private readonly snapshotScanStarted: Promise<void>;
+  private startSnapshotScan!: () => void;
+  private readonly continueGarbageCollection: Promise<void>;
+  private continueGc!: () => void;
+
+  constructor(private readonly inner: SnapshotObjectStore) {
+    this.snapshotScanStarted = new Promise((resolve) => {
+      this.startSnapshotScan = resolve;
+    });
+    this.continueGarbageCollection = new Promise((resolve) => {
+      this.continueGc = resolve;
+    });
+  }
+
+  put(
+    key: string,
+    source: Readable,
+    metadata?: SnapshotObjectMetadata,
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<void> {
+    return this.inner.put(key, source, metadata, options);
+  }
+
+  get(key: string, options?: SnapshotObjectRequestOptions): Promise<Readable> {
+    return this.inner.get(key, options);
+  }
+
+  delete(key: string, options?: SnapshotObjectRequestOptions): Promise<void> {
+    return this.inner.delete(key, options);
+  }
+
+  async list(
+    prefix = "",
+    options?: SnapshotObjectRequestOptions,
+  ): Promise<string[]> {
+    const captured = await this.inner.list!(prefix, options);
+    if (prefix === "snapshots" && !this.snapshotScanCaptured) {
+      this.snapshotScanCaptured = true;
+      this.startSnapshotScan();
+      await this.continueGarbageCollection;
+    }
+    return captured;
+  }
+
+  waitForSnapshotScan(): Promise<void> {
+    return this.snapshotScanStarted;
+  }
+
+  releaseGarbageCollection(): void {
+    this.continueGc();
+  }
+}
+
 describePostgres("portable index snapshots", () => {
   const schema = `ce_snapshot_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const schemaUrl = databaseUrlForSchema(databaseUrl!, schema);
   const admin = new Pool({ connectionString: databaseUrl! });
   let directory = "";
   let replicaDirectory = "";
+  let raceDirectory = "";
 
   before(async () => {
     await admin.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
     directory = await mkdtemp(path.join(os.tmpdir(), "ce-index-snapshot-"));
     replicaDirectory = await mkdtemp(path.join(os.tmpdir(), "ce-index-replica-"));
+    raceDirectory = await mkdtemp(path.join(os.tmpdir(), "ce-index-race-"));
   });
 
   after(async () => {
@@ -53,6 +176,7 @@ describePostgres("portable index snapshots", () => {
       );
       await rm(directory, { recursive: true, force: true });
       await rm(replicaDirectory, { recursive: true, force: true });
+      await rm(raceDirectory, { recursive: true, force: true });
     } finally {
       await admin.end();
     }
@@ -112,6 +236,74 @@ describePostgres("portable index snapshots", () => {
     assert.doesNotMatch(JSON.stringify(exported.manifest), /private\/source/);
     assert.deepEqual(await objectStore.list("operations"), []);
     assert.deepEqual(await listIndexSnapshots(objectStore), ["team-main"]);
+
+    // Force the dangerous interleaving: export has published its marker but
+    // has not yet checked for GC, then GC starts. The bilateral marker
+    // handshake makes GC back off; export subsequently succeeds with its
+    // artifact still present.
+    const raceStore = new PublicationRaceStore(
+      new FilesystemSnapshotStore(path.join(raceDirectory, "export-first")),
+    );
+    const racingExport = exportIndexSnapshot({
+      databaseUrl: schemaUrl,
+      workspaceId: sourceWorkspace,
+      name: "race-safe",
+      store: raceStore,
+    });
+    await raceStore.waitForPublicationCheck();
+    try {
+      await assert.rejects(
+        garbageCollectSnapshotArtifacts(raceStore),
+        /publication is active/,
+      );
+    } finally {
+      raceStore.releasePublicationCheck();
+    }
+    const safeExport = await racingExport;
+    assert.ok(await raceStore.head(safeExport.manifest.artifact.key));
+    assert.deepEqual(await raceStore.list("operations"), []);
+
+    const gcMarkerKey = `operations/gc-${randomUUID()}.json`;
+    await raceStore.put(
+      gcMarkerKey,
+      Readable.from([JSON.stringify({ created_at: new Date().toISOString() })]),
+    );
+    await assert.rejects(
+      exportIndexSnapshot({
+        databaseUrl: schemaUrl,
+        workspaceId: sourceWorkspace,
+        name: "blocked-by-gc",
+        store: raceStore,
+      }),
+      /garbage collection is active/,
+    );
+    await raceStore.delete(gcMarkerKey);
+    assert.ok(await raceStore.head(safeExport.manifest.artifact.key));
+
+    // Reproduce the original TOCTOU ordering: GC has captured an empty
+    // manifest list, then export starts. The GC marker now forces export to
+    // abort instead of publishing an artifact that the stale scan can delete.
+    const gcFirstStore = new GarbageCollectionRaceStore(
+      new FilesystemSnapshotStore(path.join(raceDirectory, "gc-first")),
+    );
+    const racingGc = garbageCollectSnapshotArtifacts(gcFirstStore);
+    await gcFirstStore.waitForSnapshotScan();
+    try {
+      await assert.rejects(
+        exportIndexSnapshot({
+          databaseUrl: schemaUrl,
+          workspaceId: sourceWorkspace,
+          name: "must-not-publish-during-gc",
+          store: gcFirstStore,
+        }),
+        /garbage collection is active/,
+      );
+    } finally {
+      gcFirstStore.releaseGarbageCollection();
+    }
+    assert.deepEqual(await racingGc, []);
+    assert.deepEqual(await gcFirstStore.list("operations"), []);
+    assert.deepEqual(await gcFirstStore.list("snapshots"), []);
 
     const replicaStore = new FilesystemSnapshotStore(replicaDirectory);
     const replicated = await replicateIndexSnapshot({

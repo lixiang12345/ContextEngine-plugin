@@ -10,6 +10,73 @@ import {
 import type { SnapshotObjectStore } from "../src/snapshots/object-store.js";
 
 describe("snapshot job runner fencing", () => {
+  it("serializes export with artifact lifecycle work", async () => {
+    const queued = snapshotJob("queued", "export");
+    const claimed: ClaimedSnapshotJob = {
+      ...snapshotJob("running", "export"),
+      attemptToken: "attempt-export",
+    };
+    let guarded = false;
+    let completed = false;
+    let failed = false;
+    const repository = {
+      async getSnapshotJob() {
+        return queued;
+      },
+      async claimSnapshotJob() {
+        return claimed;
+      },
+      async updateSnapshotJobProgress() {
+        return claimed;
+      },
+      async renewSnapshotJobLease() {
+        return true;
+      },
+      async withSnapshotArtifactGuard(
+        _workspaceId: string,
+        _operation: () => Promise<unknown>,
+      ) {
+        guarded = true;
+        return {
+          manifest: sourceManifest(),
+          manifestKey: "snapshots/main/manifest.json",
+        };
+      },
+      async completeSnapshotJob() {
+        completed = true;
+        return null;
+      },
+      async failSnapshotJob() {
+        failed = true;
+        return null;
+      },
+      async scheduleSnapshotJobRetry() {
+        return null;
+      },
+    } as unknown as WorkspaceRepository;
+    const unusedStore: SnapshotObjectStore = {
+      async put() {
+        throw new Error("guarded export must not call the object store");
+      },
+      async get() {
+        throw new Error("guarded export must not call the object store");
+      },
+      async delete() {},
+    };
+    const runner = new SnapshotJobRunner({
+      repository,
+      databaseUrl: "postgresql://unused",
+      storeFor: () => unusedStore,
+    });
+
+    runner.enqueue(claimed.id);
+    await runner.close();
+
+    assert.equal(guarded, true);
+    assert.equal(completed, true);
+    assert.equal(failed, false);
+  });
+
   it("aborts object-store I/O when lease renewal loses ownership", async () => {
     const queued = snapshotJob("queued");
     const claimed: ClaimedSnapshotJob = {
@@ -44,7 +111,7 @@ describe("snapshot job runner fencing", () => {
       async isSnapshotReplicationPublicationCurrent() {
         return true;
       },
-      async withSnapshotReplicationArtifactGuard(
+      async withSnapshotArtifactGuard(
         _workspaceId: string,
         operation: () => Promise<unknown>,
       ) {
@@ -114,15 +181,18 @@ describe("snapshot job runner fencing", () => {
   });
 });
 
-function snapshotJob(status: StoredSnapshotJob["status"]): StoredSnapshotJob {
+function snapshotJob(
+  status: StoredSnapshotJob["status"],
+  operation: StoredSnapshotJob["operation"] = "replicate",
+): StoredSnapshotJob {
   const now = new Date().toISOString();
   return {
     id: "replication-job",
     workspaceId: "workspace",
     principalId: "owner",
-    operation: "replicate",
+    operation,
     snapshotName: "main",
-    parameters: { target_id: "backup" },
+    parameters: operation === "replicate" ? { target_id: "backup" } : {},
     status,
     progress: null,
     result: null,

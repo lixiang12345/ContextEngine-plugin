@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Closed the snapshot export/GC publication race. Export and GC now use a
+  bilateral object-store marker handshake: whichever operation starts second
+  observes the first marker and backs off before writing or deleting an
+  artifact. HTTP export, replication, and GC also share the same
+  workspace-scoped PostgreSQL artifact guard. Deterministic interleaving tests
+  cover both export-first and GC-first orderings.
 - Added atomic workspace grant plus source-policy installation. Owners can now
   include `source_acl` in `PUT /v1/workspaces/{workspaceId}/acl/{principalId}`;
   the permission, default effect, and path rules commit in one PostgreSQL

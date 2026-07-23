@@ -3674,7 +3674,7 @@ export class WorkspaceRepository {
     }
   }
 
-  async withSnapshotReplicationArtifactGuard<T>(
+  async withSnapshotArtifactGuard<T>(
     workspaceId: string,
     operation: () => Promise<T>,
   ): Promise<T> {
@@ -3694,6 +3694,14 @@ export class WorkspaceRepository {
     } finally {
       client.release();
     }
+  }
+
+  /** @deprecated Use withSnapshotArtifactGuard for all artifact lifecycle work. */
+  async withSnapshotReplicationArtifactGuard<T>(
+    workspaceId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.withSnapshotArtifactGuard(workspaceId, operation);
   }
 
   async isSnapshotJobAttemptActive(

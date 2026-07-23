@@ -49,6 +49,15 @@ metadata cannot cause a still-needed artifact to be deleted. HTTP GC also
 preserves artifacts pinned by active replication jobs or failed replication
 jobs from the last seven days, keeping bounded manual retries recoverable.
 
+Export and GC publish short-lived `operations/publish-*.json` and
+`operations/gc-*.json` markers before touching shared artifacts. After writing
+its own marker, each side checks for the other operation; the second starter
+backs off. This bilateral handshake closes the race where GC could capture an
+empty publication-marker/manifest view immediately before export uploaded an
+artifact. Invalid operation markers fail closed, and stale markers expire after
+seven days. Custom stores that expose `list` participate in this protocol; GC
+already requires that capability.
+
 `snapshot prune` can retain the newest `--keep` snapshots, enforce
 `--older-than-days`, or combine both so a snapshot must cross both boundaries
 before deletion. It fails on malformed manifests.
@@ -135,9 +144,11 @@ publication re-reads after every conflict: a lower sequence returns
 `superseded`, and the same sequence plus digest returns `already_current`.
 The final manifest CAS holds the current job row lock for that short write, so
 lease takeover and terminal state changes cannot cross the publication point.
-Replication and GC also share a workspace-scoped PostgreSQL advisory lifecycle
-lock, covering the artifact transfer through manifest publication and the GC
-scan/deletes.
+HTTP export, replication, and GC also share a workspace-scoped PostgreSQL
+advisory lifecycle lock, covering export/replication through manifest
+publication and the GC scan/deletes. The object-store marker handshake remains
+the cross-process safety boundary for synchronous CLI calls and embedded hosts
+that do not share the HTTP service database.
 Replication results expose `publication_status`, `publication_sequence`,
 `source_manifest_sha256`, and `strict_fencing`. Minimal third-party stores use a
 compatible best-effort fallback and report `strict_fencing: false`.
