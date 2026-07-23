@@ -629,7 +629,7 @@ export function observabilityDashboardHtml(): string {
         <div class="field"><label for="probeWorkspace">Workspace</label><select id="probeWorkspace" class="control" required><option value="">Select workspace</option></select></div>
         <div class="field"><label for="probeQuery">Query</label><input id="probeQuery" class="control" required maxlength="20000" placeholder="Find authorization checks before access is granted"></div>
         <div class="field"><label for="probeTopK">Top K</label><input id="probeTopK" class="control" type="number" min="1" max="40" value="8"></div>
-        <div class="field"><label for="probeMode">Mode</label><select id="probeMode" class="control"><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="bm25">BM25</option><option value="semantic">Semantic</option></select></div>
+        <div class="field" id="probeModeField"><label for="probeMode">Mode</label><select id="probeMode" class="control"><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="bm25">BM25</option><option value="semantic">Semantic</option></select></div>
         <div class="field"><label for="probeView">View</label><select id="probeView" class="control"><option value="hits">Ranked hits</option><option value="raw">Packed · raw</option><option value="extractive">Packed · extractive</option></select></div>
         <div class="field" id="probeMaxTokensField" hidden><label for="probeMaxTokens">Max tokens</label><input id="probeMaxTokens" class="control" type="number" min="1" max="128000" placeholder="uncapped"></div>
         <button id="probeSubmit" class="button primary" type="submit">Run search</button>
@@ -1137,9 +1137,15 @@ export function observabilityDashboardHtml(): string {
   byId("refresh").addEventListener("click", function () { refresh(true); });
   byId("autoRefresh").addEventListener("change", schedule);
   byId("probeView").addEventListener("change", function () {
-    byId("probeMaxTokensField").hidden = byId("probeView").value === "hits";
+    var isPacked = byId("probeView").value !== "hits";
+    byId("probeMaxTokensField").hidden = !isPacked;
+    byId("probeModeField").hidden = isPacked;
   });
-  byId("probeMaxTokensField").hidden = byId("probeView").value === "hits";
+  (function () {
+    var isPacked = byId("probeView").value !== "hits";
+    byId("probeMaxTokensField").hidden = !isPacked;
+    byId("probeModeField").hidden = isPacked;
+  })();
 
   Array.prototype.forEach.call(document.querySelectorAll("#modelConfigForm input, #modelConfigForm select, #modelConfigForm textarea"), function (control) {
     control.addEventListener("input", function () {
@@ -1228,9 +1234,10 @@ export function observabilityDashboardHtml(): string {
     if (!channels) return "";
     var order = ["fts", "symbol", "path", "semantic", "graph", "neural"];
     var labels = { fts: "keyword", symbol: "symbol", path: "path", semantic: "semantic", graph: "graph", neural: "neural" };
-    var chips = order.filter(function (name) {
-      return channels[name] != null;
-    }).map(function (name) {
+    var known = new Set(order);
+    var allKeys = order.filter(function (name) { return channels[name] != null; })
+      .concat(Object.keys(channels).filter(function (name) { return !known.has(name) && channels[name] != null; }));
+    var chips = allKeys.map(function (name) {
       var pct = Math.round(Math.max(0, Math.min(1, Number(channels[name]))) * 100);
       return "<span class=\"channel-chip\" title=\"" + escapeHtml(name) + " score " + Number(channels[name]).toFixed(3) + "\">" + escapeHtml(labels[name] || name) + " <span class=\"channel-pct\">" + pct + "%</span></span>";
     });
