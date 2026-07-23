@@ -738,7 +738,7 @@ export function observabilityDashboardHtml(): string {
     var text = String(value || "unknown");
     var tone = "neutral";
     if (["online", "indexed", "current", "succeeded", "200", "enabled", "bearer"].indexOf(text) >= 0) tone = "good";
-    else if (["queued", "running", "partial", "indexing", "stale"].indexOf(text) >= 0) tone = "warn";
+    else if (["queued", "running", "partial", "indexing", "stale", "building"].indexOf(text) >= 0) tone = "warn";
     else if (["failed", "offline", "error", "unavailable"].indexOf(text) >= 0) tone = "bad";
     else if (["blob", "local", "incremental", "rebuild", "none", "effective"].indexOf(text) >= 0) tone = "info";
     else if (["disabled_by_server"].indexOf(text) >= 0) tone = "warn";
@@ -1139,6 +1139,7 @@ export function observabilityDashboardHtml(): string {
   byId("probeView").addEventListener("change", function () {
     byId("probeMaxTokensField").hidden = byId("probeView").value === "hits";
   });
+  byId("probeMaxTokensField").hidden = byId("probeView").value === "hits";
 
   Array.prototype.forEach.call(document.querySelectorAll("#modelConfigForm input, #modelConfigForm select, #modelConfigForm textarea"), function (control) {
     control.addEventListener("input", function () {
@@ -1293,6 +1294,7 @@ export function observabilityDashboardHtml(): string {
     var view = byId("probeView").value;
     var button = byId("probeSubmit");
     button.disabled = true;
+    byId("probeResults").setAttribute("aria-busy", "true");
     byId("probeMeta").textContent = view === "hits" ? "Searching..." : "Packing context...";
     renderTrace(null);
     var started = performance.now();
