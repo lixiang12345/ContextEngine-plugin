@@ -181,7 +181,18 @@ rule matches, `default_access` is used. Operators bypass source policies. The
 policy is pushed into PostgreSQL lexical, semantic, path/symbol, and graph
 queries, checked before direct file reads, and resolved again for every Remote
 MCP tool call. It is not a UI-only result filter, and changing a policy affects
-an existing MCP session on its next call.
+an existing MCP session on its next call. The same policy is applied before
+local workspace convention files (`AGENTS.md`, `CLAUDE.md`, `.augment/rules`,
+and `.cursor/rules`) are read, so denied rules are absent from both packed text
+and retrieval traces.
+
+Git commit lineage currently stores one searchable aggregate per commit, which
+can contain a subject, author, and paths for several files. Because that
+aggregate cannot be proven safe by checking its synthetic `.git/commits/*`
+path, commit lineage is hidden whenever a source policy exists, including an
+allow-by-default policy. Operators and members without a source policy retain
+the normal lineage behavior. A future per-path lineage representation can
+restore policy-scoped history without weakening this fail-closed boundary.
 
 ### Read-only source connectors
 

@@ -18,9 +18,11 @@ class StubContextEngine extends ContextEngine {
       pendingRevision?: string;
     },
     root = "/repo",
+    extraRoots?: Array<{ name: string; path: string; kind?: "code" | "docs" }>,
   ) {
     super({
       root,
+      extraRoots,
       dataDir: "/tmp/contextengine-test",
       maxFileBytes: 1_000_000,
       maxChunkChars: 20_000,
@@ -345,6 +347,38 @@ describe("context packing", () => {
       assert.ok(result.trace?.rules);
       assert.equal(result.trace.rules[0].path, "AGENTS.md");
       assert.equal(result.trace.rules[0].scope, "always");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("omits source-denied workspace rules from context and trace", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ce-rules-acl-pack-"));
+    try {
+      const extraRoot = path.join(root, "external-docs");
+      mkdirSync(extraRoot, { recursive: true });
+      writeFileSync(
+        path.join(root, "AGENTS.md"),
+        "# Private conventions\n\nnever-expose-this-rule\n",
+      );
+      const engine = new StubContextEngine(
+        [hit("a", "src/a.ts", "export const a = 1;", 1)],
+        undefined,
+        root,
+        [{ name: "docs", path: extraRoot, kind: "docs" }],
+      );
+
+      const result = await engine.getTaskContext({
+        task: "a",
+        topK: 1,
+        sourceAccess: {
+          defaultAccess: "allow",
+          rules: [{ pathPrefix: "main/AGENTS.md", effect: "deny" }],
+        },
+      });
+
+      assert.doesNotMatch(result.packedText, /never-expose-this-rule/);
+      assert.equal(result.trace?.rules, undefined);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

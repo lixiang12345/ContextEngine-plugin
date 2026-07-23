@@ -8,6 +8,7 @@ import type {
   SourcePathPolicy,
   SourcePathRule,
 } from "../types.js";
+export { sourcePathAllowed } from "../source-access.js";
 
 export type WorkspaceSourceMode = "blob" | "local";
 export type SyncOperation = "upsert" | "delete" | "rename";
@@ -936,31 +937,6 @@ export function workspacePermissionAllows(
   required: WorkspacePermission,
 ): boolean {
   return actual !== null && permissionRank[actual] >= permissionRank[required];
-}
-
-export function sourcePathAllowed(
-  policy: SourcePathPolicy | null | undefined,
-  sourcePath: string,
-): boolean {
-  if (!policy) return true;
-  let selected: SourcePathRule | null = null;
-  for (const rule of policy.rules) {
-    if (
-      sourcePath !== rule.pathPrefix &&
-      !sourcePath.startsWith(`${rule.pathPrefix}/`)
-    ) {
-      continue;
-    }
-    if (
-      !selected ||
-      rule.pathPrefix.length > selected.pathPrefix.length ||
-      (rule.pathPrefix.length === selected.pathPrefix.length &&
-        rule.effect === "deny")
-    ) {
-      selected = rule;
-    }
-  }
-  return (selected?.effect ?? policy.defaultAccess) === "allow";
 }
 
 function sourceAccessPoliciesFromRows(

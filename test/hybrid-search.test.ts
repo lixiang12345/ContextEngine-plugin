@@ -74,4 +74,40 @@ describe("HybridSearcher", () => {
     );
     assert.equal(new Set(hits.map((hit) => hit.chunk.path)).size, hits.length);
   });
+
+  it("applies source ACLs and fails closed for commit aggregates in memory", async () => {
+    const visible = chunk(
+      "visible",
+      "src/public.kt",
+      "public commit history implementation",
+    );
+    const denied = chunk(
+      "denied",
+      "private/secret.kt",
+      "private commit history secret",
+    );
+    const commit = {
+      ...chunk(
+        "commit",
+        ".git/commits/abc1234",
+        "commit abc1234\nsubject: private commit history secret",
+      ),
+      language: "git-commit",
+    };
+    const searcher = new HybridSearcher();
+    searcher.load({ chunks: [visible, denied, commit] });
+
+    const hits = await searcher.search({
+      query: "show private commit history",
+      mode: "bm25",
+      diversify: false,
+      expandGraph: false,
+      sourceAccess: {
+        defaultAccess: "allow",
+        rules: [{ pathPrefix: "private", effect: "deny" }],
+      },
+    });
+
+    assert.deepEqual(hits.map((hit) => hit.chunk.id), [visible.id]);
+  });
 });

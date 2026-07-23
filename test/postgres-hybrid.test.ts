@@ -156,6 +156,60 @@ describe("PostgresHybridSearcher", () => {
     assert.equal(hits[0]?.source, "bm25");
   });
 
+  it("fails closed for commit candidates and graph expansion under a source policy", async () => {
+    const visible = chunk("visibleImplementation");
+    const directCommit: CodeChunk = {
+      ...chunk("directCommit", ".git/commits/abc1234"),
+      language: "git-commit",
+      content: "subject: rotate privateBillingCredential",
+    };
+    const expandedCommit: CodeChunk = {
+      ...chunk("expandedCommit", ".git/commits/def5678"),
+      language: "git-commit",
+      content: "subject: expose denied/path.ts",
+    };
+    const store = fakeStore([visible, directCommit, expandedCommit], {
+      ftsSearch: async () => [
+        { id: directCommit.id, score: 2 },
+        { id: visible.id, score: 1 },
+      ],
+      expandGraph: async () => [expandedCommit],
+    });
+    const searcher = new PostgresHybridSearcher();
+    searcher.load({ store, hasEmbeddings: false });
+
+    const hits = await searcher.search({
+      query: "commit history privateBillingCredential",
+      mode: "bm25",
+      diversify: false,
+      sourceAccess: { defaultAccess: "allow", rules: [] },
+    });
+
+    assert.deepEqual(hits.map((hit) => hit.chunk.id), [visible.id]);
+  });
+
+  it("keeps commit candidates available without a source policy", async () => {
+    const commit: CodeChunk = {
+      ...chunk("visibleCommit", ".git/commits/abc1234"),
+      language: "git-commit",
+      content: "commit abc1234\nsubject: improve commit history",
+    };
+    const store = fakeStore([commit], {
+      ftsSearch: async () => [{ id: commit.id, score: 1 }],
+    });
+    const searcher = new PostgresHybridSearcher();
+    searcher.load({ store, hasEmbeddings: false });
+
+    const hits = await searcher.search({
+      query: "show commit history",
+      mode: "bm25",
+      diversify: false,
+      expandGraph: false,
+    });
+
+    assert.equal(hits[0]?.chunk.id, commit.id);
+  });
+
   it("falls back to lexical retrieval when query embedding fails", async () => {
     const lexicalChunk = chunk("embeddingFailureFallback");
     let ftsCalls = 0;

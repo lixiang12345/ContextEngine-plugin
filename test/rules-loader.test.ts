@@ -82,6 +82,63 @@ describe("workspace rules loader", () => {
     }
   });
 
+  it("applies source ACLs before returning workspace rules", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ce-rules-acl-"));
+    try {
+      const rulesDir = path.join(root, ".augment", "rules");
+      mkdirSync(rulesDir, { recursive: true });
+      writeFileSync(path.join(root, "AGENTS.md"), "root-secret-rule\n");
+      writeFileSync(path.join(rulesDir, "public.md"), "public-rule\n");
+      writeFileSync(path.join(rulesDir, "private.md"), "private-secret-rule\n");
+
+      const allowlisted = loadWorkspaceRules(root, {
+        sourceAccess: {
+          defaultAccess: "deny",
+          rules: [
+            { pathPrefix: ".augment/rules/public.md", effect: "allow" },
+          ],
+        },
+      });
+      assert.deepEqual(
+        allowlisted.map((rule) => rule.path),
+        [".augment/rules/public.md"],
+      );
+      assert.match(allowlisted[0].content, /public-rule/);
+
+      const deniedRoot = loadWorkspaceRules(root, {
+        sourceAccess: {
+          defaultAccess: "allow",
+          rules: [{ pathPrefix: "AGENTS.md", effect: "deny" }],
+        },
+      });
+      assert.equal(
+        deniedRoot.some((rule) => rule.path === "AGENTS.md"),
+        false,
+      );
+      assert.equal(
+        deniedRoot.some((rule) => rule.content.includes("root-secret-rule")),
+        false,
+      );
+
+      const multiRoot = loadWorkspaceRules(root, {
+        sourcePathPrefix: "main",
+        sourceAccess: {
+          defaultAccess: "allow",
+          rules: [{ pathPrefix: "main/AGENTS.md", effect: "deny" }],
+        },
+      });
+      assert.equal(
+        multiRoot.some((rule) => rule.path === "main/AGENTS.md"),
+        false,
+      );
+      assert.ok(
+        multiRoot.every((rule) => rule.path.startsWith("main/")),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("formats a bounded markdown preamble", () => {
     const section = formatRulesSection(
       [

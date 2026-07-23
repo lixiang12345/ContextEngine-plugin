@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Closed two source-ACL side channels in packed retrieval. Local workspace
+  rules are now authorized by their normalized source path before the file is
+  read, so denied `AGENTS.md`, `CLAUDE.md`, `.augment/rules`, and
+  `.cursor/rules` entries cannot appear in packed text or retrieval traces.
+  Git commit chunks currently aggregate metadata from multiple touched paths;
+  they therefore fail closed whenever a source policy is active, across SQL,
+  in-memory fallback, HTTP, and existing Remote MCP sessions. Operators and
+  members without a source policy retain commit-lineage retrieval.
 - Hardened the workspace rules loader against symlink escape. Rule files are now
   canonicalized with `realpathSync` and rejected when their real path falls
   outside the workspace root, mirroring the containment discipline `getFileContext`

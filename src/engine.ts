@@ -147,7 +147,12 @@ export class ContextEngine {
     // wants changes made, not just where the relevant code is. Opt-out via
     // includeRules: false. Only the primary root is scanned.
     const rules: WorkspaceRule[] =
-      opts.includeRules === false ? [] : loadWorkspaceRules(this.config.root);
+      opts.includeRules === false
+        ? []
+        : loadWorkspaceRules(this.config.root, {
+            sourceAccess: opts.sourceAccess,
+            sourcePathPrefix: this.config.extraRoots?.length ? "main" : undefined,
+          });
 
     const hits = await this.search({
       query: opts.task,

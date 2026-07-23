@@ -114,6 +114,7 @@ describe("PostgresStore batched writes", () => {
     assert.match(queries[0].text, /unnest\(\$3::text\[\], \$4::text\[\]\)/);
     assert.match(queries[0].text, /ORDER BY length\(rule\.path_prefix\) DESC/);
     assert.match(queries[0].text, /CASE rule\.effect WHEN 'deny' THEN 1/);
+    assert.match(queries[0].text, /c\.language <> 'git-commit'/);
     assert.deepEqual(queries[0].values, [
       "workspace",
       "billing | credential",
@@ -122,5 +123,14 @@ describe("PostgresStore batched writes", () => {
       "allow",
       20,
     ]);
+  });
+
+  it("keeps commit lineage available when no source policy is active", async () => {
+    const { store, queries } = capturingStore();
+
+    await store.ftsSearch("commit history", 20);
+
+    assert.equal(queries.length, 1);
+    assert.doesNotMatch(queries[0].text, /language <> 'git-commit'/);
   });
 });

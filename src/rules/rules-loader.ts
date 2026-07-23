@@ -1,5 +1,7 @@
 import path from "node:path";
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { sourcePathAllowed } from "../source-access.js";
+import type { SourcePathPolicy } from "../types.js";
 import { readTextFile } from "../util/fs.js";
 
 /**
@@ -30,6 +32,10 @@ export interface LoadRulesOptions {
   maxBytesPerRule?: number;
   /** Max number of rules to return (default 24). */
   maxRules?: number;
+  /** Server-enforced visibility policy; denied rules are never read. */
+  sourceAccess?: SourcePathPolicy;
+  /** Indexed-path prefix for the primary root in a multi-root workspace. */
+  sourcePathPrefix?: string;
 }
 
 const DEFAULT_MAX_BYTES = 32 * 1024;
@@ -57,6 +63,8 @@ export function loadWorkspaceRules(
 ): WorkspaceRule[] {
   const maxBytes = options.maxBytesPerRule ?? DEFAULT_MAX_BYTES;
   const maxRules = options.maxRules ?? DEFAULT_MAX_RULES;
+  const sourceAccess = options.sourceAccess;
+  const sourcePathPrefix = options.sourcePathPrefix;
   const rules: WorkspaceRule[] = [];
   const seen = new Set<string>();
 
@@ -75,7 +83,15 @@ export function loadWorkspaceRules(
 
   for (const fileName of ROOT_RULE_FILES) {
     const abs = path.join(absoluteRoot, fileName);
-    const rule = readRuleFile(abs, fileName, maxBytes, "always", canonicalRoot);
+    const rule = readRuleFile(
+      abs,
+      fileName,
+      maxBytes,
+      "always",
+      canonicalRoot,
+      sourceAccess,
+      sourcePathPrefix,
+    );
     if (rule && !seen.has(rule.path)) {
       seen.add(rule.path);
       rules.push(rule);
@@ -93,6 +109,8 @@ export function loadWorkspaceRules(
         maxBytes,
         "agent-requested",
         canonicalRoot,
+        sourceAccess,
+        sourcePathPrefix,
       );
       if (rule && !seen.has(rule.path)) {
         seen.add(rule.path);
@@ -149,7 +167,16 @@ function readRuleFile(
   maxBytes: number,
   defaultScope: WorkspaceRule["scope"],
   canonicalRoot: string,
+  sourceAccess: SourcePathPolicy | undefined,
+  sourcePathPrefix: string | undefined,
 ): WorkspaceRule | null {
+  const relativeSourcePath = relPath.split(path.sep).join("/");
+  const sourcePath = sourcePathPrefix
+    ? `${sourcePathPrefix}/${relativeSourcePath}`
+    : relativeSourcePath;
+  // Apply authorization before touching the file so denied content never
+  // enters the process or a packed-context trace.
+  if (!sourcePathAllowed(sourceAccess, sourcePath)) return null;
   if (!existsSync(abs)) return null;
   // Resolve the real path and reject anything that escapes the workspace root
   // (e.g. a rule file that is a symlink to a secret elsewhere on disk).
@@ -173,7 +200,7 @@ function readRuleFile(
         ? "agent-requested"
         : defaultScope;
   return {
-    path: relPath.split(path.sep).join("/"),
+    path: sourcePath,
     name: path.basename(relPath),
     content: trimmed,
     scope,

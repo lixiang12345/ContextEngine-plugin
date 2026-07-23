@@ -367,6 +367,10 @@ export class PostgresHybridSearcher {
     for (const [id, rrf] of rrfMap) {
       const chunk = chunksById.get(id);
       if (!chunk) continue;
+      // Defense in depth for alternate/test stores that do not apply the SQL
+      // filter. Commit chunks contain metadata for multiple source paths and
+      // are hidden whenever a source policy is active.
+      if (opts.sourceAccess && chunk.language === "git-commit") continue;
       if (
         chunk.language === "git-commit" &&
         (!analyzed.prefersCommits || opts.includeCommits === false)
@@ -407,6 +411,7 @@ export class PostgresHybridSearcher {
       const known = new Set(candidates.map((candidate) => candidate.id));
       for (const chunk of expanded) {
         if (known.has(chunk.id)) continue;
+        if (opts.sourceAccess && chunk.language === "git-commit") continue;
         known.add(chunk.id);
         const features = featureScore(chunk, analyzed);
         candidates.push({

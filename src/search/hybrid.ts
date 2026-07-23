@@ -27,6 +27,7 @@ import {
   type NeuralRerankConfig,
 } from "./neural-rerank.js";
 import type { SqliteStore } from "../store/sqlite-store.js";
+import { sourcePathAllowed } from "../source-access.js";
 
 export interface HybridSearchInput {
   chunks: CodeChunk[];
@@ -118,10 +119,21 @@ export class HybridSearcher {
     const candidateLimit = Math.max(topK * 16, 128);
 
     let poolIds: Set<string> | null = null;
-    if (opts.pathPrefix || opts.language || opts.includeCommits === false) {
+    if (
+      opts.pathPrefix ||
+      opts.sourceAccess ||
+      opts.language ||
+      opts.includeCommits === false
+    ) {
       poolIds = new Set(
         [...this.chunksById.values()]
           .filter((c) => {
+            if (opts.sourceAccess) {
+              // Commit chunks aggregate several touched paths and cannot be
+              // proven safe by checking their synthetic path alone.
+              if (c.language === "git-commit") return false;
+              if (!sourcePathAllowed(opts.sourceAccess, c.path)) return false;
+            }
             if (opts.includeCommits === false && c.language === "git-commit") {
               return false;
             }

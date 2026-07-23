@@ -2629,6 +2629,10 @@ export class PostgresStore {
       );
     }
     if (filter?.sourceAccess) {
+      // Commit chunks aggregate metadata for many source paths behind one
+      // pseudo-path. Until touched paths are stored structurally, no single
+      // path-policy decision can prove the aggregate safe, so fail closed.
+      conditions.push(`${alias}.language <> 'git-commit'`);
       const prefixes = filter.sourceAccess.rules.map((rule) => rule.pathPrefix);
       const effects = filter.sourceAccess.rules.map((rule) => rule.effect);
       params.push(prefixes, effects, filter.sourceAccess.defaultAccess);
