@@ -659,6 +659,7 @@ export function observabilityDashboardHtml(): string {
   var state = { token: readSessionToken(), data: null, loading: false, refreshQueued: false, timer: null, configDirty: false };
   var byId = function (id) { return document.getElementById(id); };
   var numberFormatter = new Intl.NumberFormat();
+  function prefersReducedMotion() { return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
   var apiKey = byId("apiKey");
   apiKey.value = state.token;
 
