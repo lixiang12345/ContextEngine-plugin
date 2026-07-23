@@ -728,7 +728,9 @@ export function observabilityDashboardHtml(): string {
 
   function timeAgo(value) {
     if (!value) return "--";
-    var delta = Math.max(0, Date.now() - new Date(value).getTime());
+    var ts = new Date(value).getTime();
+    if (isNaN(ts)) return "--";
+    var delta = Math.max(0, Date.now() - ts);
     if (delta < 60000) return Math.floor(delta / 1000) + "s ago";
     if (delta < 3600000) return Math.floor(delta / 60000) + "m ago";
     if (delta < 86400000) return Math.floor(delta / 3600000) + "h ago";
@@ -1372,7 +1374,7 @@ export function observabilityDashboardHtml(): string {
     if (event.key === "/" && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") {
       event.preventDefault();
       byId("probeQuery").focus();
-      byId("probe").scrollIntoView({ behavior: "smooth", block: "start" });
+      byId("probe").scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" });
     }
   });
 
