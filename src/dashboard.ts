@@ -797,7 +797,13 @@ export function observabilityDashboardHtml(): string {
     var init = options || {};
     var headers = Object.assign({ accept: "application/json" }, init.headers || {});
     if (state.token) headers.authorization = "Bearer " + state.token;
-    var response = await fetch(path, Object.assign({}, init, { headers: headers }));
+    var controller = new AbortController();
+    var timeout = setTimeout(function () { controller.abort(); }, 30000);
+    try {
+      var response = await fetch(path, Object.assign({}, init, { headers: headers, signal: controller.signal }));
+    } finally {
+      clearTimeout(timeout);
+    }
     var contentType = response.headers.get("content-type") || "";
     var payload = contentType.indexOf("application/json") >= 0 ? await response.json() : await response.text();
     if (!response.ok) {
