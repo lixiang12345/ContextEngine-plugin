@@ -1127,7 +1127,7 @@ export function observabilityDashboardHtml(): string {
     storeSessionToken(state.token);
     refresh(true);
   });
-  byId("clearKey").addEventListener("click", function () { state.token = ""; apiKey.value = ""; apiKey.type = "password"; storeSessionToken(""); byId("toggleKey").textContent = "Show"; byId("toggleKey").setAttribute("aria-label", "Show API key"); toast("API key cleared"); refresh(true); });
+  byId("clearKey").addEventListener("click", function () { state.token = ""; apiKey.value = ""; apiKey.type = "password"; storeSessionToken(""); byId("toggleKey").textContent = "Show"; byId("toggleKey").setAttribute("aria-label", "Show API key"); toast("API key cleared", "good"); refresh(true); });
   byId("toggleKey").addEventListener("click", function () {
     var reveal = apiKey.type === "password";
     apiKey.type = reveal ? "text" : "password";
