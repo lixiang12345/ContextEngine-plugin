@@ -9,13 +9,18 @@ export function observabilityDashboardHtml(): string {
   <style>
     :root {
       color-scheme: light;
-      --bg: #f6f7f8;
+      --bg: #eef1f4;
       --surface: #ffffff;
-      --surface-muted: #f0f2f3;
+      --surface-muted: #f2f4f6;
+      --sidebar-bg: #10171e;
+      --sidebar-text: #c6d2dc;
+      --sidebar-muted: #7c8b98;
+      --sidebar-line: rgba(255,255,255,0.08);
+      --sidebar-active: #1f2c37;
       --text: #172027;
       --muted: #66727c;
-      --line: #d8dde1;
-      --line-strong: #b8c1c8;
+      --line: #dde1e6;
+      --line-strong: #c3ccd3;
       --accent: #176b4d;
       --accent-soft: #e5f2ec;
       --warning: #9a5b08;
@@ -24,283 +29,23 @@ export function observabilityDashboardHtml(): string {
       --danger-soft: #fbe9e7;
       --info: #255f89;
       --info-soft: #e8f1f7;
-      --shadow: 0 1px 2px rgba(23, 32, 39, 0.08);
+      --shadow: 0 1px 2px rgba(23, 32, 39, 0.06);
+      --shadow-lg: 0 10px 30px rgba(23, 32, 39, 0.12);
+      --radius: 10px;
+      --radius-sm: 7px;
+      --sidebar-w: 244px;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-width: 320px;
-      background: var(--bg);
-      color: var(--text);
-      font-size: 14px;
-      line-height: 1.45;
-      letter-spacing: 0;
-    }
-    button, input, select { font: inherit; letter-spacing: 0; }
-    button, a { -webkit-tap-highlight-color: transparent; }
-    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
-      outline: 2px solid var(--info);
-      outline-offset: 2px;
-    }
-    .topbar {
-      position: sticky;
-      top: 0;
-      z-index: 20;
-      min-height: 58px;
-      border-bottom: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.96);
-      backdrop-filter: blur(10px);
-    }
-    .topbar-inner {
-      width: min(1480px, 100%);
-      min-height: 58px;
-      margin: 0 auto;
-      padding: 9px 22px;
-      display: flex;
-      align-items: center;
-      gap: 18px;
-    }
-    .brand {
-      display: flex;
-      align-items: baseline;
-      gap: 9px;
-      flex: 0 0 auto;
-    }
-    .brand strong { font-size: 16px; font-weight: 720; }
-    .brand span { color: var(--muted); font-size: 12px; }
-    .connection {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 105px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--line-strong);
-      box-shadow: 0 0 0 3px var(--surface-muted);
-    }
-    .status-dot.online { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-    .status-dot.error { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
-    .auth-form {
-      margin-left: auto;
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      min-width: 0;
-    }
-    .auth-form input { width: 210px; }
-    .control {
-      min-height: 34px;
-      border: 1px solid var(--line-strong);
-      border-radius: 5px;
-      background: var(--surface);
-      color: var(--text);
-      padding: 6px 9px;
-    }
-    .control:hover { border-color: #87949e; }
-    .button {
-      min-height: 34px;
-      border: 1px solid var(--line-strong);
-      border-radius: 5px;
-      background: var(--surface);
-      color: var(--text);
-      padding: 6px 11px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-    .button:hover { background: var(--surface-muted); }
-    .button.primary { border-color: var(--accent); background: var(--accent); color: #ffffff; }
-    .button.primary:hover { background: #115a40; }
-    .button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
-    .button:disabled { opacity: 0.55; cursor: wait; }
-    .button-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-    .icon-button { width: 34px; padding: 0; display: grid; place-items: center; font-weight: 700; }
-    .top-link { color: var(--muted); text-decoration: none; padding: 7px 3px; }
-    .top-link:hover { color: var(--text); }
-    .auto-refresh { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
-    .auto-refresh input { accent-color: var(--accent); }
-    main { width: min(1480px, 100%); margin: 0 auto; padding: 22px; }
-    main:focus { outline: none; }
-    .skip-link {
-      position: fixed;
-      top: 8px;
-      left: 8px;
-      z-index: 100;
-      border-radius: 7px;
-      background: var(--text);
-      color: var(--surface);
-      padding: 8px 11px;
-      text-decoration: none;
-      transform: translateY(-150%);
-    }
-    .skip-link:focus { transform: translateY(0); }
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-    .notice {
-      display: none;
-      margin-bottom: 16px;
-      border: 1px solid #efc6c2;
-      border-radius: 6px;
-      background: var(--danger-soft);
-      color: #7f2b25;
-      padding: 10px 12px;
-    }
-    .notice.visible { display: block; }
-    .page-heading {
-      display: flex;
-      align-items: flex-end;
-      justify-content: space-between;
-      gap: 18px;
-      margin-bottom: 16px;
-    }
-    h1, h2, h3, p { margin-top: 0; }
-    h1 { margin-bottom: 3px; font-size: 22px; line-height: 1.2; font-weight: 720; }
-    h2 { margin-bottom: 12px; font-size: 15px; line-height: 1.25; font-weight: 700; }
-    .subtitle, .section-note { color: var(--muted); }
-    .subtitle { margin: 0; font-size: 13px; }
-    .updated { color: var(--muted); font-size: 12px; white-space: nowrap; }
-    .metric-grid {
-      display: grid;
-      grid-template-columns: repeat(8, minmax(112px, 1fr));
-      gap: 9px;
-      margin-bottom: 24px;
-    }
-    .metric {
-      min-height: 96px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--surface);
-      padding: 12px;
-      box-shadow: var(--shadow);
-    }
-    .metric-label { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 650; }
-    .metric-value { margin-top: 9px; font-size: 23px; line-height: 1; font-weight: 720; font-variant-numeric: tabular-nums; }
-    .metric-detail { margin-top: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .section { min-width: 0; border-top: 1px solid var(--line); padding: 20px 0 24px; }
-    .section-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-    .section-header h2 { margin: 0; }
-    .section-note { font-size: 12px; }
-    .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.72fr); gap: 28px; }
-    .split > * { min-width: 0; }
-    .table-wrap { width: 100%; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; border: 1px solid var(--line); background: var(--surface); }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
-    th { color: var(--muted); background: var(--surface-muted); font-weight: 650; white-space: nowrap; }
-    tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover td { background: #fafbfb; }
-    .number { text-align: right; font-variant-numeric: tabular-nums; }
-    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
-    .truncate { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 23px;
-      border-radius: 4px;
-      padding: 2px 7px;
-      font-size: 11px;
-      font-weight: 650;
-      white-space: nowrap;
-    }
-    .badge.good { background: var(--accent-soft); color: #12543d; }
-    .badge.warn { background: var(--warning-soft); color: #7b4908; }
-    .badge.bad { background: var(--danger-soft); color: #8b3029; }
-    .badge.info { background: var(--info-soft); color: #204f70; }
-    .badge.neutral { background: var(--surface-muted); color: var(--muted); }
-    .runtime-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--surface); }
-    .runtime-item { min-height: 61px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
-    .runtime-item:nth-child(odd) { border-right: 1px solid var(--line); }
-    .runtime-item:nth-last-child(-n + 2) { border-bottom: 0; }
-    .runtime-key { color: var(--muted); font-size: 11px; }
-    .runtime-value { margin-top: 4px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-    .config-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--surface); }
-    .config-panel { min-width: 0; padding: 14px; border-right: 1px solid var(--line); }
-    .config-panel:last-child { border-right: 0; }
-    .config-panel h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 12px; font-size: 13px; }
-    .config-panel .field { margin-top: 9px; }
-    .config-panel .field:first-of-type { margin-top: 0; }
-    .config-panel .field label { margin-bottom: 4px; }
-    .config-panel .control { min-height: 32px; }
-    .config-panel .control[type="number"] { font-variant-numeric: tabular-nums; }
-    .config-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-    .config-check { display: flex; align-items: center; gap: 7px; min-height: 32px; color: var(--text); font-size: 12px; }
-    .config-check input { accent-color: var(--accent); }
-    .config-help { margin-top: 4px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-    .model-test { display: flex; align-items: flex-start; flex-direction: column; gap: 8px; margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
-    .model-test .button { align-self: flex-end; }
-    .model-test-status { width: 100%; min-width: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-    .model-test-status.good { color: #12543d; }
-    .model-test-status.warn { color: #7b4908; }
-    .model-test-status.bad { color: #8b3029; }
-    .config-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
-    .config-status { min-height: 18px; color: var(--muted); font-size: 12px; }
-    .config-status.good { color: #12543d; }
-    .config-status.warn { color: #7b4908; }
-    .config-status.bad { color: #8b3029; }
-    .config-readonly { display: grid; gap: 10px; }
-    .config-readonly .runtime-item { min-height: 0; padding: 0 0 9px; border: 0; border-bottom: 1px solid var(--line); }
-    .config-readonly .runtime-item:last-child { padding-bottom: 0; border-bottom: 0; }
-    .latency-cell { min-width: 130px; }
-    .latency-track { width: 100%; height: 5px; margin-top: 5px; background: #e8ebed; }
-    .latency-fill { height: 100%; background: var(--info); }
-    .empty { border: 1px dashed var(--line-strong); color: var(--muted); padding: 24px; text-align: center; }
-    .probe-form { display: grid; grid-template-columns: minmax(190px, 0.72fr) minmax(220px, 1.8fr) 80px 112px 142px 104px auto; gap: 8px; align-items: end; }
-    .field { min-width: 0; }
-    .field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
-    .field .control { width: 100%; }
-    .probe-meta { margin: 12px 0 8px; color: var(--muted); font-size: 12px; min-height: 18px; }
-    .trace-panel { display: none; margin: 4px 0 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 12px 14px; }
-    .trace-panel.visible { display: block; }
-    .trace-grid { display: flex; flex-wrap: wrap; gap: 8px 20px; }
-    .trace-item { min-width: 0; }
-    .trace-key { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 650; letter-spacing: 0.02em; }
-    .trace-value { margin-top: 3px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-    .trace-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
-    .trace-chip { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 9px; font-size: 11px; font-weight: 600; }
-    .trace-chip.warn { border-color: var(--warning); color: var(--warning); }
-    .budget-line { font-variant-numeric: tabular-nums; }
-    .budget-track { width: 100%; max-width: 200px; height: 5px; margin-top: 5px; border-radius: 999px; background: #e8ebed; overflow: hidden; }
-    .budget-fill { height: 100%; background: var(--accent); border-radius: 999px; }
-    .budget-fill.near { background: var(--warning); }
-    .budget-fill.over { background: var(--danger); }
-    html[data-theme="dark"] .budget-track { background: #263440; }
-    .packed-block { margin-top: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 13px 14px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px; line-height: 1.55; max-height: 520px; overflow-y: auto; }
-    .result-list { border: 1px solid var(--line); background: var(--surface); }
-    .result { padding: 13px 14px; border-bottom: 1px solid var(--line); }
-    .result:last-child { border-bottom: 0; }
-    .result-head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; }
-    .result-path { min-width: 0; font-weight: 680; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .result-score { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .revision-cell { max-width: 150px; white-space: nowrap; }
-    .result-preview { margin-top: 7px; color: #3c4850; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.5; }
-    .channel-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
-    .channel-chip { display: inline-flex; align-items: baseline; gap: 4px; border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 8px; font-size: 10px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
-    .channel-chip .channel-pct { font-variant-numeric: tabular-nums; color: var(--text); }
-    .channel-chip.warn { border-color: var(--warning); color: var(--warning); }
-    .skeleton { color: transparent; background: #e8ebed; border-radius: 3px; animation: pulse 1.4s ease-in-out infinite; }
-    @keyframes pulse { 50% { opacity: 0.55; } }
-    @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
-
-    /* Operational polish: restrained hierarchy, dark mode, and clear feedback. */
-    html { scroll-behavior: smooth; }
     html[data-theme="dark"] {
       color-scheme: dark;
       --bg: #0b1117;
       --surface: #121a22;
       --surface-muted: #19232d;
+      --sidebar-bg: #0a0f14;
+      --sidebar-text: #c6d2dc;
+      --sidebar-muted: #74838f;
+      --sidebar-line: rgba(255,255,255,0.07);
+      --sidebar-active: #182430;
       --text: #e6edf3;
       --muted: #91a0ad;
       --line: #273440;
@@ -314,26 +59,52 @@ export function observabilityDashboardHtml(): string {
       --info: #67b7ec;
       --info-soft: #183247;
       --shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
+      --shadow-lg: 0 12px 34px rgba(0, 0, 0, 0.45);
     }
-    html[data-theme="dark"] .topbar { background: rgba(11, 17, 23, 0.9); }
-    html[data-theme="dark"] tbody tr:hover td { background: #17212a; }
-    html[data-theme="dark"] .result-preview { color: #b8c5cf; }
-    html[data-theme="dark"] .latency-track,
-    html[data-theme="dark"] .skeleton { background: #263440; }
-    html[data-theme="dark"] .badge.good,
-    html[data-theme="dark"] .config-status.good,
-    html[data-theme="dark"] .model-test-status.good { color: #83ddb5; }
-    html[data-theme="dark"] .badge.warn,
-    html[data-theme="dark"] .config-status.warn,
-    html[data-theme="dark"] .model-test-status.warn { color: #f3c572; }
-    html[data-theme="dark"] .badge.bad,
-    html[data-theme="dark"] .config-status.bad,
-    html[data-theme="dark"] .model-test-status.bad { color: #ffaaa3; }
-    html[data-theme="dark"] .badge.info { color: #a1d8f8; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+      letter-spacing: 0;
+    }
+    button, input, select, textarea { font: inherit; letter-spacing: 0; color: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+      outline: 2px solid var(--info);
+      outline-offset: 2px;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    .sr-only {
+      position: absolute;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .skip-link {
+      position: fixed;
+      top: 8px; left: 8px;
+      z-index: 100;
+      border-radius: 7px;
+      background: var(--text);
+      color: var(--surface);
+      padding: 8px 12px;
+      text-decoration: none;
+      transform: translateY(-160%);
+      transition: transform 150ms ease;
+    }
+    .skip-link:focus { transform: translateY(0); }
     .loading-bar {
       position: fixed;
       inset: 0 0 auto 0;
-      z-index: 40;
+      z-index: 60;
       height: 3px;
       pointer-events: none;
       opacity: 0;
@@ -351,59 +122,233 @@ export function observabilityDashboardHtml(): string {
     .loading-bar.active { opacity: 1; }
     .loading-bar.active::after { animation: loading-slide 1.1s ease-in-out infinite; }
     @keyframes loading-slide { to { transform: translateX(365%); } }
-    .brand { align-items: center; }
+
+    /* ---- Layout shell: fixed sidebar + fluid main column ---- */
+    .layout { display: flex; min-height: 100vh; }
+    .sidebar {
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      z-index: 45;
+      width: var(--sidebar-w);
+      display: flex;
+      flex-direction: column;
+      background: var(--sidebar-bg);
+      color: var(--sidebar-text);
+      border-right: 1px solid var(--sidebar-line);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 18px 18px 16px;
+    }
     .brand-mark {
-      width: 30px;
-      height: 30px;
-      display: grid;
-      place-items: center;
-      border-radius: 6px;
+      width: 34px; height: 34px;
+      display: grid; place-items: center;
+      border-radius: 9px;
       color: #fff;
-      background: var(--accent);
-      box-shadow: var(--shadow);
+      background: linear-gradient(140deg, #1f8f66, #124e39);
       font-size: 13px;
       font-weight: 800;
+      box-shadow: 0 3px 10px rgba(18, 78, 57, 0.5);
     }
-    .brand-copy { display: grid; gap: 0; }
-    .brand-copy strong { line-height: 1.1; }
-    .brand-copy span { line-height: 1.1; }
-    .topbar-inner { min-height: 64px; }
-    .control, .button {
-      border-radius: 6px;
-      transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+    .brand-copy { display: grid; gap: 1px; min-width: 0; }
+    .brand-copy strong { font-size: 15px; font-weight: 720; line-height: 1.15; color: #fff; }
+    .brand-copy span { font-size: 11px; line-height: 1.15; color: var(--sidebar-muted); }
+    .nav { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; flex: 1 1 auto; }
+    .nav-heading {
+      margin: 12px 10px 6px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--sidebar-muted);
     }
-    .control:focus { border-color: var(--info); box-shadow: 0 0 0 3px var(--info-soft); }
-    .button:hover:not(:disabled) { transform: translateY(-1px); }
-    .button.primary { box-shadow: var(--shadow); }
-    .button.compact { min-height: 30px; padding: 4px 9px; font-size: 11px; }
-    .icon-button.spinning { animation: spin 700ms linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .page-heading {
+    .nav-link {
+      display: flex;
       align-items: center;
-      margin: 0;
-      padding: 12px 0 20px;
+      gap: 11px;
+      padding: 9px 11px;
+      border-radius: 8px;
+      color: var(--sidebar-text);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 550;
+      border: 1px solid transparent;
+      transition: background 140ms ease, color 140ms ease;
+    }
+    .nav-link svg { width: 17px; height: 17px; flex: 0 0 auto; opacity: 0.75; }
+    .nav-link:hover { background: var(--sidebar-active); color: #fff; }
+    .nav-link.active {
+      background: var(--sidebar-active);
+      color: #fff;
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+    .nav-link.active svg { opacity: 1; color: var(--accent); }
+    .sidebar-foot {
+      padding: 14px 18px 18px;
+      border-top: 1px solid var(--sidebar-line);
+      display: grid;
+      gap: 10px;
+    }
+    .sidebar-foot .top-link {
+      color: var(--sidebar-muted);
+      text-decoration: none;
+      font-size: 12px;
+    }
+    .sidebar-foot .top-link:hover { color: #fff; }
+    .sidebar-conn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--sidebar-muted);
+    }
+    .sidebar-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 44;
+      background: rgba(6, 10, 14, 0.5);
+      backdrop-filter: blur(1px);
+    }
+    .sidebar-backdrop.visible { display: block; }
+
+    .main-wrap {
+      margin-left: var(--sidebar-w);
+      flex: 1 1 auto;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding: 11px 26px;
+      min-height: 60px;
+      background: color-mix(in srgb, var(--surface) 88%, transparent);
+      backdrop-filter: blur(10px);
       border-bottom: 1px solid var(--line);
     }
-    .eyebrow { margin-bottom: 7px; color: var(--accent); font-size: 11px; font-weight: 750; letter-spacing: 0; text-transform: uppercase; }
-    h1 { font-size: 26px; letter-spacing: 0; }
-    .section-nav { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
-    .section-nav a {
-      border: 1px solid var(--line);
-      border-radius: 5px;
-      background: var(--surface);
+    .topbar-title { display: flex; flex-direction: column; gap: 1px; margin-right: auto; min-width: 0; }
+    .topbar-eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+    .updated { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .connection {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       color: var(--muted);
-      padding: 5px 10px;
-      text-decoration: none;
-      font-size: 11px;
+      font-size: 12px;
+      white-space: nowrap;
     }
-    .section-nav a:hover { border-color: var(--accent); color: var(--accent); }
-    .metric-grid { gap: 12px; }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--line-strong);
+      box-shadow: 0 0 0 3px var(--surface-muted);
+    }
+    .status-dot.online { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .status-dot.error { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+    .auth-form { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+    .auth-form input { width: 190px; }
+    .top-controls { display: flex; align-items: center; gap: 7px; }
+    .auto-refresh { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .auto-refresh input { accent-color: var(--accent); }
+    .nav-toggle { display: none; }
+
+    .control {
+      min-height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      padding: 6px 10px;
+      transition: border-color 140ms ease, box-shadow 140ms ease;
+    }
+    .control:hover { border-color: var(--muted); }
+    .control:focus { border-color: var(--info); box-shadow: 0 0 0 3px var(--info-soft); outline: none; }
+    .button {
+      min-height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      padding: 6px 12px;
+      cursor: pointer;
+      white-space: nowrap;
+      font-weight: 550;
+      transition: background 140ms ease, border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+    }
+    .button:hover:not(:disabled) { background: var(--surface-muted); transform: translateY(-1px); }
+    .button:active:not(:disabled) { transform: translateY(0); }
+    .button.primary { border-color: var(--accent); background: var(--accent); color: #fff; box-shadow: var(--shadow); }
+    .button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, #000); }
+    .button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+    .button.ghost:hover:not(:disabled) { background: var(--surface-muted); color: var(--text); }
+    .button.compact { min-height: 30px; padding: 4px 9px; font-size: 11px; }
+    .button:disabled { opacity: 0.55; cursor: wait; }
+    .icon-button { width: 34px; padding: 0; display: grid; place-items: center; font-weight: 700; }
+    .icon-button.spinning { animation: spin 700ms linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .button-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+
+    main { width: 100%; max-width: 1420px; margin: 0 auto; padding: 24px 26px 60px; }
+    main:focus { outline: none; }
+
+    .notice {
+      display: none;
+      margin-bottom: 18px;
+      border: 1px solid var(--danger);
+      border-radius: var(--radius-sm);
+      background: var(--danger-soft);
+      color: var(--danger);
+      padding: 11px 14px;
+      font-weight: 550;
+    }
+    .notice.visible { display: block; }
+
+    .section {
+      margin-bottom: 20px;
+      padding: 20px 22px 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      scroll-margin-top: 78px;
+    }
+    .section-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 15px; }
+    .section-header h2 { margin: 0; font-size: 16px; line-height: 1.25; font-weight: 700; }
+    .section-note { color: var(--muted); font-size: 12px; }
+    .subsection { min-width: 0; }
+    .subsection > .section-header { margin-bottom: 11px; }
+    .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 0.66fr); gap: 26px; }
+    .split > * { min-width: 0; }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+    }
     .metric {
       position: relative;
       overflow: hidden;
-      border-radius: 7px;
-      box-shadow: var(--shadow);
-      transition: border-color 180ms ease, box-shadow 180ms ease;
+      min-height: 92px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      padding: 13px 14px;
+      transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
     }
     .metric::before {
       content: "";
@@ -411,234 +356,339 @@ export function observabilityDashboardHtml(): string {
       inset: 0 auto 0 0;
       width: 3px;
       background: var(--info);
-      opacity: 0.7;
+      opacity: 0.8;
     }
-    .metric:nth-child(2n)::before { background: var(--accent); }
-    .metric:nth-child(3n)::before { background: var(--warning); }
-    .metric:hover { border-color: var(--line-strong); }
-    .metric-value { letter-spacing: 0; }
-    .section {
-      margin-bottom: 0;
-      padding: 22px 0 26px;
-      border: 0;
-      border-top: 1px solid var(--line);
-      border-radius: 0;
-      background: transparent;
-      box-shadow: none;
-      scroll-margin-top: 82px;
+    .metric:nth-child(3n)::before { background: var(--accent); }
+    .metric:nth-child(3n+2)::before { background: var(--warning); }
+    .metric:hover { border-color: var(--line-strong); box-shadow: var(--shadow); transform: translateY(-1px); }
+    .metric-label { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 650; letter-spacing: 0.03em; }
+    .metric-value { margin-top: 9px; font-size: 24px; line-height: 1; font-weight: 720; font-variant-numeric: tabular-nums; }
+    .metric-detail { margin-top: 8px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .table-wrap { width: 100%; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { padding: 9px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+    th { color: var(--muted); background: var(--surface-muted); font-weight: 650; white-space: nowrap; position: sticky; top: 0; z-index: 1; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: var(--surface-muted); }
+    .number { text-align: right; font-variant-numeric: tabular-nums; }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    .truncate { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .revision-cell { max-width: 150px; white-space: nowrap; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      border-radius: 5px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 650;
+      white-space: nowrap;
     }
-    .section-header h2 { font-size: 16px; letter-spacing: 0; }
-    .table-wrap, .runtime-list, .config-grid, .result-list, .empty {
-      border-radius: 6px;
-      overflow: hidden;
-    }
-    .table-wrap { box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); }
-    th { position: sticky; top: 0; z-index: 1; }
-    .config-panel { background: var(--surface); }
-    .result { transition: background 140ms ease; }
+    .badge.good { background: var(--accent-soft); color: var(--accent); }
+    .badge.warn { background: var(--warning-soft); color: var(--warning); }
+    .badge.bad { background: var(--danger-soft); color: var(--danger); }
+    .badge.info { background: var(--info-soft); color: var(--info); }
+    .badge.neutral { background: var(--surface-muted); color: var(--muted); }
+
+    .runtime-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
+    .runtime-item { min-height: 58px; padding: 10px 13px; border-bottom: 1px solid var(--line); }
+    .runtime-item:nth-child(odd) { border-right: 1px solid var(--line); }
+    .runtime-item:nth-last-child(-n + 2) { border-bottom: 0; }
+    .runtime-key { color: var(--muted); font-size: 11px; }
+    .runtime-value { margin-top: 4px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+    .config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .config-panel { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+    .config-panel h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 13px; font-size: 13px; font-weight: 700; }
+    .config-panel .field { margin-top: 10px; }
+    .config-panel .field:first-of-type { margin-top: 0; }
+    .config-panel .control { min-height: 32px; width: 100%; }
+    .config-panel .control[type="number"] { font-variant-numeric: tabular-nums; }
+    .field { min-width: 0; }
+    .field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
+    .field .control { width: 100%; }
+    .config-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .config-check { display: flex; align-items: center; gap: 7px; min-height: 32px; color: var(--text); font-size: 12px; }
+    .config-check input { accent-color: var(--accent); }
+    .config-help { margin-top: 5px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .model-test { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .model-test .button { align-self: flex-end; }
+    .model-test-status { width: 100%; min-width: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .model-test-status.good { color: var(--accent); }
+    .model-test-status.warn { color: var(--warning); }
+    .model-test-status.bad { color: var(--danger); }
+    .config-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+    .config-status { min-height: 18px; color: var(--muted); font-size: 12px; }
+    .config-status.good { color: var(--accent); }
+    .config-status.warn { color: var(--warning); }
+    .config-status.bad { color: var(--danger); }
+    .config-readonly { display: grid; gap: 10px; }
+    .config-readonly .runtime-item { min-height: 0; padding: 0 0 9px; border: 0; border-bottom: 1px solid var(--line); }
+    .config-readonly .runtime-item:last-child { padding-bottom: 0; border-bottom: 0; }
+
+    .latency-cell { min-width: 130px; }
+    .latency-track { width: 100%; height: 5px; margin-top: 5px; border-radius: 999px; background: var(--surface-muted); overflow: hidden; }
+    .latency-fill { height: 100%; background: var(--info); border-radius: 999px; }
+
+    .empty { border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); color: var(--muted); padding: 26px; text-align: center; }
+
+    .probe-form { display: grid; grid-template-columns: minmax(180px, 0.8fr) minmax(220px, 2fr) 80px 118px 150px 110px auto; gap: 10px; align-items: end; }
+    .probe-form .button { min-height: 34px; }
+    .probe-meta { margin: 14px 0 8px; color: var(--muted); font-size: 12px; min-height: 18px; }
+    .trace-panel { display: none; margin: 4px 0 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-muted); padding: 13px 15px; }
+    .trace-panel.visible { display: block; }
+    .trace-grid { display: flex; flex-wrap: wrap; gap: 12px 22px; }
+    .trace-item { min-width: 0; }
+    .trace-key { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 650; letter-spacing: 0.02em; }
+    .trace-value { margin-top: 3px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .trace-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+    .trace-chip { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 9px; font-size: 11px; font-weight: 600; }
+    .trace-chip.warn { border-color: var(--warning); color: var(--warning); }
+    .budget-line { font-variant-numeric: tabular-nums; }
+    .budget-track { width: 100%; max-width: 210px; height: 6px; margin-top: 6px; border-radius: 999px; background: var(--surface); overflow: hidden; border: 1px solid var(--line); }
+    .budget-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+    .budget-fill.near { background: var(--warning); }
+    .budget-fill.over { background: var(--danger); }
+    .packed-block { margin-top: 4px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); padding: 14px 15px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px; line-height: 1.55; max-height: 520px; overflow-y: auto; }
+
+    .result-list { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
+    .result { padding: 14px 15px; border-bottom: 1px solid var(--line); transition: background 140ms ease; }
+    .result:last-child { border-bottom: 0; }
     .result:hover { background: var(--surface-muted); }
+    .result-head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; }
+    .result-path { min-width: 0; font-weight: 680; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .result-actions { display: flex; align-items: center; gap: 7px; }
-    .toast-stack { position: fixed; right: 18px; bottom: 18px; z-index: 50; display: grid; gap: 8px; width: min(360px, calc(100vw - 36px)); }
+    .result-score { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .result-preview { margin-top: 8px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.5; }
+    .channel-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+    .channel-chip { display: inline-flex; align-items: baseline; gap: 4px; border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 8px; font-size: 10px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+    .channel-chip .channel-pct { font-variant-numeric: tabular-nums; color: var(--text); }
+    .channel-chip.warn { border-color: var(--warning); color: var(--warning); }
+
+    .skeleton { color: transparent; background: var(--surface-muted); border-radius: 3px; animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.55; } }
+
+    .toast-stack { position: fixed; right: 18px; bottom: 18px; z-index: 70; display: grid; gap: 8px; width: min(360px, calc(100vw - 36px)); }
     .toast {
       border: 1px solid var(--line-strong);
-      border-radius: 7px;
+      border-radius: var(--radius-sm);
       background: var(--surface);
       color: var(--text);
       padding: 11px 13px;
-      box-shadow: 0 16px 38px rgba(0,0,0,0.2);
+      box-shadow: var(--shadow-lg);
       animation: toast-in 180ms ease-out;
     }
     .toast.good { border-color: var(--accent); }
     .toast.bad { border-color: var(--danger); }
     @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
-    @media (max-width: 1180px) {
-      .metric-grid { grid-template-columns: repeat(4, minmax(130px, 1fr)); }
+
+    @media (max-width: 1080px) {
       .split { grid-template-columns: 1fr; }
-      .config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .config-panel:nth-child(2) { border-right: 0; }
-      .config-panel:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
-      .probe-form { grid-template-columns: 1fr 2fr 90px 110px 120px 104px; }
+      .config-grid { grid-template-columns: 1fr; }
+      .probe-form { grid-template-columns: 1fr 1fr; }
+      .probe-form .field-query { grid-column: 1 / -1; }
       .probe-form .button { grid-column: 1 / -1; justify-self: start; }
     }
-    @media (max-width: 760px) {
-      .topbar-inner { align-items: flex-start; flex-wrap: wrap; padding: 10px 14px; }
-      .auth-form { order: 3; width: 100%; margin-left: 0; flex-wrap: wrap; }
-      .auth-form input { flex: 1 1 160px; width: auto; min-width: 120px; }
-      .auto-refresh { margin-left: auto; }
-      main { padding: 17px 14px; }
-      .page-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
+    @media (max-width: 900px) {
+      .sidebar { transform: translateX(-100%); transition: transform 200ms ease; box-shadow: var(--shadow-lg); }
+      .sidebar.open { transform: translateX(0); }
+      .main-wrap { margin-left: 0; }
+      .nav-toggle { display: grid; }
+    }
+    @media (max-width: 620px) {
+      .topbar { padding: 10px 16px; gap: 10px; }
+      main { padding: 18px 16px 48px; }
+      .section { padding: 16px 15px 18px; }
+      .auth-form { order: 5; width: 100%; }
+      .auth-form input { flex: 1 1 150px; width: auto; min-width: 120px; }
+      .topbar-title { margin-right: 0; }
       .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .metric { min-height: 88px; }
       .runtime-list { grid-template-columns: 1fr; }
       .runtime-item:nth-child(odd) { border-right: 0; }
       .runtime-item:nth-last-child(2) { border-bottom: 1px solid var(--line); }
-      .config-grid { grid-template-columns: 1fr; }
-      .config-panel { border-right: 0; border-bottom: 1px solid var(--line); }
-      .config-panel:last-child { border-bottom: 0; }
-      .config-panel:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
-      .config-actions { align-items: flex-start; flex-direction: column; }
+      .config-actions { flex-direction: column; align-items: flex-start; }
       .probe-form { grid-template-columns: 1fr; }
-      .probe-form .button { grid-column: auto; width: 100%; }
-      .top-link { display: none; }
-      .page-heading { padding: 8px 0 18px; }
-      .section { padding: 18px 0 22px; }
-      .section-nav { display: none; }
-      .result-head { align-items: flex-start; flex-direction: column; }
+      .probe-form .field-query, .probe-form .button { grid-column: auto; width: 100%; }
+      .result-head { flex-direction: column; align-items: flex-start; }
       .result-actions { width: 100%; justify-content: space-between; }
     }
     @media (prefers-reduced-motion: reduce) {
       html { scroll-behavior: auto; }
       .skeleton, .loading-bar.active::after, .icon-button.spinning, .toast { animation: none; }
-      .control, .button, .metric, .result, .loading-bar { transition: none; }
-      .button:hover:not(:disabled) { transform: none; }
+      .control, .button, .metric, .result, .loading-bar, .sidebar { transition: none; }
+      .button:hover:not(:disabled), .metric:hover { transform: none; }
     }
   </style>
 </head>
 <body>
   <a class="skip-link" href="#mainContent">Skip to main content</a>
   <div id="loadingBar" class="loading-bar" aria-hidden="true"></div>
-  <header class="topbar">
-    <div class="topbar-inner">
+  <div class="layout">
+    <aside id="sidebar" class="sidebar" aria-label="Primary navigation">
       <div class="brand"><span class="brand-mark" aria-hidden="true">CE</span><span class="brand-copy"><strong>ContextEngine</strong><span>Observability</span></span></div>
-      <div class="connection" role="status" aria-live="polite" aria-atomic="true"><span id="connectionDot" class="status-dot" aria-hidden="true"></span><span id="connectionText">Connecting</span></div>
-      <label class="auto-refresh"><input id="autoRefresh" type="checkbox" checked> Auto refresh</label>
-      <a class="top-link" href="/openapi.json" target="_blank" rel="noreferrer">API schema</a>
-      <form id="authForm" class="auth-form">
-        <input id="apiKey" class="control" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Bearer API key" aria-label="Bearer API key">
-        <button id="toggleKey" class="button ghost compact" type="button" aria-label="Show API key">Show</button>
-        <button class="button primary" type="submit">Connect</button>
-        <button id="clearKey" class="button ghost" type="button">Clear</button>
-        <button id="themeToggle" class="button icon-button" type="button" title="Use dark theme" aria-label="Use dark theme" aria-pressed="false">◐</button>
-        <button id="refresh" class="button icon-button" type="button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button>
-      </form>
+      <nav class="nav" aria-label="Dashboard sections">
+        <span class="nav-heading">Monitor</span>
+        <a class="nav-link" href="#overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>Overview</a>
+        <a class="nav-link" href="#health"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Route health</a>
+        <a class="nav-link" href="#activity"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Activity</a>
+        <span class="nav-heading">Manage</span>
+        <a class="nav-link" href="#configuration"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Configuration</a>
+        <a class="nav-link" href="#workspaces"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Workspaces</a>
+        <a class="nav-link" href="#probe"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Retrieval probe</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="sidebar-conn" role="status" aria-live="polite" aria-atomic="true"><span id="connectionDot" class="status-dot" aria-hidden="true"></span><span id="connectionText">Connecting</span></div>
+        <a class="top-link" href="/openapi.json" target="_blank" rel="noreferrer">API schema →</a>
+      </div>
+    </aside>
+    <div id="sidebarBackdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+    <div class="main-wrap">
+      <header class="topbar">
+        <button id="navToggle" class="button icon-button nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
+        <div class="topbar-title">
+          <span class="topbar-eyebrow">Live operations console</span>
+          <span id="updatedAt" class="updated">Waiting for data</span>
+        </div>
+        <form id="authForm" class="auth-form">
+          <input id="apiKey" class="control" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Bearer API key" aria-label="Bearer API key">
+          <button id="toggleKey" class="button ghost compact" type="button" aria-label="Show API key">Show</button>
+          <button class="button primary" type="submit">Connect</button>
+          <button id="clearKey" class="button ghost" type="button">Clear</button>
+        </form>
+        <div class="top-controls">
+          <label class="auto-refresh"><input id="autoRefresh" type="checkbox" checked> Auto</label>
+          <button id="themeToggle" class="button icon-button" type="button" title="Use dark theme" aria-label="Use dark theme" aria-pressed="false">◐</button>
+          <button id="refresh" class="button icon-button" type="button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button>
+        </div>
+      </header>
+      <main id="mainContent" tabindex="-1">
+        <div id="notice" class="notice" role="alert"></div>
+        <section id="overview" class="section">
+          <div class="section-header"><h2>Service overview</h2><span class="section-note">Index health, retrieval traffic, and runtime state</span></div>
+          <div class="metric-grid" aria-label="Service metrics">
+            <div class="metric"><div class="metric-label">Service</div><div id="serviceMetric" class="metric-value">--</div><div id="serviceDetail" class="metric-detail">No data</div></div>
+            <div class="metric"><div class="metric-label">Workspaces</div><div id="workspaceMetric" class="metric-value">--</div><div id="workspaceDetail" class="metric-detail">No data</div></div>
+            <div class="metric"><div class="metric-label">Files</div><div id="fileMetric" class="metric-value">--</div><div id="fileDetail" class="metric-detail">Indexed source files</div></div>
+            <div class="metric"><div class="metric-label">Chunks</div><div id="chunkMetric" class="metric-value">--</div><div id="chunkDetail" class="metric-detail">Retrievable chunks</div></div>
+            <div class="metric"><div class="metric-label">Requests</div><div id="requestMetric" class="metric-value">--</div><div id="requestDetail" class="metric-detail">Since process start</div></div>
+            <div class="metric"><div class="metric-label">Error rate</div><div id="errorMetric" class="metric-value">--</div><div id="errorDetail" class="metric-detail">HTTP 4xx and 5xx</div></div>
+            <div class="metric"><div class="metric-label">P95 latency</div><div id="latencyMetric" class="metric-value">--</div><div id="latencyDetail" class="metric-detail">All observed routes</div></div>
+            <div class="metric"><div class="metric-label">Index jobs</div><div id="jobMetric" class="metric-value">--</div><div id="jobDetail" class="metric-detail">Queued or running</div></div>
+            <div class="metric"><div class="metric-label">MCP sessions</div><div id="mcpMetric" class="metric-value">--</div><div id="mcpDetail" class="metric-detail">Active durable sessions</div></div>
+          </div>
+        </section>
+        <section id="health" class="section">
+          <div class="split">
+            <div class="subsection">
+              <div class="section-header"><h2>Route health</h2><span class="section-note">In-memory process window</span></div>
+              <div id="routeTable" class="empty">No request observations yet.</div>
+            </div>
+            <div class="subsection">
+              <div class="section-header"><h2>Runtime</h2><span class="section-note">Current process</span></div>
+              <div id="runtimeList" class="runtime-list">
+                <div class="runtime-item"><div class="runtime-key">Uptime</div><div class="runtime-value">--</div></div>
+                <div class="runtime-item"><div class="runtime-key">Memory</div><div class="runtime-value">--</div></div>
+                <div class="runtime-item"><div class="runtime-key">Node</div><div class="runtime-value">--</div></div>
+                <div class="runtime-item"><div class="runtime-key">Storage</div><div class="runtime-value">--</div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="configuration" class="section">
+          <div class="section-header"><h2>Model &amp; runtime configuration</h2><span class="section-note">Applied to this process</span></div>
+          <form id="modelConfigForm">
+            <div class="config-grid">
+              <div class="config-panel">
+                <h3><span>Embedding</span><span id="embeddingState" class="badge neutral">--</span></h3>
+                <label class="config-check"><input id="embeddingEnabled" type="checkbox" aria-label="Enable embedding"> Enabled</label>
+                <div class="field"><label for="embeddingBaseUrl">Base URL</label><input id="embeddingBaseUrl" class="control" type="url" spellcheck="false" aria-label="Embedding base URL"></div>
+                <div class="field"><label for="embeddingModel">Model</label><input id="embeddingModel" class="control" type="text" spellcheck="false" aria-label="Embedding model"></div>
+                <div class="field"><label for="embeddingAuth">Authentication</label><select id="embeddingAuth" class="control" aria-label="Embedding authentication"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
+                <div class="field"><label for="embeddingApiKey">API key</label><input id="embeddingApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false" aria-label="Embedding API key"></div>
+                <div id="embeddingKeyHelp" class="config-help">Leave blank to keep the current key.</div>
+                <div class="config-field-grid">
+                  <div class="field"><label for="embeddingDimensions">Dimensions</label><input id="embeddingDimensions" class="control" type="number" min="1"></div>
+                  <div class="field"><label for="embeddingBatchSize">Batch size</label><input id="embeddingBatchSize" class="control" type="number" min="1" max="1024"></div>
+                </div>
+                <div class="config-field-grid">
+                  <div class="field"><label for="embeddingMaxChars">Max input chars</label><input id="embeddingMaxChars" class="control" type="number" min="100"></div>
+                  <label class="config-check"><input id="embeddingInputType" type="checkbox"> Qwen input type</label>
+                </div>
+                <div class="model-test">
+                  <span id="embeddingTestStatus" class="model-test-status" aria-live="polite">Not tested</span>
+                  <button id="testEmbedding" class="button" type="button" aria-label="Test embedding connection">Test connection</button>
+                </div>
+              </div>
+              <div class="config-panel">
+                <h3><span>Reranker</span><span id="rerankerState" class="badge neutral">--</span></h3>
+                <label class="config-check"><input id="rerankerEnabled" type="checkbox" aria-label="Enable reranker"> Enabled</label>
+                <div class="field"><label for="rerankerBaseUrl">Base URL</label><input id="rerankerBaseUrl" class="control" type="url" spellcheck="false" aria-label="Reranker base URL"></div>
+                <div class="field"><label for="rerankerModel">Model</label><input id="rerankerModel" class="control" type="text" spellcheck="false" aria-label="Reranker model"></div>
+                <div class="field"><label for="rerankerAuth">Authentication</label><select id="rerankerAuth" class="control" aria-label="Reranker authentication"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
+                <div class="field"><label for="rerankerApiKey">API key</label><input id="rerankerApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false" aria-label="Reranker API key"></div>
+                <div id="rerankerKeyHelp" class="config-help">Leave blank to keep the current key.</div>
+                <div class="config-field-grid">
+                  <div class="field"><label for="rerankerTopN">Top N</label><input id="rerankerTopN" class="control" type="number" min="2" max="64"></div>
+                  <div class="field"><label for="rerankerWeight">Weight</label><input id="rerankerWeight" class="control" type="number" min="0.05" max="0.85" step="0.01"></div>
+                </div>
+                <div class="field"><label for="rerankerMaxChars">Max document chars</label><input id="rerankerMaxChars" class="control" type="number" min="200"></div>
+                <div class="field"><label for="rerankerInstruction">Instruction</label><textarea id="rerankerInstruction" class="control" rows="3"></textarea></div>
+                <div class="model-test">
+                  <span id="rerankerTestStatus" class="model-test-status" aria-live="polite">Not tested</span>
+                  <button id="testReranker" class="button" type="button" aria-label="Test reranker connection">Test connection</button>
+                </div>
+              </div>
+              <div class="config-panel">
+                <h3><span>Runtime policy</span><span class="badge info">Effective</span></h3>
+                <div id="runtimeConfigList" class="config-readonly"></div>
+              </div>
+              <div class="config-panel">
+                <h3><span>Server &amp; storage</span><span class="badge info">Effective</span></h3>
+                <div id="serverConfigList" class="config-readonly"></div>
+              </div>
+            </div>
+            <div class="config-actions">
+              <span id="configStatus" class="config-status" role="status" aria-live="polite" aria-atomic="true">Waiting for configuration.</span>
+              <button id="saveConfiguration" class="button primary" type="submit">Apply configuration</button>
+            </div>
+          </form>
+        </section>
+        <section id="workspaces" class="section">
+          <div class="section-header"><h2>Workspaces</h2><span id="workspaceNote" class="section-note">No workspaces loaded</span></div>
+          <div id="workspaceTable" class="empty">Connect to load workspaces.</div>
+        </section>
+        <section id="activity" class="section">
+          <div class="split">
+            <div class="subsection">
+              <div class="section-header"><h2>Recent index jobs</h2><span class="section-note">Latest 25</span></div>
+              <div id="jobTable" class="empty">No index jobs loaded.</div>
+            </div>
+            <div class="subsection">
+              <div class="section-header"><h2>Recent requests</h2><span class="section-note">No payload capture</span></div>
+              <div id="requestTable" class="empty">No requests observed.</div>
+            </div>
+          </div>
+        </section>
+        <section id="probe" class="section">
+          <div class="section-header"><h2>Retrieval probe</h2><span class="section-note">Run a live search against an indexed workspace</span></div>
+          <form id="probeForm" class="probe-form">
+            <div class="field"><label for="probeWorkspace">Workspace</label><select id="probeWorkspace" class="control" required><option value="">Select workspace</option></select></div>
+            <div class="field field-query"><label for="probeQuery">Query</label><input id="probeQuery" class="control" required maxlength="20000" placeholder="Find authorization checks before access is granted"></div>
+            <div class="field"><label for="probeTopK">Top K</label><input id="probeTopK" class="control" type="number" min="1" max="40" value="8"></div>
+            <div class="field" id="probeModeField"><label for="probeMode">Mode</label><select id="probeMode" class="control"><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="bm25">BM25</option><option value="semantic">Semantic</option></select></div>
+            <div class="field"><label for="probeView">View</label><select id="probeView" class="control"><option value="hits">Ranked hits</option><option value="raw">Packed · raw</option><option value="extractive">Packed · extractive</option></select></div>
+            <div class="field" id="probeMaxTokensField" hidden><label for="probeMaxTokens">Max tokens</label><input id="probeMaxTokens" class="control" type="number" min="1" max="128000" placeholder="uncapped"></div>
+            <button id="probeSubmit" class="button primary" type="submit">Run search</button>
+          </form>
+          <div id="probeMeta" class="probe-meta" role="status" aria-live="polite" aria-atomic="true"></div>
+          <div id="probeTrace" class="trace-panel" aria-live="polite"></div>
+          <div id="probeResults" class="empty" aria-busy="false">No probe results yet.</div>
+        </section>
+      </main>
     </div>
-  </header>
-  <main id="mainContent" tabindex="-1">
-    <div id="notice" class="notice" role="alert"></div>
-    <div class="page-heading">
-      <div>
-        <div class="eyebrow">Live operations console</div>
-        <h1>Service overview</h1>
-        <p class="subtitle">Index health, retrieval traffic, and runtime state.</p>
-        <nav class="section-nav" aria-label="Dashboard sections"><a href="#health">Health</a><a href="#configuration">Configuration</a><a href="#workspaces">Workspaces</a><a href="#activity">Activity</a><a href="#probe">Retrieval probe</a></nav>
-      </div>
-      <div id="updatedAt" class="updated">Waiting for data</div>
-    </div>
-    <section class="metric-grid" aria-label="Service metrics">
-      <div class="metric"><div class="metric-label">Service</div><div id="serviceMetric" class="metric-value">--</div><div id="serviceDetail" class="metric-detail">No data</div></div>
-      <div class="metric"><div class="metric-label">Workspaces</div><div id="workspaceMetric" class="metric-value">--</div><div id="workspaceDetail" class="metric-detail">No data</div></div>
-      <div class="metric"><div class="metric-label">Files</div><div id="fileMetric" class="metric-value">--</div><div id="fileDetail" class="metric-detail">Indexed source files</div></div>
-      <div class="metric"><div class="metric-label">Chunks</div><div id="chunkMetric" class="metric-value">--</div><div id="chunkDetail" class="metric-detail">Retrievable chunks</div></div>
-      <div class="metric"><div class="metric-label">Requests</div><div id="requestMetric" class="metric-value">--</div><div id="requestDetail" class="metric-detail">Since process start</div></div>
-      <div class="metric"><div class="metric-label">Error rate</div><div id="errorMetric" class="metric-value">--</div><div id="errorDetail" class="metric-detail">HTTP 4xx and 5xx</div></div>
-      <div class="metric"><div class="metric-label">P95 latency</div><div id="latencyMetric" class="metric-value">--</div><div id="latencyDetail" class="metric-detail">All observed routes</div></div>
-      <div class="metric"><div class="metric-label">Index jobs</div><div id="jobMetric" class="metric-value">--</div><div id="jobDetail" class="metric-detail">Queued or running</div></div>
-      <div class="metric"><div class="metric-label">MCP sessions</div><div id="mcpMetric" class="metric-value">--</div><div id="mcpDetail" class="metric-detail">Active durable sessions</div></div>
-    </section>
-    <section id="health" class="section split">
-      <div>
-        <div class="section-header"><h2>Route health</h2><span class="section-note">In-memory process window</span></div>
-        <div id="routeTable" class="empty">No request observations yet.</div>
-      </div>
-      <div>
-        <div class="section-header"><h2>Runtime</h2><span class="section-note">Current process</span></div>
-        <div id="runtimeList" class="runtime-list">
-          <div class="runtime-item"><div class="runtime-key">Uptime</div><div class="runtime-value">--</div></div>
-          <div class="runtime-item"><div class="runtime-key">Memory</div><div class="runtime-value">--</div></div>
-          <div class="runtime-item"><div class="runtime-key">Node</div><div class="runtime-value">--</div></div>
-          <div class="runtime-item"><div class="runtime-key">Storage</div><div class="runtime-value">--</div></div>
-        </div>
-      </div>
-    </section>
-    <section id="configuration" class="section">
-      <div class="section-header"><h2>Model &amp; runtime configuration</h2><span class="section-note">Applied to this process</span></div>
-      <form id="modelConfigForm">
-        <div class="config-grid">
-          <div class="config-panel">
-            <h3><span>Embedding</span><span id="embeddingState" class="badge neutral">--</span></h3>
-            <label class="config-check"><input id="embeddingEnabled" type="checkbox" aria-label="Enable embedding"> Enabled</label>
-            <div class="field"><label for="embeddingBaseUrl">Base URL</label><input id="embeddingBaseUrl" class="control" type="url" spellcheck="false" aria-label="Embedding base URL"></div>
-            <div class="field"><label for="embeddingModel">Model</label><input id="embeddingModel" class="control" type="text" spellcheck="false" aria-label="Embedding model"></div>
-            <div class="field"><label for="embeddingAuth">Authentication</label><select id="embeddingAuth" class="control" aria-label="Embedding authentication"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
-            <div class="field"><label for="embeddingApiKey">API key</label><input id="embeddingApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false" aria-label="Embedding API key"></div>
-            <div id="embeddingKeyHelp" class="config-help">Leave blank to keep the current key.</div>
-            <div class="config-field-grid">
-              <div class="field"><label for="embeddingDimensions">Dimensions</label><input id="embeddingDimensions" class="control" type="number" min="1"></div>
-              <div class="field"><label for="embeddingBatchSize">Batch size</label><input id="embeddingBatchSize" class="control" type="number" min="1" max="1024"></div>
-            </div>
-            <div class="config-field-grid">
-              <div class="field"><label for="embeddingMaxChars">Max input chars</label><input id="embeddingMaxChars" class="control" type="number" min="100"></div>
-              <label class="config-check"><input id="embeddingInputType" type="checkbox"> Qwen input type</label>
-            </div>
-            <div class="model-test">
-              <span id="embeddingTestStatus" class="model-test-status" aria-live="polite">Not tested</span>
-              <button id="testEmbedding" class="button" type="button" aria-label="Test embedding connection">Test connection</button>
-            </div>
-          </div>
-          <div class="config-panel">
-            <h3><span>Reranker</span><span id="rerankerState" class="badge neutral">--</span></h3>
-            <label class="config-check"><input id="rerankerEnabled" type="checkbox" aria-label="Enable reranker"> Enabled</label>
-            <div class="field"><label for="rerankerBaseUrl">Base URL</label><input id="rerankerBaseUrl" class="control" type="url" spellcheck="false" aria-label="Reranker base URL"></div>
-            <div class="field"><label for="rerankerModel">Model</label><input id="rerankerModel" class="control" type="text" spellcheck="false" aria-label="Reranker model"></div>
-            <div class="field"><label for="rerankerAuth">Authentication</label><select id="rerankerAuth" class="control" aria-label="Reranker authentication"><option value="bearer">Bearer</option><option value="none">None</option></select></div>
-            <div class="field"><label for="rerankerApiKey">API key</label><input id="rerankerApiKey" class="control" type="password" autocomplete="new-password" spellcheck="false" aria-label="Reranker API key"></div>
-            <div id="rerankerKeyHelp" class="config-help">Leave blank to keep the current key.</div>
-            <div class="config-field-grid">
-              <div class="field"><label for="rerankerTopN">Top N</label><input id="rerankerTopN" class="control" type="number" min="2" max="64"></div>
-              <div class="field"><label for="rerankerWeight">Weight</label><input id="rerankerWeight" class="control" type="number" min="0.05" max="0.85" step="0.01"></div>
-            </div>
-            <div class="field"><label for="rerankerMaxChars">Max document chars</label><input id="rerankerMaxChars" class="control" type="number" min="200"></div>
-            <div class="field"><label for="rerankerInstruction">Instruction</label><textarea id="rerankerInstruction" class="control" rows="3"></textarea></div>
-            <div class="model-test">
-              <span id="rerankerTestStatus" class="model-test-status" aria-live="polite">Not tested</span>
-              <button id="testReranker" class="button" type="button" aria-label="Test reranker connection">Test connection</button>
-            </div>
-          </div>
-          <div class="config-panel">
-            <h3><span>Runtime policy</span><span class="badge info">Effective</span></h3>
-            <div id="runtimeConfigList" class="config-readonly"></div>
-          </div>
-          <div class="config-panel">
-            <h3><span>Server &amp; storage</span><span class="badge info">Effective</span></h3>
-            <div id="serverConfigList" class="config-readonly"></div>
-          </div>
-        </div>
-        <div class="config-actions">
-          <span id="configStatus" class="config-status" role="status" aria-live="polite" aria-atomic="true">Waiting for configuration.</span>
-          <button id="saveConfiguration" class="button primary" type="submit">Apply configuration</button>
-        </div>
-      </form>
-    </section>
-    <section id="workspaces" class="section">
-      <div class="section-header"><h2>Workspaces</h2><span id="workspaceNote" class="section-note">No workspaces loaded</span></div>
-      <div id="workspaceTable" class="empty">Connect to load workspaces.</div>
-    </section>
-    <section id="activity" class="section split">
-      <div>
-        <div class="section-header"><h2>Recent index jobs</h2><span class="section-note">Latest 25</span></div>
-        <div id="jobTable" class="empty">No index jobs loaded.</div>
-      </div>
-      <div>
-        <div class="section-header"><h2>Recent requests</h2><span class="section-note">No payload capture</span></div>
-        <div id="requestTable" class="empty">No requests observed.</div>
-      </div>
-    </section>
-    <section id="probe" class="section">
-      <div class="section-header"><h2>Retrieval probe</h2><span class="section-note">Run a live search against an indexed workspace</span></div>
-      <form id="probeForm" class="probe-form">
-        <div class="field"><label for="probeWorkspace">Workspace</label><select id="probeWorkspace" class="control" required><option value="">Select workspace</option></select></div>
-        <div class="field"><label for="probeQuery">Query</label><input id="probeQuery" class="control" required maxlength="20000" placeholder="Find authorization checks before access is granted"></div>
-        <div class="field"><label for="probeTopK">Top K</label><input id="probeTopK" class="control" type="number" min="1" max="40" value="8"></div>
-        <div class="field" id="probeModeField"><label for="probeMode">Mode</label><select id="probeMode" class="control"><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="bm25">BM25</option><option value="semantic">Semantic</option></select></div>
-        <div class="field"><label for="probeView">View</label><select id="probeView" class="control"><option value="hits">Ranked hits</option><option value="raw">Packed · raw</option><option value="extractive">Packed · extractive</option></select></div>
-        <div class="field" id="probeMaxTokensField" hidden><label for="probeMaxTokens">Max tokens</label><input id="probeMaxTokens" class="control" type="number" min="1" max="128000" placeholder="uncapped"></div>
-        <button id="probeSubmit" class="button primary" type="submit">Run search</button>
-      </form>
-      <div id="probeMeta" class="probe-meta" role="status" aria-live="polite" aria-atomic="true"></div>
-      <div id="probeTrace" class="trace-panel" aria-live="polite"></div>
-      <div id="probeResults" class="empty" aria-busy="false">No probe results yet.</div>
-    </section>
-  </main>
+  </div>
   <div id="toastStack" class="toast-stack" aria-label="Notifications" aria-live="polite" aria-atomic="false"></div>
   <script>
 (function () {
@@ -1387,6 +1437,74 @@ export function observabilityDashboardHtml(): string {
 
   schedule();
   refresh();
+})();
+  </script>
+  <script>
+(function () {
+  "use strict";
+  var byId = function (id) { return document.getElementById(id); };
+  var sidebar = byId("sidebar");
+  var backdrop = byId("sidebarBackdrop");
+  var toggle = byId("navToggle");
+  var links = Array.prototype.slice.call(document.querySelectorAll(".nav-link"));
+
+  function closeNav() {
+    if (!sidebar) return;
+    sidebar.classList.remove("open");
+    if (backdrop) backdrop.classList.remove("visible");
+    if (toggle) toggle.setAttribute("aria-expanded", "false");
+  }
+  function openNav() {
+    if (!sidebar) return;
+    sidebar.classList.add("open");
+    if (backdrop) backdrop.classList.add("visible");
+    if (toggle) toggle.setAttribute("aria-expanded", "true");
+  }
+  if (toggle) {
+    toggle.addEventListener("click", function () {
+      if (sidebar.classList.contains("open")) closeNav(); else openNav();
+    });
+  }
+  if (backdrop) backdrop.addEventListener("click", closeNav);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") closeNav();
+  });
+  links.forEach(function (link) {
+    link.addEventListener("click", function () {
+      if (window.matchMedia && window.matchMedia("(max-width: 900px)").matches) closeNav();
+    });
+  });
+
+  var sections = links
+    .map(function (link) {
+      var id = (link.getAttribute("href") || "").replace(/^#/, "");
+      var section = id ? document.getElementById(id) : null;
+      return section ? { link: link, section: section } : null;
+    })
+    .filter(Boolean);
+
+  if (sections.length && "IntersectionObserver" in window) {
+    var visible = {};
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        visible[entry.target.id] = entry.isIntersecting ? entry.intersectionRatio : 0;
+      });
+      var bestId = null;
+      var bestRatio = 0;
+      sections.forEach(function (pair) {
+        var ratio = visible[pair.section.id] || 0;
+        if (ratio > bestRatio) { bestRatio = ratio; bestId = pair.section.id; }
+      });
+      if (!bestId) return;
+      sections.forEach(function (pair) {
+        var active = pair.section.id === bestId;
+        pair.link.classList.toggle("active", active);
+        if (active) pair.link.setAttribute("aria-current", "true");
+        else pair.link.removeAttribute("aria-current");
+      });
+    }, { rootMargin: "-45% 0px -50% 0px", threshold: [0, 0.25, 0.5, 1] });
+    sections.forEach(function (pair) { observer.observe(pair.section); });
+  }
 })();
   </script>
 </body>
