@@ -1345,7 +1345,7 @@ export function observabilityDashboardHtml(): string {
       renderTrace(null);
       byId("probeResults").className = "empty";
       byId("probeResults").textContent = error.message;
-    } finally { button.disabled = false; }
+    } finally { button.disabled = false; byId("probeResults").setAttribute("aria-busy", "false"); }
   });
 
   document.addEventListener("visibilitychange", function () {
