@@ -87,6 +87,7 @@ import {
   type StoredSnapshotReplicationSchedule,
   type StoredConnectorSource,
   type StoredConnectorCiToken,
+  type StoredSourceAccessPolicy,
   type StoredWorkspace,
   type WorkspacePermission,
   WorkspaceNotFoundError,
@@ -420,9 +421,6 @@ const httpApiKeysSchema = z.array(
     admin: z.boolean().optional(),
   }),
 );
-const workspacePermissionSchema = z.object({
-  permission: z.enum(["reader", "writer", "owner"]),
-});
 const sourceAccessPolicySchema = z.object({
   default_access: z.enum(["allow", "deny"]),
   rules: z.array(z.object({
@@ -430,6 +428,26 @@ const sourceAccessPolicySchema = z.object({
     effect: z.enum(["allow", "deny"]),
   })).max(256).default([]),
 });
+const workspacePermissionSchema = z.object({
+  permission: z.enum(["reader", "writer", "owner"]),
+  source_acl: sourceAccessPolicySchema.optional(),
+});
+
+function normalizeSourceAccessPolicyInput(
+  input: z.infer<typeof sourceAccessPolicySchema>,
+): {
+  defaultAccess: "allow" | "deny";
+  rules: Array<{ pathPrefix: string; effect: "allow" | "deny" }>;
+} {
+  const rules = input.rules.map((rule) => ({
+    pathPrefix: normalizedRelativePath(rule.path_prefix),
+    effect: rule.effect,
+  }));
+  if (new Set(rules.map((rule) => rule.pathPrefix)).size !== rules.length) {
+    throw new HttpError(400, "Source ACL path prefixes must be unique");
+  }
+  return { defaultAccess: input.default_access, rules };
+}
 function readBoolean(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(value?.trim() ?? "");
 }
@@ -632,6 +650,21 @@ function workspacePayload(workspace: StoredWorkspace): Record<string, unknown> {
     revision: workspace.revision,
     created_at: workspace.createdAt,
     updated_at: workspace.updatedAt,
+  };
+}
+
+function sourceAccessPolicyPayload(
+  policy: StoredSourceAccessPolicy,
+): Record<string, unknown> {
+  return {
+    principal_id: policy.principalId,
+    default_access: policy.defaultAccess,
+    rules: policy.rules.map((rule) => ({
+      path_prefix: rule.pathPrefix,
+      effect: rule.effect,
+    })),
+    updated_by: policy.updatedBy,
+    updated_at: policy.updatedAt,
   };
 }
 
@@ -1045,7 +1078,7 @@ function openApiDocument(): Record<string, unknown> {
         get: { summary: "List workspace principal permissions" },
       },
       "/v1/workspaces/{workspaceId}/acl/{principalId}": {
-        put: { summary: "Grant or update a workspace permission" },
+        put: { summary: "Grant permission with an optional atomic source policy" },
         delete: { summary: "Revoke a workspace permission" },
       },
       "/v1/workspaces/{workspaceId}/source-acl": {
@@ -1676,6 +1709,7 @@ class HttpContextService {
               enabled: true,
               effects: ["allow", "deny"],
               precedence: "longest-path-prefix",
+              atomic_grant: true,
             },
             current_principal: {
               principal_id: principal.principalId,
@@ -2492,7 +2526,7 @@ class HttpContextService {
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
         if (request.method === "PUT") {
           const input = workspacePermissionSchema.parse(
-            await readJsonBody(request, 64 * 1024),
+            await readJsonBody(request, 128 * 1024),
           );
           if (
             memberId === principal.principalId &&
@@ -2501,14 +2535,32 @@ class HttpContextService {
           ) {
             throw new HttpError(409, "An owner cannot downgrade its active credential");
           }
-          await this.repository.setWorkspacePermission(
-            workspaceId,
-            memberId,
-            input.permission,
-          );
+          const sourceAccess = input.source_acl
+            ? normalizeSourceAccessPolicyInput(input.source_acl)
+            : null;
+          let policy: StoredSourceAccessPolicy | null = null;
+          if (sourceAccess) {
+            policy = await this.repository.setWorkspacePermissionWithSourceAccess({
+              workspaceId,
+              principalId: memberId,
+              permission: input.permission,
+              defaultAccess: sourceAccess.defaultAccess,
+              rules: sourceAccess.rules,
+              updatedBy: principal.principalId,
+            });
+          } else {
+            await this.repository.setWorkspacePermission(
+              workspaceId,
+              memberId,
+              input.permission,
+            );
+          }
           json(response, 200, {
             principal_id: memberId,
             permission: input.permission,
+            ...(policy
+              ? { source_acl: sourceAccessPolicyPayload(policy) }
+              : {}),
           });
           return;
         }
@@ -2527,16 +2579,7 @@ class HttpContextService {
         await this.requireWorkspaceAccess(principal, workspaceId, "owner");
         const policies = await this.repository.listSourceAccessPolicies(workspaceId);
         json(response, 200, {
-          policies: policies.map((policy) => ({
-            principal_id: policy.principalId,
-            default_access: policy.defaultAccess,
-            rules: policy.rules.map((rule) => ({
-              path_prefix: rule.pathPrefix,
-              effect: rule.effect,
-            })),
-            updated_by: policy.updatedBy,
-            updated_at: policy.updatedAt,
-          })),
+          policies: policies.map(sourceAccessPolicyPayload),
         });
         return;
       }
@@ -2561,30 +2604,15 @@ class HttpContextService {
         const input = sourceAccessPolicySchema.parse(
           await readJsonBody(request, 128 * 1024),
         );
-        const rules = input.rules.map((rule) => ({
-          pathPrefix: normalizedRelativePath(rule.path_prefix),
-          effect: rule.effect,
-        }));
-        if (new Set(rules.map((rule) => rule.pathPrefix)).size !== rules.length) {
-          throw new HttpError(400, "Source ACL path prefixes must be unique");
-        }
+        const sourceAccess = normalizeSourceAccessPolicyInput(input);
         const policy = await this.repository.setSourceAccessPolicy({
           workspaceId,
           principalId: memberId,
-          defaultAccess: input.default_access,
-          rules,
+          defaultAccess: sourceAccess.defaultAccess,
+          rules: sourceAccess.rules,
           updatedBy: principal.principalId,
         });
-        json(response, 200, {
-          principal_id: policy.principalId,
-          default_access: policy.defaultAccess,
-          rules: policy.rules.map((rule) => ({
-            path_prefix: rule.pathPrefix,
-            effect: rule.effect,
-          })),
-          updated_by: policy.updatedBy,
-          updated_at: policy.updatedAt,
-        });
+        json(response, 200, sourceAccessPolicyPayload(policy));
         return;
       }
 

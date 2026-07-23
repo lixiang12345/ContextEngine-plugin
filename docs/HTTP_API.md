@@ -116,6 +116,31 @@ Content-Type: application/json
 {"permission":"reader"}
 ```
 
+When a new member must be path-restricted, install the permission and policy in
+the same request:
+
+```http
+PUT /v1/workspaces/{workspaceId}/acl/{principalId}
+Content-Type: application/json
+
+{
+  "permission": "reader",
+  "source_acl": {
+    "default_access": "deny",
+    "rules": [
+      {"path_prefix":"src/public","effect":"allow"}
+    ]
+  }
+}
+```
+
+The workspace ACL row and all source-policy rows become visible in one
+PostgreSQL commit. Readers therefore cannot observe an unrestricted interval
+between grant and policy installation. Omitting `source_acl` preserves the
+existing grant/update behavior and any policy already attached to the member.
+`GET /v1/capabilities` advertises this as
+`authorization.source_acl.atomic_grant: true`.
+
 `DELETE /v1/workspaces/{workspaceId}/acl/{principalId}` revokes access
 immediately, including active MCP sessions. Unauthorized workspace and job IDs
 return `404`. The legacy `CONTEXTENGINE_HTTP_API_KEY` remains a service-wide
@@ -173,8 +198,9 @@ Content-Type: application/json
 `DELETE /v1/workspaces/{workspaceId}/source-acl/{principalId}` removes one,
 restoring the backward-compatible unrestricted default for that workspace
 member. Removing the member's workspace ACL entry cascades its source policy.
-The target must already have workspace access, and each policy is limited to 256
-normalized relative path prefixes.
+The target must already have workspace access when using the standalone
+`source-acl` route, and each policy is limited to 256 normalized relative path
+prefixes. For a new restricted member, prefer the atomic grant form above.
 
 The most-specific matching prefix wins; an exact-length deny wins a tie. If no
 rule matches, `default_access` is used. Operators bypass source policies. The

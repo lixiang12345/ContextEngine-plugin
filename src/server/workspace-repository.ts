@@ -939,6 +939,19 @@ export function workspacePermissionAllows(
   return actual !== null && permissionRank[actual] >= permissionRank[required];
 }
 
+function validateSourceAccessRules(rules: readonly SourcePathRule[]): void {
+  if (rules.length > 256) {
+    throw new Error("Source access policy cannot exceed 256 rules");
+  }
+  const prefixes = new Set<string>();
+  for (const rule of rules) {
+    if (prefixes.has(rule.pathPrefix)) {
+      throw new Error("Source access policy path prefixes must be unique");
+    }
+    prefixes.add(rule.pathPrefix);
+  }
+}
+
 function sourceAccessPoliciesFromRows(
   rows: readonly SourceAccessPolicyRow[],
 ): StoredSourceAccessPolicy[] {
@@ -1390,6 +1403,41 @@ export class WorkspaceRepository {
     if (!result.rows[0]) throw new WorkspaceNotFoundError(workspaceId);
   }
 
+  /**
+   * Grant workspace access and install its initial source policy in one
+   * transaction. Other connections observe either neither row or both rows,
+   * so a newly granted principal never receives an unrestricted read window.
+   */
+  async setWorkspacePermissionWithSourceAccess(input: {
+    workspaceId: string;
+    principalId: string;
+    permission: WorkspacePermission;
+    defaultAccess: SourceAccessEffect;
+    rules: readonly SourcePathRule[];
+    updatedBy: string;
+  }): Promise<StoredSourceAccessPolicy> {
+    validateSourceAccessRules(input.rules);
+    return this.withTransaction(async (client) => {
+      const granted = await client.query(
+        `INSERT INTO ce_workspace_acl(workspace_id, principal_id, permission)
+         SELECT id, $2, $3 FROM ce_workspaces WHERE id = $1
+         ON CONFLICT(workspace_id, principal_id) DO UPDATE
+         SET permission = excluded.permission, updated_at = now()
+         RETURNING workspace_id`,
+        [input.workspaceId, input.principalId, input.permission],
+      );
+      if (!granted.rows[0]) {
+        throw new WorkspaceNotFoundError(input.workspaceId);
+      }
+      await this.replaceSourceAccessPolicy(client, input);
+      return this.getSourceAccessPolicyInTransaction(
+        client,
+        input.workspaceId,
+        input.principalId,
+      );
+    });
+  }
+
   async removeWorkspacePermission(
     workspaceId: string,
     principalId: string,
@@ -1448,17 +1496,8 @@ export class WorkspaceRepository {
     rules: readonly SourcePathRule[];
     updatedBy: string;
   }): Promise<StoredSourceAccessPolicy> {
-    if (input.rules.length > 256) {
-      throw new Error("Source access policy cannot exceed 256 rules");
-    }
-    const prefixes = new Set<string>();
-    for (const rule of input.rules) {
-      if (prefixes.has(rule.pathPrefix)) {
-        throw new Error("Source access policy path prefixes must be unique");
-      }
-      prefixes.add(rule.pathPrefix);
-    }
-    await this.withTransaction(async (client) => {
+    validateSourceAccessRules(input.rules);
+    return this.withTransaction(async (client) => {
       const member = await client.query(
         `SELECT 1 FROM ce_workspace_acl
          WHERE workspace_id = $1 AND principal_id = $2
@@ -1466,43 +1505,84 @@ export class WorkspaceRepository {
         [input.workspaceId, input.principalId],
       );
       if (!member.rows[0]) throw new SourceAccessPolicyTargetError();
+      await this.replaceSourceAccessPolicy(client, input);
+      return this.getSourceAccessPolicyInTransaction(
+        client,
+        input.workspaceId,
+        input.principalId,
+      );
+    });
+  }
+
+  private async getSourceAccessPolicyInTransaction(
+    client: PoolClient,
+    workspaceId: string,
+    principalId: string,
+  ): Promise<StoredSourceAccessPolicy> {
+    const result = await client.query<SourceAccessPolicyRow>(
+      `SELECT policy.workspace_id, policy.principal_id, policy.default_access,
+              policy.updated_by, policy.updated_at,
+              rule.path_prefix, rule.effect
+       FROM ce_source_access_policies AS policy
+       LEFT JOIN ce_source_access_rules AS rule
+         ON rule.workspace_id = policy.workspace_id
+        AND rule.principal_id = policy.principal_id
+       WHERE policy.workspace_id = $1 AND policy.principal_id = $2
+       ORDER BY rule.path_prefix`,
+      [workspaceId, principalId],
+    );
+    const policy = sourceAccessPoliciesFromRows(result.rows)[0];
+    if (!policy) {
+      throw new Error("Source access policy disappeared inside its transaction");
+    }
+    return policy;
+  }
+
+  private async replaceSourceAccessPolicy(
+    client: PoolClient,
+    input: {
+      workspaceId: string;
+      principalId: string;
+      defaultAccess: SourceAccessEffect;
+      rules: readonly SourcePathRule[];
+      updatedBy: string;
+    },
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO ce_source_access_policies(
+         workspace_id, principal_id, default_access, updated_by
+       ) VALUES ($1, $2, $3, $4)
+       ON CONFLICT(workspace_id, principal_id) DO UPDATE
+       SET default_access = excluded.default_access,
+           updated_by = excluded.updated_by,
+           updated_at = now()`,
+      [
+        input.workspaceId,
+        input.principalId,
+        input.defaultAccess,
+        input.updatedBy,
+      ],
+    );
+    await client.query(
+      `DELETE FROM ce_source_access_rules
+       WHERE workspace_id = $1 AND principal_id = $2`,
+      [input.workspaceId, input.principalId],
+    );
+    if (input.rules.length) {
       await client.query(
-        `INSERT INTO ce_source_access_policies(
-           workspace_id, principal_id, default_access, updated_by
-         ) VALUES ($1, $2, $3, $4)
-         ON CONFLICT(workspace_id, principal_id) DO UPDATE
-         SET default_access = excluded.default_access,
-             updated_by = excluded.updated_by,
-             updated_at = now()`,
+        `INSERT INTO ce_source_access_rules(
+           workspace_id, principal_id, path_prefix, effect
+         )
+         SELECT $1, $2, rule.path_prefix, rule.effect
+         FROM unnest($3::text[], $4::text[]) AS rule(path_prefix, effect)`,
         [
           input.workspaceId,
           input.principalId,
-          input.defaultAccess,
-          input.updatedBy,
+          input.rules.map((rule) => rule.pathPrefix),
+          input.rules.map((rule) => rule.effect),
         ],
       );
-      await client.query(
-        `DELETE FROM ce_source_access_rules
-         WHERE workspace_id = $1 AND principal_id = $2`,
-        [input.workspaceId, input.principalId],
-      );
-      if (input.rules.length) {
-        await client.query(
-          `INSERT INTO ce_source_access_rules(
-             workspace_id, principal_id, path_prefix, effect
-           )
-           SELECT $1, $2, rule.path_prefix, rule.effect
-           FROM unnest($3::text[], $4::text[]) AS rule(path_prefix, effect)`,
-          [
-            input.workspaceId,
-            input.principalId,
-            input.rules.map((rule) => rule.pathPrefix),
-            input.rules.map((rule) => rule.effect),
-          ],
-        );
-      }
-    });
-    return (await this.getSourceAccessPolicy(input.workspaceId, input.principalId))!;
+    }
   }
 
   async removeSourceAccessPolicy(

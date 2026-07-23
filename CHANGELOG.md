@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added atomic workspace grant plus source-policy installation. Owners can now
+  include `source_acl` in `PUT /v1/workspaces/{workspaceId}/acl/{principalId}`;
+  the permission, default effect, and path rules commit in one PostgreSQL
+  transaction, eliminating the unrestricted-read window between separate grant
+  and policy requests. Capabilities advertise `source_acl.atomic_grant`.
 - Closed two source-ACL side channels in packed retrieval. Local workspace
   rules are now authorized by their normalized source path before the file is
   read, so denied `AGENTS.md`, `CLAUDE.md`, `.augment/rules`, and
