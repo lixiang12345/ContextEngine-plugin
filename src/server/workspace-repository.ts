@@ -1928,6 +1928,13 @@ export class WorkspaceRepository {
     limit = 8,
     processingLeaseMs = 5 * 60 * 1000,
   ): Promise<StoredConnectorWebhookEvent[]> {
+    const normalizedLeaseMs = Number.isFinite(processingLeaseMs)
+      ? Math.floor(processingLeaseMs)
+      : 5 * 60 * 1000;
+    const boundedLeaseMs = Math.max(
+      1,
+      Math.min(60 * 60 * 1000, normalizedLeaseMs),
+    );
     const result = await this.pool.query<ConnectorWebhookEventRow>(
       `WITH candidates AS (
          SELECT source_id, event_id
@@ -1956,9 +1963,25 @@ export class WorkspaceRepository {
                  event.next_attempt_at, event.locked_at, event.last_error,
                  event.metadata, event.result, event.created_at, event.updated_at,
                  event.completed_at`,
-      [Math.max(1, Math.min(64, Math.floor(limit))), processingLeaseMs],
+      [Math.max(1, Math.min(64, Math.floor(limit))), boundedLeaseMs],
     );
     return result.rows.map(webhookEventFromRow);
+  }
+
+  async renewConnectorWebhookEventLease(
+    sourceId: string,
+    eventId: string,
+    expectedAttempt: number,
+  ): Promise<boolean> {
+    const renewed = await this.pool.query(
+      `UPDATE ce_connector_webhook_events
+       SET locked_at = clock_timestamp(), updated_at = clock_timestamp()
+       WHERE source_id = $1 AND event_id = $2 AND status = 'processing'
+         AND attempts = $3
+       RETURNING source_id`,
+      [sourceId, eventId, expectedAttempt],
+    );
+    return Boolean(renewed.rows[0]);
   }
 
   async completeConnectorWebhookEvent(

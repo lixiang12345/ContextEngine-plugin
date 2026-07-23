@@ -92,7 +92,8 @@ Plugins that support signed delivery expose `webhook.verify(rawRequest)` and
 bounded body before parsing it and return a stable provider delivery id plus the
 same external id produced by `externalId(config)`. Core persists idempotency,
 claims work, retries, invokes the normal leased sync coordinator, and commits
-terminal state; plugins never write the event inbox or connector cursor.
+terminal state; the inbox lease is renewed while the coordinator runs. Plugins
+never write the event inbox or connector cursor.
 
 The built-in GitHub adapter is the webhook reference implementation. It verifies
 `X-Hub-Signature-256` with constant-time HMAC comparison, accepts push events for

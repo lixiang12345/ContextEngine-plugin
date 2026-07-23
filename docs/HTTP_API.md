@@ -286,8 +286,11 @@ identical bytes is idempotent. Reusing one delivery
 id with different bytes returns `409`, including concurrent races. Workers claim
 events with PostgreSQL `SKIP LOCKED`, recover expired processing claims using the
 database clock, fence terminal writes by attempt number, and retry failures with
-bounded exponential backoff. A crash after connector commit but before event
-completion safely retries through the connector cursor and becomes a noop.
+bounded exponential backoff. While a connector sync is running, the inbox
+worker renews its processing lease with the same attempt fence; a stale worker
+cannot complete or retry an event after another instance takes it over. A crash
+after connector commit but before event completion safely retries through the
+connector cursor and becomes a noop.
 
 The built-in GitLab plugin uses the same source route and accepts a
 namespace/project path:

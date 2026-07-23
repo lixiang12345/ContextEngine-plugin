@@ -204,6 +204,110 @@ describePostgres("persistent connector webhook inbox", () => {
     );
   });
 
+  it("renews a fenced processing lease with the database clock", async () => {
+    await first.enqueueConnectorWebhookEvents({
+      provider: "fixture",
+      eventId: "delivery-renewal",
+      bodyHash: "7".repeat(64),
+      sourceIds: [source.id],
+    });
+    const [claimed] = await first.claimConnectorWebhookEvents(1, 250);
+    assert.equal(claimed.eventId, "delivery-renewal");
+    await admin.query("SELECT pg_sleep(0.12)");
+    assert.equal(
+      await first.renewConnectorWebhookEventLease(
+        source.id,
+        claimed.eventId,
+        claimed.attempts,
+      ),
+      true,
+    );
+    await admin.query("SELECT pg_sleep(0.12)");
+    assert.deepEqual(await second.claimConnectorWebhookEvents(1, 250), []);
+    await admin.query("SELECT pg_sleep(0.16)");
+    const [recovered] = await second.claimConnectorWebhookEvents(1, 250);
+    assert.equal(recovered.eventId, "delivery-renewal");
+    assert.equal(recovered.attempts, 2);
+    assert.equal(
+      await first.renewConnectorWebhookEventLease(
+        source.id,
+        claimed.eventId,
+        claimed.attempts,
+      ),
+      false,
+    );
+    await second.completeConnectorWebhookEvent(
+      source.id,
+      recovered.eventId,
+      recovered.attempts,
+      { recovered: true },
+    );
+  });
+
+  it("keeps a long-running sync claimed through heartbeat renewal", async () => {
+    await first.enqueueConnectorWebhookEvents({
+      provider: "fixture",
+      eventId: "delivery-long-running",
+      bodyHash: "8".repeat(64),
+      sourceIds: [source.id],
+    });
+    let syncStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      syncStarted = resolve;
+    });
+    let finishSync!: () => void;
+    const finish = new Promise<void>((resolve) => {
+      finishSync = resolve;
+    });
+    const processor = new ConnectorWebhookProcessor({
+      repository: first,
+      pollIntervalMs: 100,
+      processingLeaseMs: 120,
+      coordinator: {
+        sync: async () => {
+          syncStarted();
+          await finish;
+          return {
+            source,
+            noop: true,
+            revision: 0,
+            changedPaths: [],
+            deletedPaths: [],
+            skippedOversized: 0,
+            indexJob: null,
+          };
+        },
+      },
+    });
+    processor.start();
+    try {
+      await started;
+      await admin.query("SELECT pg_sleep(0.3)");
+      assert.deepEqual(
+        await second.claimConnectorWebhookEvents(1, 120),
+        [],
+      );
+      finishSync();
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const event = await first.getConnectorWebhookEvent(
+          source.id,
+          "delivery-long-running",
+        );
+        if (event?.status === "succeeded") break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const completed = await first.getConnectorWebhookEvent(
+        source.id,
+        "delivery-long-running",
+      );
+      assert.equal(completed?.status, "succeeded");
+      assert.equal(completed?.attempts, 1);
+    } finally {
+      finishSync();
+      await processor.close();
+    }
+  });
+
   it(
     "retries failures with backoff and stops at the configured attempt bound",
     { timeout: 6_000 },

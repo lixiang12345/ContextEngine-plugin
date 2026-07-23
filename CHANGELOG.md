@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Hardened the connector webhook inbox worker for long-running syncs. Processing
+  claims now renew their database-clock lease with the same attempt fence until
+  completion; stale workers cannot complete or retry a replacement attempt.
 - Closed the snapshot export/GC publication race. Export and GC now use a
   bilateral object-store marker handshake: whichever operation starts second
   observes the first marker and backs off before writing or deleting an
