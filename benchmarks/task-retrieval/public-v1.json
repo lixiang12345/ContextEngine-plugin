@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "name": "task-retrieval-public-v1",
+  "description": "Public-repository extension of the task-retrieval corpus: real cross-module fixes from well-known open-source TypeScript projects, pinned by base revision with PR-style prompts and the source files the real change touched. Gives the retrieval A/B external validity beyond this repository's own history. Prompts never enumerate the gold file paths.",
+  "topK": 20,
+  "repositories": {
+    "hono": "https://github.com/honojs/hono.git",
+    "zod": "https://github.com/colinhacks/zod.git"
+  },
+  "cases": [
+    {
+      "id": "hono-null-prototype-parsing",
+      "repo": "hono",
+      "facets": "clause across request/utils",
+      "baseRef": "a88c89dac6e230cbb5f1bf627522d4914b81dffd",
+      "prompt": "Query strings, headers, and path params are parsed into plain object literals, so a crafted key like __proto__ can pollute the prototype chain. Use null-prototype objects for every parsed key-value container across request parsing, accept-header negotiation, and the URL parsing utilities.",
+      "goldPaths": [
+        "src/request.ts",
+        "src/utils/accept.ts",
+        "src/utils/url.ts"
+      ]
+    },
+    {
+      "id": "hono-content-type-case-folding",
+      "repo": "hono",
+      "facets": "clause across utils/validator",
+      "baseRef": "9728702911073aec5a63a3ba2840b7240e5d3205",
+      "prompt": "Content-Type matching is case-sensitive in body parsing and in the validator, so a header like 'Multipart/Form-Data' or an uppercase charset parameter bypasses form handling. Normalize the media type for case-insensitive comparison in the body-parsing utilities, the shared buffer helpers, and the validator middleware.",
+      "goldPaths": [
+        "src/utils/body.ts",
+        "src/utils/buffer.ts",
+        "src/validator/validator.ts"
+      ]
+    },
+    {
+      "id": "hono-compress-partial-content",
+      "repo": "hono",
+      "facets": "single-file concept",
+      "baseRef": "a48c8bf248eec5c2ecd468be5054c0d260a0dbfe",
+      "prompt": "The compress middleware compresses 206 Partial Content responses, corrupting HTTP range semantics for resumed downloads. Skip compression whenever a response carries a partial-content status.",
+      "goldPaths": ["src/middleware/compress/index.ts"]
+    },
+    {
+      "id": "zod-transform-optionality-fallback",
+      "repo": "zod",
+      "facets": "concept across classic/core",
+      "baseRef": "1cab69383fcdeae2a366d5e2a2fc4d8fc765d168",
+      "prompt": "Transform pipelines lose the optionality fallback that plain schemas honor, and preprocess wrappers stop running for absent object keys. Generalize the optin/optout fallback handling to transforms and restore preprocess execution on absent keys across the classic and core schema layers.",
+      "goldPaths": [
+        "packages/zod/src/v4/classic/schemas.ts",
+        "packages/zod/src/v4/core/schemas.ts"
+      ]
+    },
+    {
+      "id": "zod-classic-iso-circular-import",
+      "repo": "zod",
+      "facets": "clause across classic modules",
+      "baseRef": "fbe8ad1b709460fc45d88fdcb5eca591198de60d",
+      "prompt": "The classic schema module and the ISO date/time helpers import each other, creating a circular dependency that breaks under some bundlers and module loaders. Break the cycle so the ISO helpers no longer pull in the full classic schema module.",
+      "goldPaths": [
+        "packages/zod/src/v4/classic/iso.ts",
+        "packages/zod/src/v4/classic/schemas.ts"
+      ]
+    },
+    {
+      "id": "zod-preprocess-defer-optionality",
+      "repo": "zod",
+      "facets": "concept across classic/core/json-schema",
+      "baseRef": "8ec4e73f4c4693b6361ad591be40fb41eb8a9f95",
+      "prompt": "z.preprocess forces its own optionality instead of deferring to the schema it wraps, so preprocessing an optional schema reports the wrong key optionality in objects and in generated JSON Schema. Defer optionality to the inner schema across the classic wrapper, the core schema definitions, and the JSON Schema conversion path.",
+      "goldPaths": [
+        "packages/zod/src/v4/classic/schemas.ts",
+        "packages/zod/src/v4/core/json-schema-processors.ts",
+        "packages/zod/src/v4/core/schemas.ts",
+        "packages/zod/src/v4/core/to-json-schema.ts"
+      ]
+    }
+  ]
+}

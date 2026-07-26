@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Extended the task-retrieval corpus with a public-repository manifest
+  (`benchmarks/task-retrieval/public-v1.json`): six real cross-module fixes
+  from hono and zod, pinned by base revision with PR-style prompts and the
+  gold files the real change touched. The A/B harness accepts
+  `--manifest` and clones external repositories once into
+  `~/.cache/contextengine/task-retrieval` (override via
+  `CONTEXTENGINE_TASK_RETRIEVAL_CACHE`); manifest hygiene tests now cover
+  both corpora. Measured externally: single-query retrieval reaches full
+  gold recall on all six cases (best rank 1–6) and subquery fusion holds
+  its zero-regression guarantee on repositories the engine has never seen.
+
 - Wired the optional symbol provider into the indexing pipeline. Setting
   `CONTEXTENGINE_SYMBOL_PROVIDER=typescript` (or `symbolProvider` on
   `ContextEngine.open`) negotiates the provider at index time and fills
