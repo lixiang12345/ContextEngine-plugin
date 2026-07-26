@@ -13,3 +13,4 @@ coverage/
 .vscode/
 *.tsbuildinfo
 eval-results/
+.understand-anything/
