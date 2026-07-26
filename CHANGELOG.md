@@ -6,15 +6,25 @@
   multi-facet task now plans up to four focused subqueries (identifier, path,
   clause, and history facets — at most 120 characters each, deterministic,
   no model, nothing but the caller's own query text) that run as additional
-  retrieval hops and fuse with the primary ranking via weighted
-  reciprocal-rank fusion: the primary query dominates, subqueries surface
-  files the broad query buried. Short or single-facet queries keep the
-  single-query path, and any subquery failure falls back to the primary
-  result. The retrieval trace records each subquery with its facet, hit
-  count, and fused contribution; opt out via `subqueries: false`
-  (CLI `--no-subqueries`, HTTP/MCP `subqueries`). On the fixed PR-history
-  corpus the decomposition is measured at retrieval level by
-  base-revision gold-path recall (see task notes).
+  retrieval hops. Fusion is primary-preserving: the single-query ranking
+  survives whole and in order, and subqueries may only append discoveries the
+  primary query missed (bounded to a fifth of the requested depth, re-scored
+  below the primary floor so packing order never shifts). Short or
+  single-facet queries keep the single-query path, and any subquery failure
+  falls back to the primary result. The retrieval trace records each subquery
+  with its facet, hit count, and appended contribution; opt out via
+  `subqueries: false` (CLI `--no-subqueries`, HTTP/MCP `subqueries`).
+- Added a fixed task-retrieval corpus and A/B harness
+  (`benchmarks/task-retrieval/contextengine-v1.json`,
+  `npm run eval:task-retrieval`). Eight cases pin a base revision, a PR-style
+  prompt, and the gold source files the real change touched (five are
+  cross-module multi-facet cases); the harness indexes each base revision in
+  a worktree with the current engine and compares gold recall/rank between
+  retrieval strategies, failing closed on missing revisions or gold paths.
+  Measured verdict for subquery decomposition on this corpus: zero
+  regressions across all eight cases (the primary-preserving design goal;
+  an earlier rank-fusion draft evicted gold files and was rejected on this
+  evidence), net gains awaiting harder multi-facet cases.
 
 - Added a tag-driven release workflow. `verify` re-runs the full PostgreSQL
   suite and corpus validation, packs the tarball, records its SHA-256 as a

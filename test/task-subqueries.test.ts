@@ -83,7 +83,7 @@ describe("task subquery planner", () => {
 });
 
 describe("subquery rank fusion", () => {
-  it("keeps the primary consensus on top but surfaces subquery discoveries", () => {
+  it("preserves the whole primary ranking and appends subquery discoveries", () => {
     const primary = [hit("a", "src/a.ts", 9), hit("b", "src/b.ts", 8), hit("c", "src/c.ts", 7)];
     const subqueries = [
       { query: "GoldSymbol", reason: "identifier" as const },
@@ -98,26 +98,44 @@ describe("subquery rank fusion", () => {
       ],
       4,
     );
-    assert.equal(fused.hits[0].chunk.id, "a", "primary top hit must stay on top");
-    const goldRank = fused.hits.findIndex((entry) => entry.chunk.id === "gold");
-    assert.ok(goldRank >= 0 && goldRank < 4, "subquery discovery must enter the fused list");
+    // The primary ranking survives whole and in order: decomposition can
+    // never evict or demote what the single-query path would have returned.
+    assert.deepEqual(
+      fused.hits.slice(0, 3).map((entry) => entry.chunk.id),
+      ["a", "b", "c"],
+    );
+    const gold = fused.hits.find((entry) => entry.chunk.id === "gold");
+    assert.ok(gold, "subquery discovery must be appended");
+    assert.ok(gold.channels?.symbol, "channel evidence from both subqueries is unioned");
+    assert.ok(gold.channels?.path, "channel evidence from both subqueries is unioned");
     assert.deepEqual(
       fused.contributions.map((entry) => [entry.reason, entry.hits, entry.contributed]),
       [
-        ["identifier", 2, 2],
+        ["identifier", 2, 1],
         ["path", 1, 1],
       ],
     );
-    const gold = fused.hits[goldRank];
-    assert.ok(gold.channels?.symbol, "channel evidence from subqueries is preserved");
   });
 
-  it("bounds the fused list at the requested limit", () => {
-    const primary = Array.from({ length: 12 }, (_value, index) =>
-      hit(`p${index}`, `src/p${index}.ts`, 12 - index),
+  it("bounds appended discoveries without truncating the primary list", () => {
+    const primary = Array.from({ length: 10 }, (_value, index) =>
+      hit(`p${index}`, `src/p${index}.ts`, 10 - index),
     );
-    const fused = fuseSubqueryHits(primary, [], [], 5);
-    assert.equal(fused.hits.length, 5);
+    const subqueries = [{ query: "facet", reason: "clause" as const }];
+    const discoveries = Array.from({ length: 6 }, (_value, index) =>
+      hit(`d${index}`, `src/d${index}.ts`, 6 - index),
+    );
+    const fused = fuseSubqueryHits(primary, subqueries, [discoveries], 10);
+    assert.deepEqual(
+      fused.hits.slice(0, 10).map((entry) => entry.chunk.id),
+      primary.map((entry) => entry.chunk.id),
+      "primary list must survive untouched",
+    );
+    // ceil(10 / 5) = 2 appended discoveries at most.
+    assert.equal(fused.hits.length, 12);
+    assert.deepEqual(fused.contributions, [
+      { query: "facet", reason: "clause", hits: 6, contributed: 2 },
+    ]);
   });
 });
 

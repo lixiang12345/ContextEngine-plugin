@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "name": "contextengine-task-retrieval-v1",
+  "repository": "../..",
+  "description": "Fixed retrieval-level corpus over this repository's own history. Each case pins a base revision, a PR-style task prompt, and the source files the real change touched (goldPaths, all of which exist at baseRef). Used to compare retrieval strategies (e.g. task-subquery fusion vs single query) by gold recall and best rank at a fixed topK, independent of any agent or model. Prompts describe the task the way a PR would; they never enumerate the gold file paths.",
+  "topK": 20,
+  "cases": [
+    {
+      "id": "kotlin-constructor-lambda-chunking",
+      "facets": "single-file symbol",
+      "baseRef": "772d2f8bca0e12ead21cb4b6d9c338769ebe86a8",
+      "prompt": "Fix code chunking for Kotlin classes whose primary-constructor default value is a lambda. The lambda braces must not close the surrounding class, and methods declared after the constructor must remain indexed without regressing other languages.",
+      "goldPaths": [
+        "src/chunker/code-chunker.ts"
+      ]
+    },
+    {
+      "id": "file-level-rerank",
+      "facets": "single-file concept",
+      "baseRef": "ce361c499131dfcc2421fd066753da86b8f87f47",
+      "prompt": "Reranking scores every chunk independently, so a file whose evidence is spread across many small chunks outranks a file with one strong definition. Aggregate scores per file before the final ordering so multi-chunk noise cannot beat a focused match.",
+      "goldPaths": [
+        "src/search/rerank.ts"
+      ]
+    },
+    {
+      "id": "lexical-candidate-aggregation",
+      "facets": "single-file concept",
+      "baseRef": "6fb1e75a0cd148ab999f6111ea9d67a50097d405",
+      "prompt": "Broad lexical queries drop relevant candidates before fusion because per-term result caps truncate the OR expansion. Aggregate lexical candidates across query terms before ranked fusion so recall does not depend on term order.",
+      "goldPaths": [
+        "src/search/hybrid.ts",
+        "src/search/rerank.ts"
+      ]
+    },
+    {
+      "id": "snapshot-export-gc-serialization",
+      "facets": "path+clause across snapshots/server",
+      "baseRef": "279af23755d8bb473ffba94afb9af7f91f550a4a",
+      "prompt": "Snapshot export and garbage collection can race: a concurrently running GC may delete the artifact an export is still publishing. Introduce a bilateral object-store marker handshake so whichever operation starts second observes the other's marker and backs off, and make HTTP export, replication, and GC share one workspace-scoped artifact guard.",
+      "goldPaths": [
+        "src/snapshots/snapshot.ts",
+        "src/server/snapshot-job-runner.ts",
+        "src/server/workspace-repository.ts"
+      ]
+    },
+    {
+      "id": "source-acl-rules-lineage",
+      "facets": "identifier+clause across rules/search/engine",
+      "baseRef": "47ff08f4e5a935d6704b92bbc8046b5beba9130d",
+      "prompt": "Packed retrieval leaks content a source access policy should deny: workspace rules files are read before authorization, and git commit chunks aggregate metadata from denied paths. Authorize loadWorkspaceRules entries by their normalized source path before reading the file, and make commit-lineage chunks fail closed whenever a source policy is active, across SQL retrieval and the in-memory fallback.",
+      "goldPaths": [
+        "src/rules/rules-loader.ts",
+        "src/search/postgres-hybrid.ts",
+        "src/search/hybrid.ts",
+        "src/engine.ts"
+      ]
+    },
+    {
+      "id": "replication-publication-fencing",
+      "facets": "identifier+clause across snapshots/server",
+      "baseRef": "180603cda7867905e79bbc0a3635e0d15e5a9f4f",
+      "prompt": "A stale replication worker that lost its lease can still overwrite the manifest a newer attempt already published. Pin the first validated source manifest for each replication job, publish a monotonic sequence and source digest into the target manifest, and use conditional writes in the built-in filesystem and S3 stores so a CAS conflict retries only after re-reading the target.",
+      "goldPaths": [
+        "src/snapshots/snapshot.ts",
+        "src/snapshots/object-store.ts",
+        "src/snapshots/s3-store.ts",
+        "src/server/workspace-repository.ts"
+      ]
+    },
+    {
+      "id": "durable-snapshot-job-history",
+      "facets": "clause across server/store/http",
+      "baseRef": "b0407be80a888901733fbc85c5c9697c41042fb0",
+      "prompt": "Snapshot job progress is only observable on the instance that happens to run the job. Append a durable event in the same transaction as every job state mutation, stream job state over server-sent events with cursor replay by event id, and let a different HTTP instance serve the same history after a restart.",
+      "goldPaths": [
+        "src/server/workspace-repository.ts",
+        "src/store/postgres-store.ts",
+        "src/http-server.ts"
+      ]
+    },
+    {
+      "id": "packing-policy-retrieval-trace",
+      "facets": "concept+clause across engine/types/cli/mcp",
+      "baseRef": "3f60746eaa43ebe30a1c24ca43366ee5847a8135",
+      "prompt": "Under a tight token budget the packed context keeps leading characters and drops the very lines that match the task. Add an extractive packing policy that keeps query-salient lines plus one line of context, thread the packing option through the CLI and MCP tool surfaces, and record a reproducible retrieval trace with intent, contributing channels, candidate and packed counts on every packed response.",
+      "goldPaths": [
+        "src/engine.ts",
+        "src/types.ts",
+        "src/cli.ts",
+        "src/mcp-tools.ts"
+      ]
+    }
+  ]
+}

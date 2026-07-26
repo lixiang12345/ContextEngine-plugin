@@ -134,13 +134,16 @@ export interface SubqueryContribution {
 }
 
 const RRF_K = 60;
-const PRIMARY_WEIGHT = 1;
-const SUBQUERY_WEIGHT = 0.45;
 
 /**
- * Weighted reciprocal-rank fusion of the primary ranking with each subquery
- * ranking. The primary query dominates; subqueries can surface files the
- * broad query buried, but cannot displace a strong primary consensus.
+ * Primary-preserving fusion. The primary ranking is kept whole and in order —
+ * decomposition can therefore never displace or demote a result the proven
+ * single-query path would have returned (a fixed-corpus A/B showed rank-based
+ * fusion evicting gold files with subquery noise). Subqueries contribute only
+ * discoveries: chunks absent from the primary list, appended after it by
+ * their reciprocal-rank score, bounded to roughly a fifth of the requested
+ * depth. Channel evidence from subqueries is unioned onto shared hits so the
+ * trace still explains every contributor.
  */
 export function fuseSubqueryHits(
   primary: SearchHit[],
@@ -148,41 +151,75 @@ export function fuseSubqueryHits(
   subqueryHits: SearchHit[][],
   limit: number,
 ): { hits: SearchHit[]; contributions: SubqueryContribution[] } {
-  const scores = new Map<string, { hit: SearchHit; score: number; fromSubquery: Set<number> }>();
-  const fold = (hits: SearchHit[], weight: number, subqueryIndex: number | null) => {
+  const keyOf = (hit: SearchHit) =>
+    hit.chunk.id || `${hit.chunk.path}:${hit.chunk.startLine}`;
+  const primaryKeys = new Set(primary.map(keyOf));
+  const boosted = new Map<string, Set<number>>();
+  const discoveries = new Map<
+    string,
+    { hit: SearchHit; score: number; fromSubquery: Set<number> }
+  >();
+
+  subqueryHits.forEach((hits, index) => {
     hits.forEach((hit, rank) => {
-      const key = hit.chunk.id || `${hit.chunk.path}:${hit.chunk.startLine}`;
-      const entry = scores.get(key);
-      const increment = weight / (RRF_K + rank + 1);
+      const key = keyOf(hit);
+      const increment = 1 / (RRF_K + rank + 1);
+      if (primaryKeys.has(key)) {
+        const sources = boosted.get(key) ?? new Set<number>();
+        sources.add(index);
+        boosted.set(key, sources);
+        return;
+      }
+      const entry = discoveries.get(key);
       if (entry) {
         entry.score += increment;
-        if (subqueryIndex !== null) {
-          entry.fromSubquery.add(subqueryIndex);
-          // Union channel evidence so the trace explains every contributor.
-          if (hit.channels) {
-            entry.hit.channels = { ...hit.channels, ...entry.hit.channels };
-          }
+        entry.fromSubquery.add(index);
+        if (hit.channels) {
+          entry.hit.channels = { ...hit.channels, ...entry.hit.channels };
         }
       } else {
-        scores.set(key, {
+        discoveries.set(key, {
           hit,
           score: increment,
-          fromSubquery: subqueryIndex === null ? new Set() : new Set([subqueryIndex]),
+          fromSubquery: new Set([index]),
         });
       }
     });
-  };
-  fold(primary, PRIMARY_WEIGHT, null);
-  subqueryHits.forEach((hits, index) => fold(hits, SUBQUERY_WEIGHT, index));
+  });
 
-  const fused = [...scores.values()]
+  // Union subquery channel evidence onto the primary hits they also matched.
+  const merged = primary.map((hit) => {
+    const sources = boosted.get(keyOf(hit));
+    if (!sources) return hit;
+    let channels = hit.channels;
+    for (const index of sources) {
+      const match = subqueryHits[index]?.find((entry) => keyOf(entry) === keyOf(hit));
+      if (match?.channels) channels = { ...match.channels, ...channels };
+    }
+    return channels === hit.channels ? hit : { ...hit, channels };
+  });
+
+  const appendBudget = Math.max(1, Math.ceil(limit / 5));
+  const appended = [...discoveries.values()]
     .sort((left, right) => right.score - left.score)
-    .slice(0, limit);
+    .slice(0, appendBudget);
+
   const contributions = subqueries.map((subquery, index) => ({
     query: subquery.query,
     reason: subquery.reason,
     hits: subqueryHits[index]?.length ?? 0,
-    contributed: fused.filter((entry) => entry.fromSubquery.has(index)).length,
+    contributed: appended.filter((entry) => entry.fromSubquery.has(index)).length,
   }));
-  return { hits: fused.map((entry) => entry.hit), contributions };
+  // Scores are not comparable across queries, and downstream packing orders
+  // file groups by their best hit score. Re-score discoveries strictly below
+  // the primary floor so an appended chunk can extend the pack but can never
+  // reorder the files the primary ranking chose.
+  const primaryFloor = merged.length
+    ? Math.min(...merged.map((entry) => entry.score))
+    : 0;
+  const rescored = appended.map((entry, index) => ({
+    ...entry.hit,
+    score: primaryFloor - (index + 1) * 1e-6,
+  }));
+  return { hits: [...merged, ...rescored], contributions };
 }
