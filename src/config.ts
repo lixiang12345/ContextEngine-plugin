@@ -104,6 +104,7 @@ export function resolveEngineConfig(opts: {
   maxChunkChars?: number;
   extraRoots?: import("./types.js").IndexRoot[];
   extraIgnores?: string[];
+  symbolProvider?: string;
 }): EngineConfig {
   const root = path.resolve(opts.root ?? process.cwd());
   const dataDir = path.resolve(
@@ -116,6 +117,10 @@ export function resolveEngineConfig(opts: {
     databaseUrl: opts.databaseUrl ?? resolveDatabaseUrl(),
     extraRoots: opts.extraRoots,
     extraIgnores: opts.extraIgnores,
+    symbolProvider:
+      opts.symbolProvider ??
+      process.env.CONTEXTENGINE_SYMBOL_PROVIDER?.trim() ??
+      undefined,
     embeddings: resolveEmbeddingsConfig(),
     neuralRerank: resolveNeuralRerankConfig(),
     maxFileBytes: resolveMaxFileBytes(opts.maxFileBytes),

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Wired the optional symbol provider into the indexing pipeline. Setting
+  `CONTEXTENGINE_SYMBOL_PROVIDER=typescript` (or `symbolProvider` on
+  `ContextEngine.open`) negotiates the provider at index time and fills
+  chunk symbols the built-in heuristics missed — never overwriting one —
+  for exactly the files being re-indexed, so content-hash incrementality
+  doubles as the analysis cache. Unknown providers, absent toolchains, and
+  per-file analysis failures all degrade to the unchanged built-in
+  pipeline; when a provider runs, the index result carries a
+  `symbolProvider` summary (provider, version, files analyzed, symbols
+  enriched, bounded errors).
+
 - Added bounded task-subquery decomposition to context packing. A long,
   multi-facet task now plans up to four focused subqueries (identifier, path,
   clause, and history facets — at most 120 characters each, deterministic,

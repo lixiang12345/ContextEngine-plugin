@@ -58,6 +58,7 @@ export class ContextEngine {
     maxFileBytes?: number;
     maxChunkChars?: number;
     extraRoots?: IndexRoot[];
+    symbolProvider?: string;
   } = {}): ContextEngine {
     const cfg = resolveEngineConfig(opts);
     if (opts.extraRoots) cfg.extraRoots = opts.extraRoots;

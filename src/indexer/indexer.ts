@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import type { EngineConfig, IndexProgress, IndexRoot } from "../types.js";
 import { chunkFile } from "../chunker/code-chunker.js";
+import { createSymbolEnricher } from "./symbol-enrichment.js";
 import {
   createEmbeddingProvider,
   type EmbeddingProvider,
@@ -31,6 +32,8 @@ export interface IndexResult {
   generationId?: string;
   sourceRevision?: string | null;
   indexedRevision?: string | null;
+  /** Present only when an external symbol provider was negotiated and ran. */
+  symbolProvider?: import("./symbol-enrichment.js").SymbolEnrichmentSummary;
 }
 
 /**
@@ -207,6 +210,14 @@ export async function indexWorkspace(
     let chunksWritten = 0;
     let filesDone = 0;
 
+    // Optional provider-backed symbol enrichment. Only re-indexed files are
+    // analyzed (content-hash incrementality is the cache), and a provider
+    // that fails to negotiate leaves the built-in pipeline untouched.
+    const symbolEnricher = await createSymbolEnricher(
+      config.root,
+      config.symbolProvider,
+    );
+
     for (const job of jobs) {
       signal?.throwIfAborted();
       filesDone++;
@@ -233,6 +244,7 @@ export async function indexWorkspace(
       }
 
       const chunks = chunkFile(job.indexRel, content, config.maxChunkChars);
+      if (symbolEnricher) await symbolEnricher.enrich(job.indexRel, chunks);
       let mtimeMs = Date.now();
       try {
         mtimeMs = statSync(job.absPath).mtimeMs;
@@ -377,6 +389,7 @@ export async function indexWorkspace(
       generationId: generation.generationId ?? undefined,
       sourceRevision: generation.sourceRevision,
       indexedRevision: generation.indexedRevision,
+      symbolProvider: symbolEnricher?.summary(),
     };
   } catch (error) {
     if (generationStarted) {

@@ -5,6 +5,24 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveSymbolProvider } from "../src/indexer/symbol-provider.js";
 import { TypeScriptSymbolProvider } from "../src/indexer/typescript-symbol-provider.js";
+import {
+  applyProvidedSymbols,
+  createSymbolEnricher,
+} from "../src/indexer/symbol-enrichment.js";
+import { ContextEngine } from "../src/engine.js";
+import type { CodeChunk } from "../src/types.js";
+
+function chunk(id: string, startLine: number, endLine: number, symbol?: string): CodeChunk {
+  return {
+    id,
+    path: "src/x.ts",
+    language: "ts",
+    startLine,
+    endLine,
+    content: "content",
+    symbol,
+  };
+}
 
 describe("symbol provider contract", () => {
   let root: string;
@@ -135,6 +153,28 @@ describe("symbol provider contract", () => {
     }
   });
 
+  it("fills only missing chunk symbols, preferring exported and wider spans", () => {
+    const chunks = [
+      chunk("kept", 1, 10, "existingSymbol"),
+      chunk("filled", 12, 30),
+      chunk("untouched", 40, 50),
+    ];
+    const enriched = applyProvidedSymbols(chunks, [
+      { path: "src/x.ts", name: "narrowLocal", kind: "variable", startLine: 14, endLine: 15, exported: false },
+      { path: "src/x.ts", name: "wideExported", kind: "class", startLine: 12, endLine: 28, exported: true },
+      { path: "src/x.ts", name: "clobber", kind: "function", startLine: 1, endLine: 10, exported: true },
+    ]);
+    assert.equal(enriched, 1);
+    assert.equal(chunks[0].symbol, "existingSymbol", "existing symbols are never overwritten");
+    assert.equal(chunks[1].symbol, "wideExported", "exported wide declaration wins");
+    assert.equal(chunks[2].symbol, undefined, "non-overlapping chunks stay untouched");
+  });
+
+  it("negotiates to null for unknown providers in the enricher too", async () => {
+    assert.equal(await createSymbolEnricher(root, "gopls"), null);
+    assert.equal(await createSymbolEnricher(root, undefined), null);
+  });
+
   it("honors the analysis deadline with a diagnosed partial result", async () => {
     const provider = new TypeScriptSymbolProvider();
     await provider.detect(root);
@@ -145,5 +185,61 @@ describe("symbol provider contract", () => {
       result.diagnostics.errors.some((entry) => entry.includes("deadline")),
       result.diagnostics.errors.join("; "),
     );
+  });
+});
+
+const describePostgres =
+  process.env.CONTEXTENGINE_TEST_DATABASE_URL ||
+  process.env.CONTEXTENGINE_DATABASE_URL
+    ? describe
+    : describe.skip;
+
+describePostgres("symbol enrichment in the indexing pipeline", () => {
+  let root: string;
+
+  before(() => {
+    root = mkdtempSync(path.join(tmpdir(), "ce-enrich-"));
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(
+      path.join(root, "src", "billing.ts"),
+      `export function computeInvoice(total: number) {\n  return total * 1.2;\n}\n`,
+    );
+  });
+
+  after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reports a provider summary when configured, none when unknown", async () => {
+    const withProvider = ContextEngine.open({
+      root,
+      dataDir: path.join(root, ".ce-a"),
+      symbolProvider: "typescript",
+    });
+    try {
+      const result = await withProvider.index();
+      assert.ok(result.chunksWritten >= 1);
+      assert.ok(result.symbolProvider, "summary expected when the provider negotiated");
+      assert.equal(result.symbolProvider.provider, "typescript");
+      assert.match(result.symbolProvider.version, /^\d+\./);
+      assert.deepEqual(result.symbolProvider.errors, []);
+    } finally {
+      await withProvider.close();
+    }
+
+    const unknown = ContextEngine.open({
+      root,
+      dataDir: path.join(root, ".ce-b"),
+      symbolProvider: "gopls",
+    });
+    try {
+      // Same workspace, unchanged files: the run is incremental, which is
+      // itself the point — indexing completes fine without the provider.
+      const result = await unknown.index();
+      assert.ok(result.filesScanned >= 1, "indexing must not depend on the provider");
+      assert.equal(result.symbolProvider, undefined);
+    } finally {
+      await unknown.close();
+    }
   });
 });

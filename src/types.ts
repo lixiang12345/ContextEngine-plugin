@@ -84,6 +84,12 @@ export interface EngineConfig {
   extraRoots?: IndexRoot[];
   /** Legacy SQLite data directory, used only by the migration command. */
   dataDir: string;
+  /**
+   * Optional external symbol provider id (e.g. "typescript") used to fill
+   * chunk symbols the built-in heuristics miss during indexing. Unknown ids
+   * and absent toolchains silently fall back to the built-in index.
+   */
+  symbolProvider?: string;
   embeddings?: EmbeddingsConfig;
   /**
    * Optional neural / cross-encoder rerank (CONTEXTENGINE_NEURAL_RERANK=1).
