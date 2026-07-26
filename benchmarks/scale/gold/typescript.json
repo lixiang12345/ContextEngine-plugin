@@ -1,0 +1,8 @@
+[
+  { "id": "checker", "query": "TypeScript type checker resolves signatures assignability and diagnostics", "expectPaths": ["compiler/checker.ts"], "hardNegativePaths": ["compiler/types.ts", "compiler/parser.ts"], "topK": 10 },
+  { "id": "parser", "query": "parser scans tokens and constructs source file syntax nodes", "expectPaths": ["compiler/parser.ts"], "hardNegativePaths": ["compiler/scanner.ts", "compiler/checker.ts"], "topK": 10 },
+  { "id": "emitter", "query": "emit transformed TypeScript nodes and source maps to JavaScript", "expectPaths": ["compiler/emitter.ts"], "hardNegativePaths": ["compiler/transformer.ts", "compiler/program.ts"], "topK": 10 },
+  { "id": "module-resolution", "query": "resolve module names with node package exports paths and extensions", "expectPaths": ["compiler/moduleNameResolver.ts"], "hardNegativePaths": ["compiler/moduleSpecifiers.ts", "compiler/program.ts"], "topK": 10 },
+  { "id": "language-service", "query": "create language service completions quick info references and rename", "expectPaths": ["services/services.ts"], "hardNegativePaths": ["services/completions.ts", "server/session.ts"], "topK": 10 },
+  { "id": "server-session", "query": "tsserver Session executes protocol commands and sends responses", "expectPaths": ["server/session.ts"], "hardNegativePaths": ["server/project.ts", "services/services.ts"], "topK": 10 }
+]

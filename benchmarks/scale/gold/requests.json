@@ -1,0 +1,7 @@
+[
+  { "id": "session", "query": "Session prepares a request merges cookies and sends it", "expectPaths": ["sessions.py"], "hardNegativePaths": ["api.py", "hooks.py"], "topK": 10 },
+  { "id": "adapter", "query": "HTTPAdapter configures connection pools TLS verification and retries", "expectPaths": ["adapters.py"], "hardNegativePaths": ["sessions.py", "models.py"], "topK": 10 },
+  { "id": "auth", "query": "HTTP basic and digest authentication authorization header", "expectPaths": ["auth.py"], "hardNegativePaths": ["sessions.py", "cookies.py"], "topK": 10 },
+  { "id": "response", "query": "Response object content encoding status and JSON parsing", "expectPaths": ["models.py"], "hardNegativePaths": ["api.py", "structures.py"], "topK": 10 },
+  { "id": "exceptions", "query": "exception hierarchy for timeout proxy SSL and connection errors", "expectPaths": ["exceptions.py"], "hardNegativePaths": ["models.py", "status_codes.py"], "topK": 10 }
+]

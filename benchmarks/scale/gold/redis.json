@@ -1,0 +1,7 @@
+[
+  { "id": "server", "query": "Redis server startup initializes configuration and enters the event loop", "expectPaths": ["src/server.c"], "hardNegativePaths": ["src/networking.c", "src/debug.c"], "topK": 10 },
+  { "id": "event-loop", "query": "event loop creates file events and processes time events", "expectPaths": ["src/ae.c"], "hardNegativePaths": ["src/networking.c", "src/server.c"], "topK": 10 },
+  { "id": "expire", "query": "active and passive expiration removes expired keys", "expectPaths": ["src/expire.c"], "hardNegativePaths": ["src/evict.c", "src/db.c"], "topK": 10 },
+  { "id": "aof", "query": "append only file rewrite and command propagation", "expectPaths": ["src/aof.c"], "hardNegativePaths": ["src/rdb.c", "src/replication.c"], "topK": 10 },
+  { "id": "cluster", "query": "Redis cluster nodes slots bus messages and failover", "expectPaths": ["src/cluster.c"], "hardNegativePaths": ["src/sentinel.c", "src/replication.c"], "topK": 10 }
+]

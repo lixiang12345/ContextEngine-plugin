@@ -1,0 +1,7 @@
+[
+  { "id": "application", "query": "Koa Application listen callback and compose middleware", "expectPaths": ["lib/application.js"], "hardNegativePaths": ["lib/context.js", "lib/request.js"], "topK": 10 },
+  { "id": "context", "query": "Koa context delegates request response cookies and state", "expectPaths": ["lib/context.js"], "hardNegativePaths": ["lib/request.js", "lib/response.js"], "topK": 10 },
+  { "id": "request", "query": "read Koa request headers query string and accepted types", "expectPaths": ["lib/request.js"], "hardNegativePaths": ["lib/response.js", "lib/context.js"], "topK": 10 },
+  { "id": "response", "query": "set Koa response body status type redirect and attachment", "expectPaths": ["lib/response.js"], "hardNegativePaths": ["lib/request.js", "lib/context.js"], "topK": 10 },
+  { "id": "stream", "query": "utility that detects whether a value is a readable stream", "expectPaths": ["lib/is-stream.js"], "hardNegativePaths": ["lib/response.js", "lib/request.js"], "topK": 10 }
+]

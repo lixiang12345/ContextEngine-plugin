@@ -47,6 +47,7 @@
     "bench:suite": "node scripts/bench-suite.mjs",
     "bench:api": "npm run build && node scripts/bench-api.mjs",
     "bench:multilang": "node scripts/bench-multilang.mjs",
+    "bench:scale": "node scripts/bench-scale.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

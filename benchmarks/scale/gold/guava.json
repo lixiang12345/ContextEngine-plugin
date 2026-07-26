@@ -1,0 +1,80 @@
+[
+  {
+    "id": "immutable-list",
+    "query": "ImmutableList builder copyOf subList and list iterator",
+    "expectPaths": [
+      "android/guava/src/com/google/common/collect/ImmutableList.java",
+      "guava-gwt/src-super/com/google/common/collect/super/com/google/common/collect/ImmutableList.java",
+      "guava/src/com/google/common/collect/ImmutableList.java"
+    ],
+    "hardNegativePaths": [
+      "android/guava/src/com/google/common/collect/ImmutableSet.java",
+      "android/guava/src/com/google/common/collect/Lists.java",
+      "guava-gwt/src-super/com/google/common/collect/super/com/google/common/collect/ImmutableSet.java",
+      "guava/src/com/google/common/collect/ImmutableSet.java",
+      "guava/src/com/google/common/collect/Lists.java"
+    ],
+    "topK": 10
+  },
+  {
+    "id": "preconditions",
+    "query": "checkArgument checkState and checkNotNull failure messages",
+    "expectPaths": [
+      "android/guava/src/com/google/common/base/Preconditions.java",
+      "guava/src/com/google/common/base/Preconditions.java"
+    ],
+    "hardNegativePaths": [
+      "android/guava/src/com/google/common/base/Verify.java",
+      "android/guava/src/com/google/common/base/Objects.java",
+      "guava/src/com/google/common/base/Verify.java",
+      "guava/src/com/google/common/base/Objects.java"
+    ],
+    "topK": 10
+  },
+  {
+    "id": "splitter",
+    "query": "Splitter trims results omits empty strings and limits pieces",
+    "expectPaths": [
+      "android/guava/src/com/google/common/base/Splitter.java",
+      "guava/src/com/google/common/base/Splitter.java"
+    ],
+    "hardNegativePaths": [
+      "android/guava/src/com/google/common/base/Joiner.java",
+      "android/guava/src/com/google/common/base/CharMatcher.java",
+      "guava/src/com/google/common/base/Joiner.java",
+      "guava/src/com/google/common/base/CharMatcher.java"
+    ],
+    "topK": 10
+  },
+  {
+    "id": "local-cache",
+    "query": "LocalCache loads entries expires values and records access",
+    "expectPaths": [
+      "android/guava/src/com/google/common/cache/LocalCache.java",
+      "guava-gwt/src-super/com/google/common/cache/super/com/google/common/cache/LocalCache.java",
+      "guava/src/com/google/common/cache/LocalCache.java"
+    ],
+    "hardNegativePaths": [
+      "android/guava/src/com/google/common/cache/AbstractCache.java",
+      "android/guava/src/com/google/common/cache/CacheBuilder.java",
+      "guava/src/com/google/common/cache/AbstractCache.java",
+      "guava/src/com/google/common/cache/CacheBuilder.java"
+    ],
+    "topK": 10
+  },
+  {
+    "id": "futures",
+    "query": "combine transform catch and submit asynchronous ListenableFuture operations",
+    "expectPaths": [
+      "android/guava/src/com/google/common/util/concurrent/Futures.java",
+      "guava/src/com/google/common/util/concurrent/Futures.java"
+    ],
+    "hardNegativePaths": [
+      "android/guava/src/com/google/common/util/concurrent/FluentFuture.java",
+      "android/guava/src/com/google/common/util/concurrent/MoreExecutors.java",
+      "guava/src/com/google/common/util/concurrent/FluentFuture.java",
+      "guava/src/com/google/common/util/concurrent/MoreExecutors.java"
+    ],
+    "topK": 10
+  }
+]

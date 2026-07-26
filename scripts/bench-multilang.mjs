@@ -25,6 +25,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
+import { evaluateBenchmarkSuites } from "./lib/benchmark-gate.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -660,6 +661,10 @@ for (const suite of selectedSuites) {
 }
 
 const okSuites = suiteResults.filter((s) => s.retrieval);
+const gate = evaluateBenchmarkSuites({
+  selectedSuiteIds: selectedSuites.map((suite) => suite.id),
+  suiteResults,
+});
 const macro = {
   suites: okSuites.length,
   hasEmbeddings: okSuites.some((suite) => suite.hasEmbeddings),
@@ -728,6 +733,7 @@ const out = {
       enabled: neuralRerankEnabled && preflight.rerankReady,
     },
     preflight,
+    gate,
   },
   macro,
   suites: suiteResults,
@@ -739,3 +745,9 @@ writeFileSync(outPath, JSON.stringify(out, null, 2));
 console.log("\n======== MACRO ========");
 console.log(JSON.stringify(macro, null, 2));
 console.log(`Wrote ${outPath}`);
+if (!gate.passed) {
+  console.error(
+    `Benchmark gate failed: ${gate.successfulSuites}/${gate.selectedSuites} suites succeeded; failed=${gate.failedSuites.join(",")}`,
+  );
+  process.exitCode = 1;
+}

@@ -1,0 +1,7 @@
+[
+  { "id": "parse", "query": "how Command parses argv and dispatches subcommands", "expectPaths": ["lib/command.js"], "hardNegativePaths": ["lib/option.js", "lib/help.js"], "topK": 10 },
+  { "id": "option", "query": "Option flags required optional variadic values", "expectPaths": ["lib/option.js"], "hardNegativePaths": ["lib/argument.js", "lib/command.js"], "topK": 10 },
+  { "id": "help", "query": "format command help terms descriptions and widths", "expectPaths": ["lib/help.js"], "hardNegativePaths": ["lib/command.js", "lib/option.js"], "topK": 10 },
+  { "id": "suggest", "query": "suggest a similar command using edit distance", "expectPaths": ["lib/suggestSimilar.js"], "hardNegativePaths": ["lib/error.js", "lib/help.js"], "topK": 10 },
+  { "id": "errors", "query": "CommanderError exit code and nested cause", "expectPaths": ["lib/error.js"], "hardNegativePaths": ["lib/command.js", "lib/help.js"], "topK": 10 }
+]

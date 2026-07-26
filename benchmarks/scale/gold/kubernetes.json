@@ -1,0 +1,8 @@
+[
+  { "id": "kubelet", "query": "Kubelet synchronizes pods runs admission handlers and manages node status", "expectPaths": ["pkg/kubelet/kubelet.go"], "hardNegativePaths": ["cmd/kubelet/app/server.go", "pkg/kubelet/server/server.go"], "topK": 12 },
+  { "id": "scheduler", "query": "Kubernetes Scheduler schedules pods with queue profiles and extenders", "expectPaths": ["pkg/scheduler/scheduler.go"], "hardNegativePaths": ["pkg/scheduler/schedule_one.go", "cmd/kube-scheduler/app/server.go"], "topK": 12 },
+  { "id": "deployment-controller", "query": "deployment controller syncs replica sets and rolls out deployments", "expectPaths": ["pkg/controller/deployment/deployment_controller.go"], "hardNegativePaths": ["pkg/controller/replicaset/replica_set.go", "pkg/controller/statefulset/stateful_set.go"], "topK": 12 },
+  { "id": "apiserver-config", "query": "generic API server Config completes secure serving authentication and admission", "expectPaths": ["staging/src/k8s.io/apiserver/pkg/server/config.go"], "hardNegativePaths": ["cmd/kube-apiserver/app/config.go", "pkg/controlplane/apiserver/config.go"], "topK": 12 },
+  { "id": "apiserver-chain", "query": "create the kube apiserver delegation chain and install APIs", "expectPaths": ["cmd/kube-apiserver/app/server.go"], "hardNegativePaths": ["cmd/kube-apiserver/app/config.go", "cmd/kube-controller-manager/app/controllermanager.go"], "topK": 12 },
+  { "id": "container-runtime", "query": "kubeGenericRuntimeManager manages pod sandboxes containers and CRI runtime", "expectPaths": ["pkg/kubelet/kuberuntime/kuberuntime_manager.go"], "hardNegativePaths": ["pkg/kubelet/kuberuntime/kuberuntime_container.go", "pkg/kubelet/container/runtime.go"], "topK": 12 }
+]

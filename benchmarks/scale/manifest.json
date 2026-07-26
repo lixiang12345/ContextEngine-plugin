@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "tierRules": {
+    "small": { "maxIndexableBytes": 10485760 },
+    "medium": { "minIndexableBytes": 10485760, "maxIndexableBytes": 94371840 },
+    "large": { "minIndexableBytes": 94371840 }
+  },
+  "thresholds": {
+    "defaults": {
+      "maxHardNegativeTop1Rate": 0.2,
+      "minIndexChunksPerSecond": 5
+    },
+    "tiers": {
+      "small": { "maxLocalRssMb": 2048 },
+      "medium": { "maxLocalRssMb": 4096 },
+      "large": { "maxLocalRssMb": 8192 }
+    },
+    "modes": {
+      "bm25": {
+        "minRecallAtK": 0.8,
+        "minMrr": 0.7,
+        "minNdcgAtK": 0.75,
+        "minTop3": 0.8,
+        "minTop5": 0.85,
+        "maxSteadyP95Ms": 1500
+      },
+      "hybrid": {
+        "minRecallAtK": 0.9,
+        "minMrr": 0.8,
+        "minNdcgAtK": 0.85,
+        "minTop3": 0.9,
+        "minTop5": 0.9,
+        "maxSteadyP95Ms": 2500,
+        "maxRemoteVramGb": 10.5
+      },
+      "neural": {
+        "minRecallAtK": 0.9,
+        "minMrr": 0.8,
+        "minNdcgAtK": 0.85,
+        "minTop3": 0.9,
+        "minTop5": 0.9,
+        "maxSteadyP95Ms": 4000,
+        "maxRemoteVramGb": 10.5
+      }
+    }
+  },
+  "macroThresholds": {
+    "hybrid": {
+      "minRecallAtK": 0.97,
+      "minMrr": 0.9,
+      "minNdcgAtK": 0.95,
+      "minTop3": 0.95,
+      "minTop5": 0.95
+    }
+  },
+  "suites": [
+    {
+      "id": "commander-js",
+      "tier": "small",
+      "language": "javascript",
+      "license": "MIT",
+      "licenseFile": "LICENSE",
+      "clone": {
+        "url": "https://github.com/tj/commander.js.git",
+        "dir": "commander",
+        "commit": "ba6d13ddb4243e5913367734f8c159089ffe7834"
+      },
+      "cases": "benchmarks/scale/gold/commander.json"
+    },
+    {
+      "id": "koa-js",
+      "tier": "small",
+      "language": "javascript",
+      "license": "MIT",
+      "licenseFile": "LICENSE",
+      "clone": {
+        "url": "https://github.com/koajs/koa.git",
+        "dir": "koa",
+        "commit": "6984592d41946ed746f15afcb05554e073f64dad"
+      },
+      "cases": "benchmarks/scale/gold/koa.json"
+    },
+    {
+      "id": "requests-py",
+      "tier": "small",
+      "language": "python",
+      "license": "Apache-2.0",
+      "licenseFile": "LICENSE",
+      "clone": {
+        "url": "https://github.com/psf/requests.git",
+        "dir": "requests",
+        "commit": "6e83187b8feb273ed4c6cdab5efd8d54901dfab3"
+      },
+      "rootSubdir": "src/requests",
+      "cases": "benchmarks/scale/gold/requests.json"
+    },
+    {
+      "id": "redis-c",
+      "tier": "medium",
+      "language": "c",
+      "license": "BSD-3-Clause",
+      "licenseFile": "COPYING",
+      "clone": {
+        "url": "https://github.com/redis/redis.git",
+        "dir": "redis",
+        "commit": "f60370ce28b946c1146dcea77c9c399d39601aaa"
+      },
+      "cases": "benchmarks/scale/gold/redis.json"
+    },
+    {
+      "id": "guava-java",
+      "tier": "medium",
+      "language": "java",
+      "license": "Apache-2.0",
+      "licenseFile": "LICENSE",
+      "clone": {
+        "url": "https://github.com/google/guava.git",
+        "dir": "guava",
+        "commit": "de1d87eabff93cb4a7fa8e52df5fc46802c95b17"
+      },
+      "cases": "benchmarks/scale/gold/guava.json"
+    },
+    {
+      "id": "typescript-ts",
+      "tier": "medium",
+      "language": "typescript",
+      "license": "Apache-2.0",
+      "licenseFile": "LICENSE.txt",
+      "clone": {
+        "url": "https://github.com/microsoft/TypeScript.git",
+        "dir": "typescript",
+        "commit": "050880ce59e30b356b686bd3144efe24f875ebc8"
+      },
+      "rootSubdir": "src",
+      "maxFileBytes": 4194304,
+      "cases": "benchmarks/scale/gold/typescript.json"
+    },
+    {
+      "id": "kubernetes-go",
+      "tier": "large",
+      "language": "go",
+      "license": "Apache-2.0",
+      "licenseFile": "LICENSE",
+      "clone": {
+        "url": "https://github.com/kubernetes/kubernetes.git",
+        "dir": "kubernetes",
+        "commit": "0f29094e5b73085e3802ecc1298ecae13866bfe6"
+      },
+      "cases": "benchmarks/scale/gold/kubernetes.json"
+    },
+    {
+      "id": "vscode-ts",
+      "tier": "large",
+      "language": "typescript",
+      "license": "MIT",
+      "licenseFile": "LICENSE.txt",
+      "clone": {
+        "url": "https://github.com/microsoft/vscode.git",
+        "dir": "vscode",
+        "commit": "1b6a188127eeaf9194f945eb6eb89a657e93c54c"
+      },
+      "rootSubdir": "src",
+      "cases": "benchmarks/scale/gold/vscode.json"
+    }
+  ]
+}
