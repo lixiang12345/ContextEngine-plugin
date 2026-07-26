@@ -371,7 +371,8 @@ export function observabilityDashboardHtml(): string {
     th { color: var(--muted); background: var(--surface-muted); font-weight: 650; white-space: nowrap; position: sticky; top: 0; z-index: 1; }
     tbody tr:last-child td { border-bottom: 0; }
     tbody tr:hover td { background: var(--surface-muted); }
-    .number { text-align: right; font-variant-numeric: tabular-nums; }
+    .number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .when { white-space: nowrap; }
     .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
     .truncate { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .revision-cell { max-width: 150px; white-space: nowrap; }
@@ -501,8 +502,12 @@ export function observabilityDashboardHtml(): string {
       .topbar { padding: 10px 16px; gap: 10px; }
       main { padding: 18px 16px 48px; }
       .section { padding: 16px 15px 18px; }
-      .auth-form { order: 5; width: 100%; }
-      .auth-form input { flex: 1 1 150px; width: auto; min-width: 120px; }
+      .auth-form { order: 5; width: 100%; row-gap: 8px; }
+      /* Full-width key input; the three buttons flow together on the next row
+       * instead of wrapping one by one. */
+      .auth-form input { flex: 1 1 100%; width: auto; min-width: 0; }
+      /* Headings and their notes stop fighting for one cramped row. */
+      .section-header { flex-direction: column; align-items: flex-start; gap: 3px; }
       .topbar-title { margin-right: 0; }
       .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .runtime-list { grid-template-columns: 1fr; }
@@ -517,7 +522,7 @@ export function observabilityDashboardHtml(): string {
     @media (prefers-reduced-motion: reduce) {
       html { scroll-behavior: auto; }
       .skeleton, .loading-bar.active::after, .icon-button.spinning, .toast { animation: none; }
-      .control, .button, .metric, .result, .loading-bar, .sidebar { transition: none; }
+      .control, .button, .metric, .result, .loading-bar, .sidebar, .skip-link { transition: none; }
       .button:hover:not(:disabled), .metric:hover { transform: none; }
     }
   </style>
@@ -1062,7 +1067,7 @@ export function observabilityDashboardHtml(): string {
     var rows = targets.map(function (target) {
       var lagMs = target.replication_lag_ms;
       var lag = lagMs == null ? "--" : lagMs < 60000 ? duration(lagMs) : uptime(lagMs / 1000);
-      return "<tr><td class=\"mono truncate\" title=\"" + escapeHtml(target.id) + "\">" + escapeHtml(target.id) + "</td><td>" + badge(target.health) + "</td><td>" + badge(target.configured ? "configured" : "unconfigured") + "</td><td class=\"number\">" + number(target.succeeded) + "</td><td class=\"number\">" + number(target.failed) + "</td><td class=\"number\">" + number(target.consecutive_failures) + "</td><td>" + timeAgo(target.last_succeeded_at) + "</td><td class=\"number\">" + lag + "</td></tr>";
+      return "<tr><td class=\"mono truncate\" title=\"" + escapeHtml(target.id) + "\">" + escapeHtml(target.id) + "</td><td>" + badge(target.health) + "</td><td>" + badge(target.configured ? "configured" : "unconfigured") + "</td><td class=\"number\">" + number(target.succeeded) + "</td><td class=\"number\">" + number(target.failed) + "</td><td class=\"number\">" + number(target.consecutive_failures) + "</td><td class=\"when\">" + timeAgo(target.last_succeeded_at) + "</td><td class=\"number\">" + lag + "</td></tr>";
     }).join("");
     container.className = "table-wrap";
     container.innerHTML = "<table><caption class=\"sr-only\">Snapshot target health</caption><thead><tr><th scope=\"col\">Target</th><th scope=\"col\">Health</th><th scope=\"col\">Configured</th><th scope=\"col\" class=\"number\">Succeeded</th><th scope=\"col\" class=\"number\">Failed</th><th scope=\"col\" class=\"number\">Consecutive</th><th scope=\"col\">Last success</th><th scope=\"col\" class=\"number\">Lag</th></tr></thead><tbody>" + rows + "</tbody></table>";
@@ -1131,7 +1136,7 @@ export function observabilityDashboardHtml(): string {
     (data.workspaces || []).forEach(function (item) { names[item.workspace.id] = item.workspace.name; });
     var rows = jobs.map(function (job) {
       var progress = job.progress && job.progress.phase ? job.progress.phase : job.status;
-      return "<tr><td>" + badge(job.status) + "</td><td class=\"truncate\" title=\"" + escapeHtml(names[job.workspace_id] || job.workspace_id) + "\">" + escapeHtml(names[job.workspace_id] || job.workspace_id) + "</td><td>" + badge(job.mode) + "</td><td>" + escapeHtml(progress) + "</td><td>" + timeAgo(job.created_at) + "</td></tr>";
+      return "<tr><td>" + badge(job.status) + "</td><td class=\"truncate\" title=\"" + escapeHtml(names[job.workspace_id] || job.workspace_id) + "\">" + escapeHtml(names[job.workspace_id] || job.workspace_id) + "</td><td>" + badge(job.mode) + "</td><td>" + escapeHtml(progress) + "</td><td class=\"when\">" + timeAgo(job.created_at) + "</td></tr>";
     }).join("");
     byId("jobTable").className = "table-wrap";
     byId("jobTable").innerHTML = "<table><caption class=\"sr-only\">Recent index jobs</caption><thead><tr><th scope=\"col\">Status</th><th scope=\"col\">Workspace</th><th scope=\"col\">Mode</th><th scope=\"col\">Phase</th><th scope=\"col\">Created</th></tr></thead><tbody>" + rows + "</tbody></table>";
@@ -1142,7 +1147,7 @@ export function observabilityDashboardHtml(): string {
     if (!requests.length) { byId("requestTable").className = "empty"; byId("requestTable").textContent = "No requests observed."; return; }
     var rows = requests.slice(0, 18).map(function (request) {
       var tone = request.status >= 500 ? "bad" : request.status >= 400 ? "warn" : "good";
-      return "<tr><td>" + escapeHtml(request.method) + "</td><td class=\"mono truncate\" title=\"" + escapeHtml(request.route) + "\">" + escapeHtml(request.route) + "</td><td><span class=\"badge " + tone + "\">" + escapeHtml(request.status) + "</span></td><td class=\"number\">" + duration(request.duration_ms) + "</td><td>" + timeAgo(request.started_at) + "</td></tr>";
+      return "<tr><td>" + escapeHtml(request.method) + "</td><td class=\"mono truncate\" title=\"" + escapeHtml(request.route) + "\">" + escapeHtml(request.route) + "</td><td><span class=\"badge " + tone + "\">" + escapeHtml(request.status) + "</span></td><td class=\"number\">" + duration(request.duration_ms) + "</td><td class=\"when\">" + timeAgo(request.started_at) + "</td></tr>";
     }).join("");
     byId("requestTable").className = "table-wrap";
     byId("requestTable").innerHTML = "<table><caption class=\"sr-only\">Recent requests</caption><thead><tr><th scope=\"col\">Method</th><th scope=\"col\">Route</th><th scope=\"col\">Status</th><th scope=\"col\" class=\"number\">Time</th><th scope=\"col\">When</th></tr></thead><tbody>" + rows + "</tbody></table>";
