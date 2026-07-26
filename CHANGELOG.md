@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-07-26
+
+**Compatibility and upgrade notes.** 0.4.0 predates the versioned PostgreSQL
+schema; a 0.5.0 process stamps the database schema v18 and migrates any
+earlier or unstamped database forward automatically and idempotently on first
+boot (two independent 0→v18 migrations were verified for this release, plus
+self-healing of v16-stamped databases created by interim builds). Multi-
+instance deployments must drain pre-0.5.0 workers before rolling out: index-
+and snapshot-job leases with attempt-token fencing (schema v16–v18) assume
+fenced writers, and an older binary refuses to start against a v18 database
+("schema version 18 is newer than this build"), preventing silent
+mixed-version operation. Binary rollback therefore requires restoring a
+pre-upgrade database backup. HTTP surfaces are additive — new routes, response
+fields, and capability flags; no route removals or payload-shape breaks —
+with behavioral hardening documented below (fail-closed commit-lineage
+retrieval under source policies, operator-only connector installation in
+multi-user mode, blob workspaces skipping the rules disk scan by default).
+All new environment variables ship with safe defaults. When deploying the
+hardened container image with a mounted snapshot volume, ensure the volume is
+writable by the non-root `node` user — the new probe endpoint diagnoses this
+misconfiguration before any job is scheduled.
+
 - Added snapshot target probes plus store timeout and fail-fast controls.
   Owners can `POST …/snapshots:probe` and
   `POST …/snapshot-replication-targets/{targetId}/probe` to diagnose a

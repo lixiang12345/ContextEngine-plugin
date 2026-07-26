@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ContextEngine } from "./engine.js";
 import type { SourcePathPolicy } from "./types.js";
+import { PACKAGE_VERSION } from "./util/version.js";
 
 /** The canonical Augment-compatible name plus the pre-0.4 alias. */
 export const CONTEXT_RETRIEVAL_TOOL_NAMES = [
@@ -110,7 +111,7 @@ export function createRetrievalMcpServer(
 ): McpServer {
   const server = new McpServer({
     name: "contextengine",
-    version: "0.4.0",
+    version: PACKAGE_VERSION,
   });
   registerCodebaseRetrievalTools(server, runtime, options);
   return server;

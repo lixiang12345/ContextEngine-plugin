@@ -17,6 +17,7 @@ import {
   type IndexResult,
 } from "./indexer/indexer.js";
 import { watchAndIndex, type WatchHandle } from "./indexer/watch.js";
+import { PACKAGE_VERSION } from "./util/version.js";
 
 loadDotEnv();
 
@@ -93,7 +94,7 @@ export async function startMcpServer(
 
   const server = new McpServer({
     name: "contextengine",
-    version: "0.4.0",
+    version: PACKAGE_VERSION,
   });
 
   registerCodebaseRetrievalTools(server, { ensureReady });

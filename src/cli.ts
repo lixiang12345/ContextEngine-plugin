@@ -14,6 +14,7 @@ import {
   pruneIndexSnapshots,
 } from "./snapshots/snapshot.js";
 import type { SnapshotObjectStore } from "./snapshots/object-store.js";
+import { PACKAGE_VERSION } from "./util/version.js";
 
 loadDotEnv();
 
@@ -24,7 +25,7 @@ program
   .description(
     "Portable Context Engine for AI coding agents — index, search, and pack codebase context.",
   )
-  .version("0.4.0");
+  .version(PACKAGE_VERSION);
 
 program
   .command("ci-template")
