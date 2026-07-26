@@ -1,0 +1,111 @@
+name: Release
+
+# Tag-driven release pipeline. `verify` re-runs the full PostgreSQL suite,
+# packs the tarball, records its SHA-256 as build evidence, and proves a
+# clean install boots the CLI, MCP stdio, and HTTP entry points with one
+# consistent version. `publish` only runs for version tags, inside the
+# protected `npm-publish` environment, and refuses to ship a tarball whose
+# digest differs from the one that was verified — a failed run therefore
+# leaves no npm artifact behind.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: contextengine
+          POSTGRES_PASSWORD: contextengine
+          POSTGRES_DB: contextengine_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U contextengine -d contextengine_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CONTEXTENGINE_DATABASE_URL: postgresql://contextengine:contextengine@127.0.0.1:5432/contextengine_test
+      CONTEXTENGINE_TEST_DATABASE_URL: postgresql://contextengine:contextengine@127.0.0.1:5432/contextengine_test
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+      tarball: ${{ steps.digest.outputs.tarball }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run eval:pr:corpus:validate
+      - name: Pack tarball
+        run: npm pack
+      - name: Record build evidence
+        id: digest
+        run: |
+          TARBALL=$(ls contextengine-plugin-*.tgz)
+          shasum -a 256 "$TARBALL" | tee SHA256SUMS
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cut -d' ' -f1 SHA256SUMS)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release artifact"
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Clean-install smoke (CLI, MCP, HTTP)
+        run: |
+          TAG_ARGS=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG_ARGS="--tag ${{ github.ref_name }}"
+          fi
+          node scripts/release-smoke.mjs "${{ steps.digest.outputs.tarball }}" $TAG_ARGS
+      - name: Upload build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifact
+          path: |
+            contextengine-plugin-*.tgz
+            SHA256SUMS
+          retention-days: 90
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # npm --provenance attestation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Repack and verify digest matches the verified artifact
+        run: |
+          npm pack
+          TARBALL=$(ls contextengine-plugin-*.tgz)
+          ACTUAL=$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)
+          if [ "$ACTUAL" != "${{ needs.verify.outputs.sha256 }}" ]; then
+            echo "Digest drift: verified ${{ needs.verify.outputs.sha256 }} but repack produced $ACTUAL" >&2
+            exit 1
+          fi
+      - name: Publish to npm
+        run: npm publish "${{ needs.verify.outputs.tarball }}" --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

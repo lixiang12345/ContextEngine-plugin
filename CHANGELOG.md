@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added a tag-driven release workflow. `verify` re-runs the full PostgreSQL
+  suite and corpus validation, packs the tarball, records its SHA-256 as a
+  90-day build artifact, and runs `scripts/release-smoke.mjs`
+  (`npm run release:smoke`): a clean install into an empty directory must
+  boot the CLI, MCP stdio, and HTTP entry points and report one consistent
+  version across the package manifest, the git tag, and the CHANGELOG
+  release section. `publish` runs only for version tags inside the protected
+  `npm-publish` environment, refuses to ship a tarball whose digest differs
+  from the verified one, and publishes with npm provenance — a failed run
+  leaves no npm artifact behind.
+
 ## 0.5.0 — 2026-07-26
 
 **Compatibility and upgrade notes.** 0.4.0 predates the versioned PostgreSQL
