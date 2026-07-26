@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>使用手册 — ContextEngine</title>
+<meta name="description" content="ContextEngine 完整使用手册：安装、快速开始、CLI 参考、语义检索、MCP 集成、HTTP 服务、配置参考、忽略规则、Library API、评测与故障排查。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M12 4H8a4 4 0 0 0-4 4v4M20 4h4a4 4 0 0 1 4 4v4M12 28H8a4 4 0 0 1-4-4v-4M20 28h4a4 4 0 0 0 4-4v-4' stroke='%233DF2B0' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3Crect x='9' y='11' width='14' height='2.6' rx='1.3' fill='%233DF2B0'/%3E%3Crect x='9' y='16' width='10' height='2.6' rx='1.3' fill='%232BC98F'/%3E%3Crect x='9' y='21' width='6' height='2.6' rx='1.3' fill='%2317A374'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#0a0a0b">
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem("ce-theme"); } catch (e) {}
+    if (t !== "light" && t !== "dark") {
+      t = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    }
+    document.documentElement.setAttribute("data-theme", t);
+    var tc = document.querySelector('meta[name="theme-color"]');
+    if (tc) tc.setAttribute("content", t === "light" ? "#fafaf6" : "#0a0a0b");
+  })();
+</script>
+<link rel="stylesheet" href="assets/style.css?v=20260726">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到正文</a>
+
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="index.html" aria-label="ContextEngine 首页">
+      <svg class="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <defs><linearGradient id="lg-top" x1="0" y1="0" x2="32" y2="32">
+          <stop stop-color="#3DF2B0"/><stop offset="1" stop-color="#17A374"/>
+        </linearGradient></defs>
+        <path d="M12 4H8a4 4 0 0 0-4 4v4M20 4h4a4 4 0 0 1 4 4v4M12 28H8a4 4 0 0 1-4-4v-4M20 28h4a4 4 0 0 0 4-4v-4" stroke="url(#lg-top)" stroke-width="2.4" stroke-linecap="round"/>
+        <rect x="9" y="11" width="14" height="2.6" rx="1.3" fill="#3DF2B0"/>
+        <rect x="9" y="16" width="10" height="2.6" rx="1.3" fill="#2BC98F"/>
+        <rect x="9" y="21" width="6" height="2.6" rx="1.3" fill="#17A374"/>
+      </svg>
+      ContextEngine
+      <span class="brand-version">v0.5.0</span>
+    </a>
+    <nav class="nav" aria-label="主导航">
+      <a href="index.html">首页</a>
+      <a href="docs.html" class="active" aria-current="page">使用手册</a>
+      <a href="index.html#bench">基准数据</a>
+      <a href="index.html#compare">对比</a>
+    </nav>
+    <div class="topbar-actions">
+      <a class="icon-btn lang-btn" href="en/docs.html" title="Switch to English" aria-label="Switch to English">EN</a>
+      <button class="icon-btn theme-toggle" type="button" aria-label="切换深浅主题">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/lixiang12345/ContextEngine-plugin" target="_blank" rel="noopener" aria-label="GitHub 仓库">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.75 2.69 1.25 3.35.95.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.26 5.67.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg>
+      </a>
+      <button class="icon-btn menu-btn" type="button" aria-label="打开菜单" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+    </div>
+  </div>
+  <nav class="mobile-nav" aria-label="移动端导航">
+    <a href="index.html">首页</a>
+    <a href="docs.html">使用手册</a>
+    <a href="index.html#bench">基准数据</a>
+    <a href="en/docs.html">English</a>
+    <a href="https://github.com/lixiang12345/ContextEngine-plugin" target="_blank" rel="noopener">GitHub</a>
+  </nav>
+</header>
+
+<div class="container docs-shell" id="main">
+
+  <!-- ======== 侧边导航 ======== -->
+  <div>
+    <button class="docs-toc-toggle" type="button" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      目录
+    </button>
+    <aside class="docs-sidebar" aria-label="文档目录">
+      <h5>开始使用</h5>
+      <a href="#overview">产品概览</a>
+      <a href="#install">安装</a>
+      <a href="#quickstart">快速开始</a>
+      <h5>核心用法</h5>
+      <a href="#cli">CLI 参考</a>
+      <a href="#semantic">语义检索</a>
+      <a href="#ignore">忽略规则</a>
+      <a href="#profiles">多仓 Profile</a>
+      <h5>集成</h5>
+      <a href="#mcp">MCP 集成</a>
+      <a href="#http">HTTP 服务</a>
+      <a href="#library">Library API</a>
+      <h5>进阶</h5>
+      <a href="#config">配置参考</a>
+      <a href="#snapshots">索引快照</a>
+      <a href="#evaluation">评测</a>
+      <h5>帮助</h5>
+      <a href="#troubleshooting">故障排查</a>
+      <a href="#faq">常见问题</a>
+    </aside>
+  </div>
+
+  <!-- ======== 正文 ======== -->
+  <main class="docs-main">
+
+    <section id="overview">
+      <h1>ContextEngine 使用手册</h1>
+      <p class="docs-intro">面向 AI 编程 Agent 的可移植、Augment 级代码库上下文引擎。本手册覆盖从安装到生产部署的完整路径，对应 <code>contextengine-plugin v0.5.0</code>。</p>
+
+      <h3>它是什么</h3>
+      <p>ContextEngine 是一层小而完整的<strong>检索组件</strong>：把 PostgreSQL 全文检索、符号表、路径匹配、pgvector 语义向量、import/symbol 依赖图与提交历史融合成一次检索，再按 token 预算打包为带路径与行号的上下文，交给编程 Agent 使用。</p>
+      <div class="codeblock"><pre><code data-lang="text">query ──► 查询理解 ──► FTS / 符号 / 路径 / 向量 并行召回
+                          │
+                          ▼
+              RRF 融合 ──► 特征重排 ──► (可选)神经重排
+                          │
+                          ▼
+              依赖图扩展 ──► MMR 多样性打包 ──► Agent / MCP</code></pre></div>
+      <h3>四种形态</h3>
+      <ul>
+        <li><strong>MCP 服务器(stdio)</strong> — 接入 Claude Code、Cursor 等任何 MCP 客户端；</li>
+        <li><strong>CLI</strong> — <code>index</code> / <code>search</code> / <code>context</code> / <code>status</code> 等命令，适合脚本与 CI；</li>
+        <li><strong>HTTP 服务</strong> — Bearer 鉴权的工作区同步、后台索引任务、Remote MCP 与运维仪表盘；</li>
+        <li><strong>TypeScript 库</strong> — 嵌入你自己的 Agent 循环。</li>
+      </ul>
+      <div class="callout tip">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h8l-1 8 11-13h-9l1-7z"/></svg>
+        <p><strong>没有 embeddings 也能用。</strong>不配置任何 API key 时，引擎以 BM25-only 模式完全离线运行；配置 OpenAI 兼容 embeddings 端点后自动升级为混合语义检索。</p>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>安装</h2>
+      <h3>环境要求</h3>
+      <ul>
+        <li><strong>Node.js ≥ 22.5</strong></li>
+        <li><strong>带 pgvector 扩展的 PostgreSQL</strong>(仓库内置本地 Docker Compose，pgvector 由引擎自动启用)</li>
+      </ul>
+
+      <h3>从源码安装(推荐)</h3>
+      <div class="codeblock"><pre><code data-lang="bash">git clone https://github.com/lixiang12345/ContextEngine-plugin.git
+cd ContextEngine-plugin
+npm install
+npm run build
+npm link   # 可选：全局暴露 contextengine / contextengine-mcp / contextengine-http</code></pre></div>
+      <p><code>npm link</code> 之后，三个可执行入口在任何目录可用：<code>contextengine</code>(CLI)、<code>contextengine-mcp</code>(MCP stdio)、<code>contextengine-http</code>(HTTP 服务)。</p>
+
+      <h3>作为库安装</h3>
+      <div class="codeblock"><pre><code data-lang="bash">npm install contextengine-plugin</code></pre></div>
+      <div class="codeblock"><pre><code data-lang="ts">import { ContextEngine } from "contextengine-plugin";
+
+const engine = ContextEngine.open({ root: process.cwd() });
+await engine.index();
+const hits = await engine.search({ query: "auth middleware" });</code></pre></div>
+
+      <h3>免安装试用</h3>
+      <div class="codeblock"><pre><code data-lang="bash">npx contextengine-plugin index
+npx contextengine-plugin search "stripe payment webhook"</code></pre></div>
+    </section>
+
+    <section id="quickstart">
+      <h2>快速开始</h2>
+      <h3>第 1 步：准备 PostgreSQL</h3>
+      <p>在仓库目录启动内置的本地 pgvector 服务(仅需一次)，并导出连接串：</p>
+      <div class="codeblock"><pre><code data-lang="bash">npm run db:up
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine</code></pre></div>
+      <div class="callout info">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+        <p>索引数据全部存在 PostgreSQL 中，以<strong>工作区绝对路径</strong>为命名空间——同一个数据库可以安全容纳多个仓库，且不会把向量整体加载进进程内存。<code>CONTEXTENGINE_DATA_DIR</code> 仅用于定位待迁移的遗留 SQLite 索引。</p>
+      </div>
+
+      <h3>第 2 步：建索引</h3>
+      <div class="codeblock"><pre><code data-lang="bash">contextengine index              # 索引当前目录
+contextengine index /path/to/repo   # 或指定仓库路径</code></pre></div>
+
+      <h3>第 3 步：搜索与打包</h3>
+      <div class="codeblock"><pre><code data-lang="bash"># 混合搜索(默认 auto 模式)
+contextengine search "how is rate limiting implemented"
+contextengine search "processPayment" --mode bm25 -k 5
+
+# 为一个开发任务打包上下文(给 Agent 用)
+contextengine context "Add retry logic to the payment webhook"
+
+# 查看索引状态
+contextengine status</code></pre></div>
+      <p>搜索结果始终携带<strong>路径 + 行号区间</strong>，打包结果附带检索轨迹(intent、参与通道、token 用量、索引 generation)——这是"Agent 原生“而非”聊天原生"的设计：所有证据可直接定位、可复核。</p>
+    </section>
+
+    <section id="cli">
+      <h2>CLI 参考</h2>
+      <p>全部命令一览：</p>
+      <div class="codeblock"><pre><code data-lang="text">contextengine index [root] [--quiet] [--exclude &lt;glob...&gt;]
+contextengine search &lt;query&gt; [-k N] [--mode auto|bm25|semantic|hybrid] [--path-prefix p] [--json]
+contextengine context &lt;task&gt; [--max-tokens N] [--json]
+contextengine status
+contextengine clear-index
+contextengine migrate-sqlite &lt;legacy-index.db&gt;
+contextengine watch [root] [--debounce 800]      # 实时增量重建
+contextengine serve [--auto-index]               # MCP stdio 服务器
+contextengine http [--host 127.0.0.1] [--port 8787]   # 鉴权 HTTP 服务
+contextengine ci-template &lt;github|gitlab|bitbucket&gt;   # 输出可安装的 CI 工作流
+contextengine snapshot export|import|list|delete|prune|gc [name] [--store path|s3://bucket/prefix]
+contextengine eval [--self | --cases file.json] [--reindex]
+contextengine profile list|add|use …</code></pre></div>
+
+      <h3>index — 建立 / 增量更新索引</h3>
+      <p>对工作区做声明/方法级切块并写入 PostgreSQL。已配置 embeddings 时同时嵌入新增与变更的块。重复执行按文件哈希增量，只处理变化的文件。<code>--exclude</code> 追加排除模式(等价于 <code>CONTEXTENGINE_EXCLUDE</code> 环境变量)。</p>
+
+      <h3>search — 混合搜索</h3>
+      <ul>
+        <li><code>--mode auto</code>(默认)：有 embeddings 则混合，否则 BM25；也可强制 <code>bm25</code> / <code>semantic</code> / <code>hybrid</code>;</li>
+        <li><code>-k N</code>：返回条数；<code>--path-prefix</code>：限定路径前缀；<code>--json</code>：结构化输出。</li>
+      </ul>
+
+      <h3>context — 为任务打包上下文</h3>
+      <p>输入一句任务描述，输出经过 MMR 去重、按相关性排序的证据块集合。引擎<strong>模型中立</strong>：默认返回 <code>topK</code> 选出的全部证据，不猜测模型上下文窗口；调用方明确需要更小载荷时才传 <code>--max-tokens</code>。</p>
+
+      <h3>watch — 实时增量索引</h3>
+      <p>监听文件变更，防抖(默认 800ms)后增量重建。适合长期开着的本地开发会话。</p>
+
+      <h3>其余命令</h3>
+      <ul>
+        <li><code>status</code> — 文件数、块数、embedding 覆盖等索引统计；</li>
+        <li><code>clear-index</code> — 清空当前工作区的索引数据；</li>
+        <li><code>migrate-sqlite</code> — 一次性迁移 0.3.x 时代的本地 SQLite 索引；</li>
+        <li><code>serve</code> — 以 stdio 启动 MCP 服务器(详见 <a href="#mcp">MCP 集成</a>);</li>
+        <li><code>http</code> — 启动鉴权 HTTP 服务(详见 <a href="#http">HTTP 服务</a>);</li>
+        <li><code>ci-template</code> — 打印 GitHub Actions / GitLab CI / Bitbucket Pipelines 的索引刷新工作流模板；</li>
+        <li><code>snapshot</code> — 团队索引快照(详见 <a href="#snapshots">索引快照</a>);</li>
+        <li><code>eval</code> / <code>profile</code> — 见 <a href="#evaluation">评测</a> 与 <a href="#profiles">多仓 Profile</a>。</li>
+      </ul>
+    </section>
+
+    <section id="semantic">
+      <h2>语义检索</h2>
+      <p>不配置 API key 时，ContextEngine 以 <strong>BM25-only</strong> 模式运行(依然实用)。配置任意 OpenAI 兼容 embeddings 端点即可启用混合语义检索：</p>
+      <div class="codeblock"><pre><code data-lang="bash">export OPENAI_API_KEY=sk-...
+# 可选覆盖：
+export OPENAI_BASE_URL=https://api.openai.com/v1
+export OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+
+contextengine index    # 为新增/变更块生成向量
+contextengine search "checkout timeout" --mode hybrid</code></pre></div>
+      <p>同一组配置也接受 ContextEngine 前缀的别名：<code>CONTEXTENGINE_EMBEDDING_API_KEY</code>、<code>CONTEXTENGINE_EMBEDDING_BASE_URL</code>、<code>CONTEXTENGINE_EMBEDDING_MODEL</code>。</p>
+      <div class="callout info">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+        <p>兼容 OpenAI 官方、各类代理以及暴露 <code>/v1/embeddings</code> 的本地服务(如 Ollama 兼容网关)。Base URL 写成源站(<code>https://gateway.example.com</code>)或带版本(<code>…/v1</code>)均可，引擎会自动规范化。</p>
+      </div>
+
+      <h3>自托管 Qwen3(生产路径)</h3>
+      <p>经过验证的多语言语义检索栈，两个模型合计仅 ~2.2 GB 显存：</p>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>角色</th><th>模型</th></tr></thead>
+        <tbody>
+          <tr><td>Embedding</td><td><code>Qwen/Qwen3-Embedding-0.6B</code></td></tr>
+          <tr><td>Reranker(可选 API)</td><td><code>Qwen/Qwen3-Reranker-0.6B</code></td></tr>
+        </tbody>
+      </table></div>
+      <div class="codeblock"><pre><code data-lang="bash"># GPU 主机部署见 docs/DEPLOY_EMBED_RERANK.md + scripts/embed_rerank_server.py
+
+# 笔记本侧(经 SSH 隧道):
+export OPENAI_BASE_URL=http://127.0.0.1:18000/v1
+export OPENAI_API_KEY=ce-local-key
+export OPENAI_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+export CONTEXTENGINE_EMBED_BATCH=8
+
+# 可选：启用已部署的 /v1/rerank 神经重排第二阶段
+# export CONTEXTENGINE_NEURAL_RERANK=1
+# export CONTEXTENGINE_RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
+
+contextengine index</code></pre></div>
+
+      <h3>降级与保护</h3>
+      <ul>
+        <li>每次查询的语义 / 重排阶段各有 <strong>2000ms</strong> 预算(<code>CONTEXTENGINE_SEARCH_SEMANTIC_TIMEOUT_MS</code> / <code>_RERANK_TIMEOUT_MS</code>)，超时自动回退词法通道，检索不会因模型服务卡住而失败；</li>
+        <li>模型端点连续失败 <strong>3 次</strong>后断路器打开，冷却 <strong>30 秒</strong>(<code>CONTEXTENGINE_SEARCH_BREAKER_FAILURE_THRESHOLD</code> / <code>_COOLDOWN_MS</code>);</li>
+        <li>所有降级都会体现在响应的检索轨迹里，而不是静默发生。</li>
+      </ul>
+    </section>
+
+    <section id="ignore">
+      <h2>忽略规则</h2>
+      <p>索引期按以下顺序过滤文件，行为与 Augment Context Connectors 对齐：</p>
+      <ol>
+        <li><strong>内置智能过滤</strong> — <code>node_modules/</code>、<code>vendor/</code>、<code>dist/</code>、<code>build/</code>、<code>target/</code>、二进制、lock 文件、<code>.env</code> 机密、IDE 杂项等；</li>
+        <li><strong><code>.gitignore</code></strong>(根目录 + 嵌套目录规则);</li>
+        <li><strong><code>.augmentignore</code></strong>(与 Augment 语义一致，支持 <code>!</code> 反选重新纳入);</li>
+        <li><strong><code>.contextengineignore</code></strong>(产品专属);</li>
+        <li><strong>CLI / 环境变量</strong> — <code>contextengine index --exclude 'vendor/**' '**/*.generated.*'</code> 或 <code>CONTEXTENGINE_EXCLUDE=…</code>。</li>
+      </ol>
+      <p>示例 <code>.augmentignore</code>:</p>
+      <div class="codeblock"><pre><code data-lang="bash"># 重新纳入某个被 gitignore 的目录
+!some-tracked-deps/
+
+# 排除测试夹具 / 本地数据
+data/test.json
+*.tmp</code></pre></div>
+    </section>
+
+    <section id="profiles">
+      <h2>多仓 Profile</h2>
+      <p>在多个仓库之间快速切换默认工作区：</p>
+      <div class="codeblock"><pre><code data-lang="bash">contextengine profile add app --root ~/work/my-app
+contextengine profile add api --root ~/work/my-api
+contextengine profile use app
+contextengine profile list</code></pre></div>
+      <p>配置写入 <code>contextengine.profiles.json</code>(格式见仓库 <code>examples/contextengine.profiles.example.json</code>)。也可以用 <code>CONTEXTENGINE_EXTRA_ROOTS=docs:/path/to/docs</code> 把文档仓、额外目录并入同一个索引，一次检索同时覆盖代码与文档。</p>
+    </section>
+
+    <section id="mcp">
+      <h2>MCP 集成</h2>
+      <p>ContextEngine 通过 stdio 说 <strong>Model Context Protocol</strong>，任何 MCP 客户端均可接入。</p>
+
+      <h3>Claude Code</h3>
+      <div class="codeblock"><pre><code data-lang="bash"># 方式一：指向构建产物
+claude mcp add contextengine -- node /absolute/path/to/ContextEngine-plugin/dist/mcp-server.js
+
+# 方式二：npm link 之后
+claude mcp add contextengine -- contextengine-mcp</code></pre></div>
+
+      <h3>Cursor / 其他 MCP 客户端</h3>
+      <p>添加一个 MCP 服务器条目，把 <code>cwd</code> 设为要索引的工作区(或设置 <code>CONTEXTENGINE_ROOT</code>):</p>
+      <div class="codeblock"><pre><code data-lang="json">{
+  "command": "node",
+  "args": ["/absolute/path/to/ContextEngine-plugin/dist/mcp-server.js"]
+}</code></pre></div>
+
+      <h3>环境变量(可选)</h3>
+      <div class="codeblock"><pre><code data-lang="bash">export CONTEXTENGINE_ROOT=/path/to/repo
+export CONTEXTENGINE_AUTO_INDEX=1
+# MCP 文件监听默认开启；置 0 关闭
+export CONTEXTENGINE_MCP_WATCH=1
+# 可选：逗号分隔的 alias:path 额外根目录
+export CONTEXTENGINE_EXTRA_ROOTS=docs:/path/to/docs
+export OPENAI_API_KEY=...</code></pre></div>
+
+      <h3>暴露的工具</h3>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>工具</th><th>用途</th></tr></thead>
+        <tbody>
+          <tr><td><code>codebase-retrieval</code></td><td>Augment 兼容的打包检索(<strong>建议 Agent 首先调用</strong>;<code>codebase_retrieval</code> 为旧别名)</td></tr>
+          <tr><td><code>codebase_search</code></td><td>混合搜索 → 路径、行号、符号、内容</td></tr>
+          <tr><td><code>get_task_context</code></td><td>按 token 预算打包排序后的证据块</td></tr>
+          <tr><td><code>get_file_context</code></td><td>读取文件 / 行区间</td></tr>
+          <tr><td><code>index_status</code></td><td>索引统计</td></tr>
+          <tr><td><code>reindex_workspace</code></td><td>增量重建索引</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout tip">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h8l-1 8 11-13h-9l1-7z"/></svg>
+        <p><strong>Agent 使用建议：</strong>先调 <code>get_task_context</code> 拿到任务上下文再动手编辑；后续追问用 <code>codebase_search</code>。</p>
+      </div>
+      <p>MCP 服务器默认监听工作区根与 <code>CONTEXTENGINE_EXTRA_ROOTS</code>，文件变更防抖后增量刷新检索。设 <code>CONTEXTENGINE_MCP_WATCH=0</code>(也接受 <code>false</code> / <code>off</code> / <code>no</code>)可关闭监听；关闭后由 <code>CONTEXTENGINE_AUTO_INDEX=1</code> 决定首次 MCP 请求时是否自动补建缺失索引。</p>
+    </section>
+
+    <section id="http">
+      <h2>HTTP 服务</h2>
+      <p>同一检索核心以鉴权 HTTP 服务的形式服务远端 IDE 与团队：源文件以内容寻址 Blob 存入 PostgreSQL，客户端只同步变更的哈希，提交工作区修订后观察后台索引任务，再发起查询。</p>
+
+      <h3>启动</h3>
+      <div class="codeblock"><pre><code data-lang="bash">export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine
+export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
+
+contextengine-http
+# GET /health · GET /openapi.json
+# 仪表盘: http://127.0.0.1:8787/dashboard
+# 所有 /v1 路由使用 Authorization: Bearer &lt;key&gt;</code></pre></div>
+      <p>核心端点：工作区创建 / 列表、<code>/sync/plan</code>、<code>PUT /blobs/{sha256}</code>、<code>/sync/commit</code>、<code>/index-jobs</code>(SSE 进度)、<code>/search</code>、<code>/context</code>、<code>/file</code>。完整客户端契约、载荷与 IntelliJ 插件映射见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/docs/HTTP_API.md" target="_blank" rel="noopener">docs/HTTP_API.md</a>。</p>
+
+      <h3>Remote MCP(Streamable HTTP)</h3>
+      <p>支持 MCP 的远端客户端可直接使用 <code>/v1/workspaces/{workspaceId}/mcp</code>，携带同一个 Bearer key。首个请求为 <code>initialize</code>，返回 <code>mcp-session-id</code>；后续请求即可调用该工作区的 <code>codebase-retrieval</code> 工具。会话元数据持久化在 PostgreSQL，可在任意健康实例上恢复、经受进程重启，无需粘性路由。该 JSON 响应模式支持 POST 与幂等 DELETE;GET/SSE 返回 405(实时流不可重建)。</p>
+
+      <h3>运维仪表盘</h3>
+      <p>HTTP 服务自带 <code>/dashboard</code>(与 <code>/v1/*</code> 同一 Bearer key)，展示：</p>
+      <ul>
+        <li>工作区修订、已索引文件、块数与 embedding 状态；</li>
+        <li>近期索引任务与进度；</li>
+        <li>按路由的请求量、错误率、平均与 p95 延迟；</li>
+        <li>进程运行时长与内存；</li>
+        <li>对已索引工作区的在线检索探针。</li>
+      </ul>
+      <div class="callout info">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+        <p>观测数据只含方法、规范化路由、状态码与延迟；<strong>查询文本、源码内容、请求体与 API key 一概不采集</strong>。仪表盘轮询同源 <code>GET /v1/observability/overview</code>，无需单独的前端构建。</p>
+      </div>
+
+      <h3>Docker Compose 部署</h3>
+      <div class="codeblock"><pre><code data-lang="bash">export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
+docker compose up -d --build
+docker compose ps
+# 仪表盘默认发布在 http://127.0.0.1:8790/dashboard(仅绑定回环地址)</code></pre></div>
+      <div class="callout warn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+        <p>仅在可信的远程部署中设置 <code>CONTEXTENGINE_DOCKER_HTTP_BIND_HOST=0.0.0.0</code>。PostgreSQL 与运行时数据使用命名卷，普通 <code>docker compose down</code> 保留索引数据；只有确认要删除数据库时才用 <code>down -v</code>。</p>
+      </div>
+
+      <h3>鉴权、ACL 与连接器</h3>
+      <ul>
+        <li><strong>多主体鉴权</strong> — 多把 Bearer key(<code>CONTEXTENGINE_HTTP_API_KEYS</code>)或经验证的 OAuth/OIDC JWT(<code>CONTEXTENGINE_OIDC_ISSUER</code>)，按工作区实施 <code>reader</code> / <code>writer</code> / <code>owner</code> 权限；OIDC 主体跨 token 轮换保持稳定，仅服务端配置的组映射可授予 operator；</li>
+        <li><strong>源策略</strong> — owner 可设默认允许/拒绝 + 嵌套路径前缀规则，search / context / 文件读取 / Remote MCP 统一强制执行；</li>
+        <li><strong>只读连接器</strong> — GitHub、GitLab、Bitbucket Cloud 与静态网站连接器把外部内容挂到空 Blob 工作区并增量同步；网站爬虫强制 HTTPS/公网、同源、路径前缀、robots、重定向、页数、深度与字节数限制；</li>
+        <li><strong>Webhook 与 CI</strong> — 签名的 GitHub / GitLab push webhook 幂等触发同步；source 级 CI trigger token 让流水线只刷新单个源，而无需工作区级 API key(模板见 <code>contextengine ci-template</code>)。</li>
+      </ul>
+    </section>
+
+    <section id="library">
+      <h2>Library API</h2>
+      <p>TypeScript 类型完整，适合把检索嵌入你自己的 Agent 循环：</p>
+      <div class="codeblock"><pre><code data-lang="ts">import { ContextEngine } from "contextengine-plugin";
+
+const engine = ContextEngine.open({ root: "/repo" });
+
+// 建索引(带进度回调)
+await engine.index((p) => console.log(p.phase, p.filesDone));
+
+// 统计
+const stats = await engine.stats();
+
+// 搜索
+const hits = await engine.search({ query: "…", topK: 8, mode: "auto" });
+
+// 为任务打包上下文
+const packed = await engine.getTaskContext({
+  task: "…",
+  // 可选的调用方传输上限: maxTokens: 16_000,
+});
+
+await engine.close();</code></pre></div>
+      <p>检索输出<strong>模型中立</strong>：引擎按 <code>topK</code> 完成检索、重排、去重与格式化，不检查模型名或上下文窗口大小；只有调用方明确需要更小载荷时才传 <code>maxTokens</code>。嵌入式宿主还可以通过 <code>connectorPlugins</code> 注册额外的内容源提供方(契约见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/docs/PLUGINS.md" target="_blank" rel="noopener">docs/PLUGINS.md</a>)。</p>
+    </section>
+
+    <section id="config">
+      <h2>配置参考</h2>
+      <p>全部环境变量按用途分组。<strong>唯一必填项</strong>是数据库连接串(HTTP 服务另需 API key)。</p>
+
+      <h3>核心</h3>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>变量</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td><code>CONTEXTENGINE_DATABASE_URL</code> / <code>DATABASE_URL</code></td><td><strong>必填</strong>。PostgreSQL 连接串；pgvector 自动启用</td></tr>
+          <tr><td><code>CONTEXTENGINE_ROOT</code></td><td>MCP 模式的工作区根</td></tr>
+          <tr><td><code>CONTEXTENGINE_EXTRA_ROOTS</code></td><td>逗号分隔的 <code>name:path</code> 额外根目录，随工作区一起索引与监听</td></tr>
+          <tr><td><code>CONTEXTENGINE_AUTO_INDEX</code></td><td><code>1</code> = 首次 MCP 使用时若无索引则自动构建</td></tr>
+          <tr><td><code>CONTEXTENGINE_MCP_WATCH</code></td><td>MCP 文件监听；默认开启，<code>0</code>/<code>false</code> 关闭</td></tr>
+          <tr><td><code>CONTEXTENGINE_MAX_FILE_BYTES</code></td><td>源文件索引上限(默认 512 KiB，硬上限 32 MiB)</td></tr>
+          <tr><td><code>CONTEXTENGINE_COMMIT_LIMIT</code></td><td>索引最近多少条提交(默认 <code>80</code>,<code>0</code> 关闭)</td></tr>
+          <tr><td><code>CONTEXTENGINE_EXCLUDE</code></td><td>追加的排除 glob(等价 <code>--exclude</code>)</td></tr>
+          <tr><td><code>CONTEXTENGINE_DATA_DIR</code></td><td>遗留 SQLite 目录，仅 <code>migrate-sqlite</code> 使用</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>Embeddings 与重排</h3>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>变量</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td><code>OPENAI_API_KEY</code> / <code>CONTEXTENGINE_EMBEDDING_API_KEY</code></td><td>启用 embeddings</td></tr>
+          <tr><td><code>OPENAI_BASE_URL</code> / <code>CONTEXTENGINE_EMBEDDING_BASE_URL</code></td><td>Embeddings API 地址(源站或 <code>/v1</code> 均可)</td></tr>
+          <tr><td><code>OPENAI_EMBEDDING_MODEL</code> / <code>CONTEXTENGINE_EMBEDDING_MODEL</code></td><td>模型名</td></tr>
+          <tr><td><code>CONTEXTENGINE_EMBED_BATCH</code></td><td>嵌入批大小(默认 <code>8</code>)</td></tr>
+          <tr><td><code>CONTEXTENGINE_EMBED_MAX_CHARS</code></td><td>嵌入前截断块文本</td></tr>
+          <tr><td><code>CONTEXTENGINE_NEURAL_RERANK</code></td><td><code>1</code> = 启用可选的 <code>/v1/rerank</code> 神经重排第二阶段</td></tr>
+          <tr><td><code>CONTEXTENGINE_RERANK_MODEL</code></td><td>重排模型(默认 <code>Qwen/Qwen3-Reranker-0.6B</code>)</td></tr>
+          <tr><td><code>CONTEXTENGINE_RERANK_BASE_URL</code></td><td>重排 API 地址(默认同 embeddings)</td></tr>
+          <tr><td><code>CONTEXTENGINE_RERANK_TOP_N</code></td><td>送入重排的候选数(默认 <code>20</code>)</td></tr>
+          <tr><td><code>CONTEXTENGINE_RERANK_WEIGHT</code></td><td>融入最终得分的权重(默认 <code>0.32</code>)</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>搜索预算与断路器</h3>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>变量</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td><code>CONTEXTENGINE_SEARCH_SEMANTIC_TIMEOUT_MS</code> / <code>_RERANK_TIMEOUT_MS</code></td><td>每次查询的模型预算(默认 <code>2000</code> ms)；超时回退词法通道</td></tr>
+          <tr><td><code>CONTEXTENGINE_SEARCH_BREAKER_FAILURE_THRESHOLD</code> / <code>_COOLDOWN_MS</code></td><td>模型断路器阈值 / 冷却(默认 <code>3</code> 次 / <code>30000</code> ms)</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>HTTP 服务</h3>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>变量</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td><code>CONTEXTENGINE_HTTP_API_KEY</code></td><td>HTTP 服务必需的 Bearer key</td></tr>
+          <tr><td><code>CONTEXTENGINE_HTTP_HOST</code> / <code>_PORT</code></td><td>绑定地址与端口(默认 <code>127.0.0.1:8787</code>)</td></tr>
+          <tr><td><code>CONTEXTENGINE_HTTP_MAX_BLOB_BYTES</code></td><td>单个同步 Blob 上限(默认 2 MiB)</td></tr>
+          <tr><td><code>CONTEXTENGINE_HTTP_CORS_ORIGINS</code></td><td>精确逗号分隔的浏览器源或 <code>*</code>；默认关闭</td></tr>
+          <tr><td><code>CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES</code></td><td>允许服务器本地工作区根(默认关)</td></tr>
+          <tr><td><code>CONTEXTENGINE_HTTP_ALLOW_PRIVATE_MODEL_URLS</code></td><td>可信部署中允许私网模型地址(默认关)</td></tr>
+          <tr><td><code>CONTEXTENGINE_MCP_SESSION_STORE</code></td><td>Remote MCP 会话存储：<code>postgres</code>(默认，跨实例)或 <code>memory</code></td></tr>
+          <tr><td><code>CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS</code></td><td>Remote MCP 空闲会话寿命(默认 30 分钟)</td></tr>
+          <tr><td><code>CONTEXTENGINE_MCP_MAX_SESSIONS</code></td><td>全局会话上限(默认 128)</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>索引任务(多实例)</h3>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>变量</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td><code>CONTEXTENGINE_INDEX_JOB_LEASE_MS</code></td><td>持久索引任务的所有权租约(默认 300000 ms)</td></tr>
+          <tr><td><code>CONTEXTENGINE_INDEX_JOB_POLL_INTERVAL_MS</code></td><td>跨实例任务扫描与 SSE 回退间隔(默认 2000 ms)</td></tr>
+          <tr><td><code>CONTEXTENGINE_INDEX_JOB_MAX_ATTEMPTS</code></td><td>反复被重新认领的任务终态失败前的重试预算(默认 5)</td></tr>
+          <tr><td><code>CONTEXTENGINE_INDEX_JOB_EXECUTOR_ID</code></td><td>本地文件系统执行者身份；容器 / 多主机部署应显式设置</td></tr>
+          <tr><td><code>CONTEXTENGINE_INDEX_ANALYZE_TIMEOUT_MS</code></td><td>generation 构建后 PostgreSQL 统计刷新的尽力超时(默认 30000 ms)</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>快照</h3>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>变量</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td><code>CONTEXTENGINE_SNAPSHOT_STORE</code></td><td>启用 HTTP 侧 owner 管理的快照操作(路径或 <code>s3://bucket/prefix</code>)</td></tr>
+          <tr><td><code>CONTEXTENGINE_SNAPSHOT_REPLICATION_TARGETS</code></td><td>启用 owner 触发的异步复制目标</td></tr>
+          <tr><td><code>CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS</code></td><td>持久快照任务 / 调度扫描间隔(默认 2000 ms)</td></tr>
+          <tr><td><code>CONTEXTENGINE_SNAPSHOT_EVENT_RETENTION_MS</code></td><td>快照任务历史保留时长(默认 30 天，<code>0</code> 关闭)</td></tr>
+          <tr><td><code>CONTEXTENGINE_SNAPSHOT_EVENT_MAX_PER_JOB</code></td><td>每任务保留的最新事件数(默认 500)</td></tr>
+        </tbody>
+      </table></div>
+      <p>连接器与 webhook 相关变量(<code>CONTEXTENGINE_GITHUB_TOKEN</code>、<code>CONTEXTENGINE_GITLAB_TOKEN</code>、<code>CONTEXTENGINE_BITBUCKET_TOKEN</code>、webhook 签名密钥等)见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/docs/HTTP_API.md" target="_blank" rel="noopener">HTTP API 指南</a>。</p>
+    </section>
+
+    <section id="snapshots">
+      <h2>索引快照</h2>
+      <p>活跃的索引 generation 可以打成<strong>版本化、校验和验证</strong>的快照，经文件系统或 S3 兼容存储在团队间分享——新人不必重复整仓索引。</p>
+      <div class="codeblock"><pre><code data-lang="bash">contextengine snapshot export my-repo --store /shared/ce-snapshots
+contextengine snapshot list        --store /shared/ce-snapshots
+contextengine snapshot import my-repo --store s3://bucket/prefix
+contextengine snapshot prune | gc  # 清理旧版本 / 垃圾回收</code></pre></div>
+      <p>配置 <code>CONTEXTENGINE_SNAPSHOT_STORE</code> 后，同样的快照操作(导出、导入、prune、GC)通过 HTTP 服务暴露给 owner，返回<strong>持久的 PostgreSQL 任务记录</strong>，支持轮询与 SSE 状态；还可配置间隔制或时区感知的每日复制调度，带吞吐、滞后与有界失败告警。CLI 快照命令保持同步语义。详见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/docs/SNAPSHOTS.md" target="_blank" rel="noopener">docs/SNAPSHOTS.md</a>。</p>
+    </section>
+
+    <section id="evaluation">
+      <h2>评测</h2>
+      <p>质量不是一句口号：仓库自带 Recall / MRR / nDCG 指标、PR 级配对评测与多语言基准，全部可本地复现。</p>
+      <div class="codeblock"><pre><code data-lang="bash"># 内置用例，对本仓库自评
+contextengine eval --self --reindex
+
+# 自定义用例
+contextengine eval --cases examples/eval.sample.json --root /path/to/repo
+
+# 多语言 OSS 套件(需要 embeddings 端点)
+npm run bench:multilang
+
+# 远程 API 冒烟基准：10 查询语言 × 10 代码语言
+npm run bench:api
+
+# 多仓中型套件(克隆到 /tmp/ce-bench)
+node scripts/bench-suite.mjs</code></pre></div>
+      <h3>PR 级配对评测</h3>
+      <div class="codeblock"><pre><code data-lang="bash">contextengine eval-pr \
+  --manifest /path/to/pr-suite.json \
+  --allow-exec \
+  --out eval-results/pr-suite.json \
+  --markdown eval-results/pr-suite.md
+
+# 固定 corpus 的 CI oracle 门：base 必须失败、gold 必须通过(不调用 Agent)
+npm run eval:pr:corpus:validate</code></pre></div>
+      <div class="callout warn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+        <p>manifest 中的命令需要 <code>--allow-exec</code> 显式授权才会执行；运行完整 corpus 前请先审阅 manifest 内容。诚实说明：公开 corpus 结果、受控真实模型运行与 Augment 可比的质量结论<strong>尚未发布</strong>。</p>
+      </div>
+      <p>方法学与多仓套件报告见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/EVALUATION.md" target="_blank" rel="noopener">EVALUATION.md</a>;PR 评测框架见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/docs/PR_EVAL.md" target="_blank" rel="noopener">docs/PR_EVAL.md</a>;embedding 模型选型见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/docs/EMBEDDINGS.md" target="_blank" rel="noopener">docs/EMBEDDINGS.md</a>。</p>
+    </section>
+
+    <section id="troubleshooting">
+      <h2>故障排查</h2>
+
+      <h3>启动即报数据库错误</h3>
+      <p><code>CONTEXTENGINE_DATABASE_URL</code>(或 <code>DATABASE_URL</code>)是必填项。本仓库内可执行 <code>npm run db:up</code> 启动内置 pgvector 服务，再导出 <code>postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine</code>。pgvector 扩展由引擎自动启用，无需手工 <code>CREATE EXTENSION</code>。</p>
+
+      <h3>Node 版本报错</h3>
+      <p>要求 <strong>Node.js ≥ 22.5</strong>(<code>package.json</code> 的 <code>engines</code> 字段有硬性声明)。用 <code>node -v</code> 确认，必要时通过 nvm / fnm 升级。</p>
+
+      <h3>语义搜索超时或变慢</h3>
+      <ul>
+        <li>每次查询的语义 / 重排预算默认各 2000ms，超时自动回退词法结果——功能不中断，但排名可能变化；结果 trace 中会标注降级通道；</li>
+        <li>连续失败 3 次后断路器打开、冷却 30 秒，期间跳过模型调用；</li>
+        <li>检查 <code>OPENAI_BASE_URL</code> 是否可达；写源站或 <code>/v1</code> 形式均可，引擎会规范化。</li>
+      </ul>
+
+      <h3>某些文件没有被索引</h3>
+      <ul>
+        <li>先核对<a href="#ignore">五层忽略规则</a>(内置过滤 → <code>.gitignore</code> → <code>.augmentignore</code> → <code>.contextengineignore</code> → <code>--exclude</code>);</li>
+        <li>超过大小上限的文件会被跳过：默认 512 KiB，可用 <code>CONTEXTENGINE_MAX_FILE_BYTES</code> 调整(硬上限 32 MiB);</li>
+        <li>被 <code>.gitignore</code> 排除但确需索引的路径，在 <code>.augmentignore</code> 中用 <code>!path/</code> 反选纳入。</li>
+      </ul>
+
+      <h3>MCP 客户端搜不到结果</h3>
+      <ul>
+        <li>确认 MCP 服务器的 <code>cwd</code> 或 <code>CONTEXTENGINE_ROOT</code> 指向正确工作区；</li>
+        <li>设 <code>CONTEXTENGINE_AUTO_INDEX=1</code> 让首次请求自动建缺失索引，或先手动跑 <code>contextengine index</code>;</li>
+        <li>MCP 进程同样需要 <code>CONTEXTENGINE_DATABASE_URL</code> 环境变量。</li>
+      </ul>
+
+      <h3>HTTP 请求返回 401</h3>
+      <p>所有 <code>/v1</code> 路由都要求 <code>Authorization: Bearer &lt;key&gt;</code>，key 即 <code>CONTEXTENGINE_HTTP_API_KEY</code>(或 <code>CONTEXTENGINE_HTTP_API_KEYS</code> 中的某一主体)。仪表盘使用同一把 key。</p>
+
+      <h3>从 0.3.x 升级后找不到旧索引</h3>
+      <p>0.4 起索引存储迁移到 PostgreSQL。旧的本地 SQLite 索引执行一次性迁移：<code>contextengine migrate-sqlite &lt;legacy-index.db&gt;</code>(<code>CONTEXTENGINE_DATA_DIR</code> 仅用于定位旧文件)。</p>
+    </section>
+
+    <section id="faq">
+      <h2>常见问题</h2>
+
+      <details class="faq-item">
+        <summary>不配置 embeddings 能用吗？</summary>
+        <div class="faq-body"><p>能。BM25-only 是一等公民模式：PostgreSQL FTS + 符号 + 路径 + 依赖图 + MMR 打包全部可用，且完全离线。embeddings 是“升级项”而不是前置条件。</p></div>
+      </details>
+      <details class="faq-item">
+        <summary>支持哪些 embedding 服务？</summary>
+        <div class="faq-body"><p>任何暴露 OpenAI 兼容 <code>/v1/embeddings</code> 的端点：OpenAI 官方、各类代理、本地网关(如 Ollama 兼容层)，以及自托管方案。生产验证过的自托管栈是 <code>Qwen/Qwen3-Embedding-0.6B</code> + 可选 <code>Qwen3-Reranker-0.6B</code>，合计约 2.2 GB 显存。</p></div>
+      </details>
+      <details class="faq-item">
+        <summary>我的代码会离开本机吗？</summary>
+        <div class="faq-body"><p>索引与向量全部存在<strong>你自己的 PostgreSQL</strong> 里；只有启用外部 embeddings API 时，待嵌入的代码块文本才会发往你配置的端点(自托管端点则完全不出内网)。HTTP 服务的观测数据不采集查询文本与源码内容。</p></div>
+      </details>
+      <details class="faq-item">
+        <summary>和 Augment 是什么关系？</summary>
+        <div class="faq-body"><p>没有从属关系。ContextEngine 是独立的开源组件，对齐的是 Augment Context Engine 的<em>系统模式</em>与生态兼容性(<code>codebase-retrieval</code> 工具名、<code>.augmentignore</code> 语义)，并公开维护一份<a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/COMPARISON.md" target="_blank" rel="noopener">诚实的差距对比</a>——不声称全面对齐。</p></div>
+      </details>
+      <details class="faq-item">
+        <summary>怎么同时管理多个仓库？</summary>
+        <div class="faq-body"><p>三个机制可组合：同一 PostgreSQL 按工作区绝对路径天然隔离多仓；<code>contextengine profile</code> 快速切换默认工作区；<code>CONTEXTENGINE_EXTRA_ROOTS</code> 把文档仓 / 额外目录并进同一个索引联合检索。</p></div>
+      </details>
+      <details class="faq-item">
+        <summary>支持哪些编程语言？</summary>
+        <div class="faq-body"><p>多语言 chunker 覆盖主流语言；公开基准跑了 TypeScript、JavaScript、Go、Python、C、C++、Java、Kotlin、Rust 共 10 个真实 OSS 仓库(见<a href="index.html#bench">基准数据</a>)。词法与符号通道对任何文本语言都有效。</p></div>
+      </details>
+      <details class="faq-item">
+        <summary>如何在 CI 里自动刷新索引？</summary>
+        <div class="faq-body"><p><code>contextengine ci-template github|gitlab|bitbucket</code> 输出可直接安装的工作流模板；HTTP 部署可用签名 push webhook 自动同步，或为流水线签发 <strong>source 级 CI trigger token</strong>——只允许刷新单个源，不暴露工作区级 API key。</p></div>
+      </details>
+      <details class="faq-item">
+        <summary>索引多大？建一次要多久？</summary>
+        <div class="faq-body"><p>按文件哈希增量：首次全量后，日常重建只处理变更文件；watch / MCP 模式防抖后自动增量刷新。中型 OSS 仓库(数百到数千文件)的索引与检索延迟均在基准脚本 <code>npm run bench:suite</code> 中可自行复现。</p></div>
+      </details>
+    </section>
+
+    <div class="docs-pager">
+      <a href="index.html">← 返回首页</a>
+      <a href="https://github.com/lixiang12345/ContextEngine-plugin" target="_blank" rel="noopener">GitHub 仓库 →</a>
+    </div>
+  </main>
+</div>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer-bottom" style="margin-top:0;padding-top:0;border-top:none">
+      <span>© 2026 ContextEngine contributors · MIT License</span>
+      <span>contextengine-plugin v0.5.0</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/main.js?v=20260726a"></script>
+</body>
+</html>

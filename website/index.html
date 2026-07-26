@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ContextEngine — 面向 AI 编程 Agent 的开源代码库上下文引擎</title>
+<meta name="description" content="ContextEngine 是可移植、Augment 级的开源代码库上下文引擎：PostgreSQL FTS + 符号 + 路径 + pgvector + 依赖图 + MMR 多信号检索，让 Agent 少花 token 盲目 grep，多花回合改对代码。支持 MCP、CLI、HTTP 与 TypeScript Library。">
+<meta property="og:title" content="ContextEngine — 让 AI 编程 Agent 一次就找对代码">
+<meta property="og:description" content="开源、可移植的 Augment 级代码库上下文引擎。多信号检索 + 智能上下文打包，MCP / CLI / HTTP / Library 四种接入方式。">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M12 4H8a4 4 0 0 0-4 4v4M20 4h4a4 4 0 0 1 4 4v4M12 28H8a4 4 0 0 1-4-4v-4M20 28h4a4 4 0 0 0 4-4v-4' stroke='%233DF2B0' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3Crect x='9' y='11' width='14' height='2.6' rx='1.3' fill='%233DF2B0'/%3E%3Crect x='9' y='16' width='10' height='2.6' rx='1.3' fill='%232BC98F'/%3E%3Crect x='9' y='21' width='6' height='2.6' rx='1.3' fill='%2317A374'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#0a0a0b">
+<script>
+  /* 主题初始化：先于渲染，避免闪烁 */
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem("ce-theme"); } catch (e) {}
+    if (t !== "light" && t !== "dark") {
+      t = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    }
+    document.documentElement.setAttribute("data-theme", t);
+    var tc = document.querySelector('meta[name="theme-color"]');
+    if (tc) tc.setAttribute("content", t === "light" ? "#fafaf6" : "#0a0a0b");
+  })();
+</script>
+<link rel="stylesheet" href="assets/style.css?v=20260726">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到正文</a>
+
+<!-- ============ 顶栏 ============ -->
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="index.html" aria-label="ContextEngine 首页">
+      <svg class="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <defs><linearGradient id="lg-top" x1="0" y1="0" x2="32" y2="32">
+          <stop stop-color="#3DF2B0"/><stop offset="1" stop-color="#17A374"/>
+        </linearGradient></defs>
+        <path d="M12 4H8a4 4 0 0 0-4 4v4M20 4h4a4 4 0 0 1 4 4v4M12 28H8a4 4 0 0 1-4-4v-4M20 28h4a4 4 0 0 0 4-4v-4" stroke="url(#lg-top)" stroke-width="2.4" stroke-linecap="round"/>
+        <rect x="9" y="11" width="14" height="2.6" rx="1.3" fill="#3DF2B0"/>
+        <rect x="9" y="16" width="10" height="2.6" rx="1.3" fill="#2BC98F"/>
+        <rect x="9" y="21" width="6" height="2.6" rx="1.3" fill="#17A374"/>
+      </svg>
+      ContextEngine
+      <span class="brand-version">v0.5.0</span>
+    </a>
+    <nav class="nav" aria-label="主导航">
+      <a href="#features">核心能力</a>
+      <a href="#pipeline">工作原理</a>
+      <a href="#bench">基准数据</a>
+      <a href="#compare">对比</a>
+      <a href="#quickstart">快速上手</a>
+      <a href="docs.html">使用手册</a>
+    </nav>
+    <div class="topbar-actions">
+      <a class="icon-btn lang-btn" href="en/index.html" title="Switch to English" aria-label="Switch to English">EN</a>
+      <button class="icon-btn theme-toggle" type="button" aria-label="切换深浅主题">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/lixiang12345/ContextEngine-plugin" target="_blank" rel="noopener" aria-label="GitHub 仓库">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.75 2.69 1.25 3.35.95.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.26 5.67.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg>
+      </a>
+      <button class="icon-btn menu-btn" type="button" aria-label="打开菜单" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+    </div>
+  </div>
+  <nav class="mobile-nav" aria-label="移动端导航">
+    <a href="#features">核心能力</a>
+    <a href="#pipeline">工作原理</a>
+    <a href="#bench">基准数据</a>
+    <a href="#compare">对比</a>
+    <a href="#quickstart">快速上手</a>
+    <a href="docs.html">使用手册</a>
+    <a href="en/index.html">English</a>
+    <a href="https://github.com/lixiang12345/ContextEngine-plugin" target="_blank" rel="noopener">GitHub</a>
+  </nav>
+</header>
+
+<main id="main">
+
+<!-- ============ Hero ============ -->
+<section class="hero">
+  <div class="hero-grid-lines" aria-hidden="true"></div>
+  <div class="container hero-inner">
+    <span class="hero-kicker"><span class="dot" aria-hidden="true"></span>开源 · MIT · MCP 原生 · 可完全自托管</span>
+    <h1>让 AI 编程 Agent<br><span class="grad">一次就找对代码</span></h1>
+    <p class="hero-lead">
+      ContextEngine 是可移植的 <strong>Augment 级代码库上下文引擎</strong>：把关键词、符号、路径、语义向量、依赖图与提交历史融合成一次检索，再按 token 预算打包成带路径与行号的可验证上下文——让 Agent 少花 token 盲目 grep，多花回合改对代码。
+    </p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary btn-lg" href="docs.html#quickstart">
+        快速上手
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>
+      </a>
+      <a class="btn btn-ghost btn-lg" href="https://github.com/lixiang12345/ContextEngine-plugin" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.75 2.69 1.25 3.35.95.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.26 5.67.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg>
+        GitHub
+      </a>
+    </div>
+    <div class="hero-cmd">
+      <code><span class="ps1">$</span> npx contextengine-plugin context "Add retry logic to the payment webhook"</code>
+    </div>
+
+    <div class="hero-terminal reveal">
+      <div class="terminal" role="img" aria-label="ContextEngine 命令行检索输出示意">
+        <div class="terminal-bar">
+          <span class="light l-r"></span><span class="light l-y"></span><span class="light l-g"></span>
+          <span class="title">contextengine — 检索输出示意</span>
+        </div>
+        <pre class="terminal-body"><span class="t-prompt">$</span> <span class="t-cmd">contextengine</span> <span class="t-cmd">context</span> <span class="t-arg">"Add retry logic to the payment webhook"</span>
+
+<span class="t-head">query</span>   <span class="t-dim">intent=concept · identifiers=[payment, webhook, retry]</span>
+<span class="t-head">recall</span>  <span class="t-dim">fts ✓ · symbol ✓ · path ✓ · vector ✓ · graph ✓</span>
+
+ <span class="t-dim">1.</span> <span class="t-path">src/payments/webhook.ts</span><span class="t-dim">:</span><span class="t-line">41-98</span>      <span class="t-score">score 0.94</span>
+    <span class="t-dim">handlePaymentWebhook() — 回调入口，当前无重试逻辑</span>
+ <span class="t-dim">2.</span> <span class="t-path">src/payments/stripe-client.ts</span><span class="t-dim">:</span><span class="t-line">12-60</span> <span class="t-score">score 0.87</span>
+    <span class="t-dim">request() 封装 — graph 扩展带出下游调用</span>
+ <span class="t-dim">3.</span> <span class="t-path">src/util/backoff.ts</span><span class="t-dim">:</span><span class="t-line">1-44</span>         <span class="t-score">score 0.81</span>
+    <span class="t-dim">withRetry() — 仓库里现成的指数退避实现</span>
+
+<span class="t-ok">✓ packed</span> <span class="t-dim">8 chunks · 6 files · 5.4k tokens · trace: generation #12</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 事实条 ============ -->
+<div class="factbar">
+  <div class="container factbar-inner">
+    <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>MIT 开源协议</span>
+    <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Node.js ≥ 22.5</span>
+    <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>PostgreSQL + pgvector</span>
+    <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>MCP / CLI / HTTP / Library</span>
+    <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>322 项自动化测试</span>
+  </div>
+</div>
+
+<!-- ============ 为什么 ============ -->
+<section class="section" id="why">
+  <div class="container">
+    <div class="section-head reveal">
+      <span class="kicker">为什么需要它</span>
+      <h2>Agent 的 token，不该花在盲目 grep 上</h2>
+      <p class="lead">大多数编程 Agent 靠反复 <code>grep</code> / <code>find</code> 摸索大仓库——每一轮工具调用都在消耗上下文窗口，却仍然经常漏掉真正相关的文件。</p>
+    </div>
+    <div class="pain-grid reveal">
+      <div class="pain-card">
+        <div class="pain-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M11 8v3l2 2"/></svg></div>
+        <h3>轮次浪费</h3>
+        <p>一次任务动辄十几次 grep / 读文件调用，真正用于写代码的回合被检索占满。</p>
+      </div>
+      <div class="pain-card">
+        <div class="pain-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h6"/><path d="m19 15-3 3 3 3" opacity=".5"/></svg></div>
+        <h3>上下文噪声</h3>
+        <p>整文件塞进上下文窗口，重复、无关的内容稀释了模型对关键代码的注意力。</p>
+      </div>
+      <div class="pain-card">
+        <div class="pain-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 5H19a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h.3"/><path d="m3 3 18 18"/></svg></div>
+        <h3>召回盲区</h3>
+        <p>关键词匹配不懂同义改写，纯向量检索又找不准精确符号——单一信号总有盲区。</p>
+      </div>
+    </div>
+    <div class="pain-answer reveal">
+      <div class="pain-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h8l-1 8 11-13h-9l1-7z"/></svg></div>
+      <div>
+        <h3>ContextEngine 的做法</h3>
+        <p>一次调用完成<strong>查询理解 → 多信号并行召回 → 融合重排 → 依赖图扩展 → MMR 打包</strong>，返回带路径、行号、来源与检索轨迹的紧凑上下文。Agent 先调 <code>codebase-retrieval</code>，再动手编辑——而不是先 grep 十次。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 工作原理 ============ -->
+<section class="section section-alt" id="pipeline">
+  <div class="container">
+    <div class="section-head center reveal">
+      <span class="kicker">工作原理</span>
+      <h2>六级检索管线，信号互补</h2>
+      <p class="lead">复刻让专有检索模型有效的<em>系统模式</em>:understand → retrieve → fuse → rerank → expand → pack。任何单一通道失误，都会被其余通道兜住。</p>
+    </div>
+    <div class="pipeline reveal">
+      <div class="pipe-step">
+        <h3>查询理解</h3>
+        <p>抽取标识符与路径线索，判定意图(<code>symbol</code> / <code>path</code> / <code>concept</code> / <code>history</code>)，扩展检索词。</p>
+      </div>
+      <div class="pipe-step">
+        <h3>多信号召回</h3>
+        <p>PostgreSQL FTS(<code>tsvector</code>+GIN)、符号表、路径匹配与 pgvector 语义 KNN 并行执行。</p>
+      </div>
+      <div class="pipe-step">
+        <h3>RRF 融合</h3>
+        <p>Reciprocal Rank Fusion 合并各通道排名，对单通道错误保持鲁棒。</p>
+      </div>
+      <div class="pipe-step">
+        <h3>代码感知重排</h3>
+        <p>符号、路径、标识符重叠与语言特征打分；可选接入 <code>/v1/rerank</code> 神经重排。</p>
+      </div>
+      <div class="pipe-step">
+        <h3>依赖图扩展</h3>
+        <p>沿 import / symbol 图把候选周边的相关文件带进结果。</p>
+      </div>
+      <div class="pipe-step">
+        <h3>MMR 打包</h3>
+        <p>按路径做多样性去重，在 token 预算内输出带行号的证据块。</p>
+      </div>
+    </div>
+    <p class="pipeline-note">语义通道可选：不配 embeddings 时以 <code>BM25-only</code> 模式离线运行，依旧可用；每次检索都返回可复现的 trace(意图、通道、降级项、token 用量)。</p>
+  </div>
+</section>
+
+<!-- ============ 核心能力 ============ -->
+<section class="section" id="features">
+  <div class="container">
+    <div class="section-head reveal">
+      <span class="kicker">核心能力</span>
+      <h2>一个小而完整的检索层</h2>
+      <p class="lead">不是又一个向量数据库 demo——而是覆盖索引、检索、打包、观测与团队协作的完整组件。</p>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
+        <h3>词法检索，数据库级扩展</h3>
+        <p>PostgreSQL <code>tsvector</code> + GIN 索引，过滤在数据库侧完成，不把全量内容拉进进程内存。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 6-5 6 5 6M16 6l5 6-5 6"/></svg></div>
+        <h3>符号精确检索</h3>
+        <p>声明级符号表支持精确与前缀匹配——"找 <code>processPayment</code>" 这类查询不再依赖向量的运气。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.5 4-3 5.5-1 1-1.5 2-1.5 3.5h-5c0-1.5-.5-2.5-1.5-3.5C6.5 13 5 11.5 5 9a7 7 0 0 1 7-7z"/><path d="M9 21h6"/></svg></div>
+        <h3>语义检索(可选)</h3>
+        <p>任何 OpenAI 兼容 embeddings 端点即插即用；pgvector 余弦 KNN + HNSW，两阶段只对候选精排。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17V7m5 10V4m5 13v-6m5 6V9"/></svg></div>
+        <h3>融合 + 代码感知重排</h3>
+        <p>RRF 融合多通道，再按符号 / 路径 / 标识符重叠 / 语言特征重排；可选神经重排第二阶段。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M13 7h4m0 0v4"/></svg></div>
+        <h3>MMR 上下文打包</h3>
+        <p>按路径多样性去重，在 token 预算内选块；<code>raw</code> / <code>extractive</code> 两种打包策略。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M8.5 8.5 15.5 15.5M15 6H9"/></svg></div>
+        <h3>符号 / import 依赖图</h3>
+        <p>检索命中后沿依赖图扩展相关文件，把“改这里还要看哪里”一并带出。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+        <h3>多根工作区</h3>
+        <p>代码仓 + 文档仓 + 额外目录进同一个索引(<code>CONTEXTENGINE_EXTRA_ROOTS</code>)，一次检索全覆盖。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div>
+        <h3>提交血缘</h3>
+        <p>近期 git 历史作为可检索块入索引，“这段逻辑最近为什么改” 也能被召回。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg></div>
+        <h3>Watch 增量索引</h3>
+        <p>文件哈希增量 + 防抖重建；MCP 模式默认监听工作区，编辑后下一次检索即是新代码。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        <h3>可复现检索轨迹</h3>
+        <p>每次响应携带 intent、参与/降级通道、候选→打包数量、token 预算与索引 generation。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v18M3 9h18M3 15h12M15 3v12"/></svg></div>
+        <h3>Augment 兼容忽略规则</h3>
+        <p>内置智能过滤 + <code>.gitignore</code> + <code>.augmentignore</code>(含 <code>!</code> 反选)+ <code>.contextengineignore</code>。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8a9 3 0 0 0-18 0v8a9 3 0 0 0 18 0z"/><path d="M3 8a9 3 0 0 0 18 0M3 12a9 3 0 0 0 18 0"/></svg></div>
+        <h3>团队索引快照</h3>
+        <p>版本化、校验和验证的文件系统 / S3 兼容快照，导出、导入、复制与定时任务齐备。</p>
+      </div>
+      <div class="feature-card reveal">
+        <div class="f-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3M6 8l3 3-3 3M11 14h5"/></svg></div>
+        <h3>运维仪表盘</h3>
+        <p>HTTP 服务自带 <code>/dashboard</code>：工作区状态、索引任务、延迟 p95、错误率与在线检索探针。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 集成方式 ============ -->
+<section class="section section-alt" id="integrate">
+  <div class="container">
+    <div class="section-head reveal">
+      <span class="kicker">接入方式</span>
+      <h2>四种形态，同一个检索核心</h2>
+      <p class="lead">MCP 插件、命令行、带鉴权的 HTTP 服务、TypeScript 库——按你的 Agent 架构任选，检索质量一致。</p>
+    </div>
+    <div class="integrate-grid">
+      <div class="integrate-card reveal">
+        <div class="ic-head">
+          <span class="ic-tag">MCP · STDIO</span>
+          <h3>Claude Code / Cursor 一行接入</h3>
+          <p>暴露 Augment 兼容的 <code>codebase-retrieval</code> 等六个工具，默认监听文件变更。</p>
+        </div>
+        <div class="codeblock"><pre><code data-lang="bash"># 安装后注册到 Claude Code
+claude mcp add contextengine -- contextengine-mcp
+
+# 常用环境变量
+export CONTEXTENGINE_ROOT=/path/to/repo
+export CONTEXTENGINE_AUTO_INDEX=1</code></pre></div>
+      </div>
+      <div class="integrate-card reveal">
+        <div class="ic-head">
+          <span class="ic-tag">CLI</span>
+          <h3>索引、搜索、打包一条命令</h3>
+          <p>适合脚本、CI 与快速验证，支持 <code>--json</code> 结构化输出。</p>
+        </div>
+        <div class="codeblock"><pre><code data-lang="bash">contextengine index
+contextengine search "how is rate limiting implemented"
+contextengine context "Add retry logic to the payment webhook"
+contextengine status</code></pre></div>
+      </div>
+      <div class="integrate-card reveal">
+        <div class="ic-head">
+          <span class="ic-tag">HTTP · REMOTE MCP</span>
+          <h3>远端 IDE 与团队服务</h3>
+          <p>Bearer 鉴权工作区同步、后台索引任务、SSE 进度、Remote MCP 与运维仪表盘。</p>
+        </div>
+        <div class="codeblock"><pre><code data-lang="bash">export CONTEXTENGINE_HTTP_API_KEY="$(openssl rand -base64 32)"
+contextengine-http
+# GET /health · GET /openapi.json
+# Dashboard: http://127.0.0.1:8787/dashboard</code></pre></div>
+      </div>
+      <div class="integrate-card reveal">
+        <div class="ic-head">
+          <span class="ic-tag">LIBRARY · TYPESCRIPT</span>
+          <h3>嵌入你自己的 Agent 循环</h3>
+          <p>类型完整的库 API，索引、检索、打包、统计全部可编程。</p>
+        </div>
+        <div class="codeblock"><pre><code data-lang="ts">import { ContextEngine } from "contextengine-plugin";
+
+const engine = ContextEngine.open({ root: "/repo" });
+await engine.index();
+const hits = await engine.search({ query: "auth middleware" });
+const packed = await engine.getTaskContext({ task: "…" });</code></pre></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 基准数据 ============ -->
+<section class="section" id="bench">
+  <div class="container">
+    <div class="section-head reveal">
+      <span class="kicker">基准数据</span>
+      <h2>可复现的多语言检索质量</h2>
+      <p class="lead">10 个主流语言的真实 OSS 仓库(固定不可变 ref)、真实远程 embeddings、人工路径金标——不是 mock 分数。</p>
+    </div>
+    <div class="stats-grid reveal">
+      <div class="stat">
+        <div class="stat-num">0.98</div>
+        <div class="stat-label">Top-5 命中率</div>
+        <div class="stat-sub">跨仓库平均 · 语义开启</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">0.93</div>
+        <div class="stat-label">MRR</div>
+        <div class="stat-sub">首个正确结果平均排名倒数</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">10</div>
+        <div class="stat-label">语言 × 真实仓库</div>
+        <div class="stat-sub">TS / Go / Python / C / C++ / Java / Kotlin / Rust …</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">2.2<span style="font-size:.5em"> GB</span></div>
+        <div class="stat-label">自托管 VRAM 占用</div>
+        <div class="stat-sub">Qwen3 0.6B embedding + reranker</div>
+      </div>
+    </div>
+    <div class="bench-table-wrap reveal">
+      <table class="data">
+        <thead>
+          <tr><th>套件(语言 · 仓库)</th><th>Top-1</th><th>Top-5</th><th>MRR</th><th>Recall@k</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>gin-go · gin-gonic/gin</td><td class="num hl">1.00</td><td class="num hl">1.00</td><td class="num hl">1.00</td><td class="num hl">1.00</td></tr>
+          <tr><td>express-js · expressjs/express</td><td class="num">0.86</td><td class="num">1.00</td><td class="num">0.93</td><td class="num">1.00</td></tr>
+          <tr><td>cobra-go · spf13/cobra</td><td class="num">0.83</td><td class="num">1.00</td><td class="num">0.92</td><td class="num">1.00</td></tr>
+          <tr><td>requests-py · psf/requests</td><td class="num">0.83</td><td class="num">1.00</td><td class="num">0.92</td><td class="num">1.00</td></tr>
+          <tr><td>leveldb-cpp · google/leveldb</td><td class="num">0.83</td><td class="num">1.00</td><td class="num">0.89</td><td class="num">1.00</td></tr>
+          <tr><td>got-ts · sindresorhus/got</td><td class="num">0.90</td><td class="num">0.90</td><td class="num">0.91</td><td class="num">1.00</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="bench-note reveal">
+      节选自 2026-07 公开 T4 部署实测(<code>Qwen/Qwen3-Embedding-0.6B</code>，1024 维)。诚实说明：金标为人工编写的路径子串(每仓 5–14 条查询)，验证的是<em>文件级检索</em>而非分级段落相关性；规模为中型 OSS，非 1 亿行 monorepo；完整方法、全部 10 套结果与复现命令见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/docs/MULTILANG_BENCH.md" target="_blank" rel="noopener">MULTILANG_BENCH.md</a>。
+    </p>
+  </div>
+</section>
+
+<!-- ============ 对比 ============ -->
+<section class="section section-alt" id="compare">
+  <div class="container">
+    <div class="section-head reveal">
+      <span class="kicker">诚实对比</span>
+      <h2>vs Augment Context Engine</h2>
+      <p class="lead">我们是<strong>开放、可移植的构建组件</strong>，不是完整的商业上下文平台——两者的取舍如下，不夸大。</p>
+    </div>
+    <div class="compare-wrap reveal">
+      <table class="compare">
+        <thead>
+          <tr><th>能力</th><th>ContextEngine</th><th>Augment</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>开源 / 自托管 / 离线可用</td>
+            <td><span class="mark yes">✓ MIT，BM25-only 可完全离线</span></td>
+            <td><span class="mark no">✗ 商业产品</span></td>
+          </tr>
+          <tr>
+            <td>MCP + 混合检索</td>
+            <td><span class="mark yes">✓ stdio + Remote MCP，多信号融合</span></td>
+            <td><span class="mark yes">✓ 本地 + 托管 MCP</span></td>
+          </tr>
+          <tr>
+            <td>自训练代码检索模型</td>
+            <td><span class="mark no">✗ BYO OpenAI 兼容 embeddings</span></td>
+            <td><span class="mark yes">✓ 成对训练的专有模型</span></td>
+          </tr>
+          <tr>
+            <td>多源内容(Git 托管 / 网站)</td>
+            <td><span class="mark part">◐ 连接器 SDK + GitHub / GitLab / Bitbucket / 静态网站</span></td>
+            <td><span class="mark yes">✓ 打包的企业级连接器矩阵</span></td>
+          </tr>
+          <tr>
+            <td>超大 monorepo 规模</td>
+            <td><span class="mark part">◐ PostgreSQL 架构，中型仓库已验证</span></td>
+            <td><span class="mark yes">✓ 生产级 monorepo 索引</span></td>
+          </tr>
+          <tr>
+            <td>成本与所有权</td>
+            <td><span class="mark yes">✓ 基础设施自有，仅 embedding API 按用量</span></td>
+            <td><span class="mark part">◐ 产品订阅(含免费查询层)</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="compare-note reveal">设计原则第五条就是“诚实的范围”：我们优化<strong>所有权与可改造性</strong>，不声称全面对齐 Augment。逐项差距分析见 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/COMPARISON.md" target="_blank" rel="noopener">COMPARISON.md</a> 与 <a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/docs/AUGMENT_ALIGNMENT.md" target="_blank" rel="noopener">对齐审计</a>。</p>
+  </div>
+</section>
+
+<!-- ============ 快速上手 ============ -->
+<section class="section" id="quickstart">
+  <div class="container">
+    <div class="section-head center reveal">
+      <span class="kicker">快速上手</span>
+      <h2>三步跑通第一次检索</h2>
+      <p class="lead">只需要 Node.js ≥ 22.5 和一个带 pgvector 的 PostgreSQL(仓库内置 Docker Compose)。</p>
+    </div>
+    <div class="steps">
+      <div class="step reveal">
+        <div class="step-n" aria-hidden="true"></div>
+        <div>
+          <h3>准备数据库</h3>
+          <p>使用仓库自带的本地 pgvector 服务，或指向任意已有 PostgreSQL。</p>
+          <div class="codeblock"><pre><code data-lang="bash">git clone https://github.com/lixiang12345/ContextEngine-plugin.git
+cd ContextEngine-plugin && npm install && npm run build
+npm run db:up
+export CONTEXTENGINE_DATABASE_URL=postgresql://contextengine:contextengine@127.0.0.1:54329/contextengine</code></pre></div>
+        </div>
+      </div>
+      <div class="step reveal">
+        <div class="step-n" aria-hidden="true"></div>
+        <div>
+          <h3>为工作区建索引</h3>
+          <p>索引存入 PostgreSQL，以工作区绝对路径为命名空间——一个库可安全容纳多个仓库。</p>
+          <div class="codeblock"><pre><code data-lang="bash">npx contextengine-plugin index /path/to/your/repo</code></pre></div>
+        </div>
+      </div>
+      <div class="step reveal">
+        <div class="step-n" aria-hidden="true"></div>
+        <div>
+          <h3>搜索，或直接为任务打包上下文</h3>
+          <p>无 API key 时以 BM25-only 模式运行；配置 <code>OPENAI_API_KEY</code> 即升级混合语义检索。</p>
+          <div class="codeblock"><pre><code data-lang="bash">npx contextengine-plugin search "stripe payment webhook"
+npx contextengine-plugin context "Add logging to payment requests"</code></pre></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="cta-band">
+  <div class="container">
+    <div class="cta-card reveal">
+      <h2>把 Augment 级检索，装进你自己的 Agent</h2>
+      <p>完整的安装、配置、MCP / HTTP 接入与故障排查，都在使用手册里。全部开源，MIT 协议，随时可以读源码。</p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary btn-lg" href="docs.html">阅读使用手册
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>
+        </a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/lixiang12345/ContextEngine-plugin" target="_blank" rel="noopener">Star on GitHub</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ============ Footer ============ -->
+<footer class="footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="brand" href="index.html">
+          <svg class="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <defs><linearGradient id="lg-foot" x1="0" y1="0" x2="32" y2="32">
+              <stop stop-color="#3DF2B0"/><stop offset="1" stop-color="#17A374"/>
+            </linearGradient></defs>
+            <path d="M12 4H8a4 4 0 0 0-4 4v4M20 4h4a4 4 0 0 1 4 4v4M12 28H8a4 4 0 0 1-4-4v-4M20 28h4a4 4 0 0 0 4-4v-4" stroke="url(#lg-foot)" stroke-width="2.4" stroke-linecap="round"/>
+            <rect x="9" y="11" width="14" height="2.6" rx="1.3" fill="#3DF2B0"/>
+            <rect x="9" y="16" width="10" height="2.6" rx="1.3" fill="#2BC98F"/>
+            <rect x="9" y="21" width="6" height="2.6" rx="1.3" fill="#17A374"/>
+          </svg>
+          ContextEngine
+        </a>
+        <p>面向 AI 编程 Agent 的可移植、Augment 级代码库上下文引擎。小而开放的构建组件，而非完整 IDE 套件。</p>
+      </div>
+      <div>
+        <h4>产品</h4>
+        <ul>
+          <li><a href="#features">核心能力</a></li>
+          <li><a href="#pipeline">工作原理</a></li>
+          <li><a href="#bench">基准数据</a></li>
+          <li><a href="#compare">vs Augment</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>文档</h4>
+        <ul>
+          <li><a href="docs.html#quickstart">快速开始</a></li>
+          <li><a href="docs.html#cli">CLI 参考</a></li>
+          <li><a href="docs.html#mcp">MCP 集成</a></li>
+          <li><a href="docs.html#http">HTTP 服务</a></li>
+          <li><a href="docs.html#config">配置参考</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>资源</h4>
+        <ul>
+          <li><a href="https://github.com/lixiang12345/ContextEngine-plugin" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="https://www.npmjs.com/package/contextengine-plugin" target="_blank" rel="noopener">npm</a></li>
+          <li><a href="https://github.com/lixiang12345/ContextEngine-plugin/blob/main/CHANGELOG.md" target="_blank" rel="noopener">更新日志</a></li>
+          <li><a href="https://github.com/lixiang12345/ContextEngine-plugin/issues" target="_blank" rel="noopener">问题反馈</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 ContextEngine contributors · MIT License</span>
+      <span>Node.js ≥ 22.5 · PostgreSQL + pgvector · contextengine-plugin v0.5.0</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/main.js?v=20260726a"></script>
+</body>
+</html>
