@@ -1,6 +1,7 @@
 import type { CodeChunk } from "../types.js";
 import type { AnalyzedQuery } from "./query-analyzer.js";
 import { tokenize } from "./bm25.js";
+import { basenameQueryAffinity } from "./path-hints.js";
 
 export interface RankedCandidate {
   id: string;
@@ -61,10 +62,14 @@ export function collapseByPath(
     const supportBoost = isImplementation
       ? Math.min(0.12, supportingScore * 0.04)
       : 0;
+    const basenameWeight =
+      TEST_LIKE_PATH.test(best.chunk.path) && !TEST_QUERY.test(q.raw) ? 0.25 : 1;
+    const basenameBoost =
+      basenameQueryAffinity(best.chunk.path, q) * 0.24 * basenameWeight;
     collapsed.push({
       ...best,
       channels: { ...best.channels },
-      final: best.final + coverageBoost + supportBoost,
+      final: best.final + coverageBoost + supportBoost + basenameBoost,
     });
   }
   return collapsed.sort(preferImplementation);
@@ -95,6 +100,9 @@ const DOC_QUERY =
 
 const TEST_QUERY =
   /\b(test|tests|spec|fixture|fixtures|mock|mocks|benchmark|bench|example|examples|demo)\b/i;
+
+const TEST_LIKE_PATH =
+  /(^|\/)(test|tests|__tests__|spec|testRunner|test-helpers|fixtures?|benchmarks?)(\/|$)|\.(test|spec)\.[cm]?[jt]sx?$/i;
 
 const DEPRECATED_QUERY =
   /\b(deprecat\w*|legacy|obsolete|old|outdated|superseded|removed)\b/i;
@@ -232,8 +240,11 @@ export function featureScore(chunk: CodeChunk, q: AnalyzedQuery): number {
 
   // Basename match
   const baseNoExt = base.replace(/\.[^.]+$/, "");
+  const baseParts = new Set(tokenize(baseNoExt));
   for (const t of q.tokens) {
-    if (t.length >= 4 && baseNoExt === t) score += 0.5;
+    if (t.length < 4) continue;
+    if (baseNoExt === t) score += 1.15;
+    else if (baseParts.has(t)) score += 0.72;
   }
   for (const id of q.identifiers) {
     if (baseNoExt.toLowerCase() === id.toLowerCase()) score += 0.7;

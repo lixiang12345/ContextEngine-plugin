@@ -221,7 +221,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            ORDER BY workspace_id, blob_hash`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 15 }]);
+        assert.deepEqual(marker.rows, [{ version: 18 }]);
         const ciTokens = await schemaPool.query<{ table_name: string | null }>(
           `SELECT to_regclass('ce_connector_ci_tokens')::text AS table_name`,
         );
@@ -237,6 +237,28 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         assert.deepEqual(webhookMetadata.rows, [{ column_name: "metadata" }]);
         assert.deepEqual(grants.rows, [
           { workspace_id: workspaceId, blob_hash: referencedHash },
+        ]);
+
+        // This fixture predates ce_index_jobs. The lease migration must
+        // create the table and its guard trigger inside this schema; if the
+        // unqualified DDL ever resolves through the search_path again, it
+        // silently mutates public and these rows come back empty.
+        const indexJobObjects = await schemaPool.query<{
+          table_name: string | null;
+        }>(`SELECT to_regclass('ce_index_jobs')::text AS table_name`);
+        assert.deepEqual(indexJobObjects.rows, [{ table_name: "ce_index_jobs" }]);
+        const indexJobTrigger = await schemaPool.query<{
+          trigger_name: string;
+        }>(
+          `SELECT trigger_name
+           FROM information_schema.triggers
+           WHERE trigger_schema = $1
+             AND event_object_table = 'ce_index_jobs'
+             AND trigger_name = 'ce_index_job_transition_guard'`,
+          [schema],
+        );
+        assert.deepEqual(indexJobTrigger.rows, [
+          { trigger_name: "ce_index_job_transition_guard" },
         ]);
       } finally {
         if (schemaPool) await schemaPool.end();
@@ -266,7 +288,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await admin.query<{ version: number }>(
           `SELECT version FROM ${quotedSchema}.ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 15 }]);
+        assert.deepEqual(marker.rows, [{ version: 18 }]);
 
         const mcpSessionColumns = await admin.query<{ column_name: string }>(
           `SELECT column_name
@@ -387,6 +409,89 @@ describePostgres("PostgreSQL schema migration coordination", () => {
   );
 
   it(
+    "recreates the index-job transition guard on a v16-stamped database that lacks it",
+    { timeout: 20_000 },
+    async () => {
+      const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
+      const quotedSchema = quoteIdentifier(schema);
+      const schemaUrl = databaseUrlForSchema(databaseUrl!, schema);
+      const admin = new Pool({ connectionString: databaseUrl! });
+
+      try {
+        await admin.query(`CREATE SCHEMA ${quotedSchema}`);
+        await runEnsureSchemaInFreshProcess(schemaUrl);
+
+        // Simulate a database stamped 16 by a build that shipped before the
+        // transition guard existed: no function, no trigger, marker at 16.
+        await admin.query(
+          `DROP TRIGGER IF EXISTS ce_index_job_transition_guard
+             ON ${quotedSchema}.ce_index_jobs`,
+        );
+        await admin.query(
+          `DROP FUNCTION IF EXISTS ${quotedSchema}.ce_guard_index_job_transition()`,
+        );
+        await admin.query(
+          `UPDATE ${quotedSchema}.ce_schema_version SET version = 16 WHERE singleton = TRUE`,
+        );
+
+        await runEnsureSchemaInFreshProcess(schemaUrl);
+
+        const marker = await admin.query<{ version: number }>(
+          `SELECT version FROM ${quotedSchema}.ce_schema_version WHERE singleton = TRUE`,
+        );
+        assert.deepEqual(marker.rows, [{ version: 18 }]);
+
+        const guardFunction = await admin.query<{ proname: string }>(
+          `SELECT p.proname
+           FROM pg_proc p
+           JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = $1
+             AND p.proname = 'ce_guard_index_job_transition'`,
+          [schema],
+        );
+        assert.deepEqual(guardFunction.rows, [
+          { proname: "ce_guard_index_job_transition" },
+        ]);
+
+        const trigger = await admin.query<{ trigger_name: string }>(
+          `SELECT trigger_name
+           FROM information_schema.triggers
+           WHERE trigger_schema = $1
+             AND event_object_table = 'ce_index_jobs'
+             AND trigger_name = 'ce_index_job_transition_guard'`,
+          [schema],
+        );
+        assert.deepEqual(trigger.rows, [
+          { trigger_name: "ce_index_job_transition_guard" },
+        ]);
+
+        await admin.query(
+          `INSERT INTO ${quotedSchema}.ce_workspaces (id, name, source_mode)
+           VALUES ('ws-guard', 'guard', 'blob')`,
+        );
+        await admin.query(
+          `INSERT INTO ${quotedSchema}.ce_index_jobs (id, workspace_id, revision, mode, status)
+           VALUES ('job-guard', 'ws-guard', 1, 'rebuild', 'queued')`,
+        );
+        await assert.rejects(
+          admin.query(
+            `UPDATE ${quotedSchema}.ce_index_jobs
+             SET progress = '{"phase":"indexing"}'::jsonb
+             WHERE id = 'job-guard'`,
+          ),
+          /queued index jobs may only be claimed/,
+        );
+      } finally {
+        try {
+          await admin.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+        } finally {
+          await admin.end();
+        }
+      }
+    },
+  );
+
+  it(
     "adds connector leases and sync-session attempt binding when migrating v2",
     { timeout: 15_000 },
     async () => {
@@ -487,7 +592,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v2'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 15 }]);
+        assert.deepEqual(marker.rows, [{ version: 18 }]);
         assert.deepEqual(source.rows, [
           {
             id: "source-v2",
@@ -645,7 +750,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v3'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 15 }]);
+        assert.deepEqual(marker.rows, [{ version: 18 }]);
         assert.deepEqual(source.rows, [
           {
             status: "syncing",
@@ -672,7 +777,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
   );
 
   it(
-    "adds durable MCP, plugins, source ACL, webhook inbox, CI tokens, provenance, replication jobs, schedules, publication pins, and snapshot history when migrating v4 to v15",
+    "adds durable MCP, plugins, source ACL, webhook inbox, CI tokens, provenance, replication jobs, schedules, publication pins, snapshot history, and index leases when migrating v4 to v16",
     { timeout: 15_000 },
     async () => {
       const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
@@ -730,7 +835,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await schemaPool.query<{ version: number }>(
           `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 15 }]);
+        assert.deepEqual(marker.rows, [{ version: 18 }]);
         const snapshotJob = await schemaPool.query<{
           status: string;
           attempts: number;
@@ -949,7 +1054,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
       const marker = await schemaPool.query<{ version: number }>(
         `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
       );
-      assert.deepEqual(marker.rows, [{ version: 15 }]);
+      assert.deepEqual(marker.rows, [{ version: 18 }]);
       const attempts = await schemaPool.query<{
         job_id: string;
         attempt: number;
@@ -1107,7 +1212,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
       const marker = await schemaPool.query<{ version: number }>(
         `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
       );
-      assert.deepEqual(marker.rows, [{ version: 15 }]);
+      assert.deepEqual(marker.rows, [{ version: 18 }]);
     } finally {
       if (schemaPool) await schemaPool.end();
       try {
@@ -1117,6 +1222,185 @@ describePostgres("PostgreSQL schema migration coordination", () => {
       }
     }
   });
+
+  it(
+    "adds durable index-job leases and requeues unfenced v15 work",
+    { timeout: 15_000 },
+    async () => {
+      const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
+      const quotedSchema = quoteIdentifier(schema);
+      const schemaUrl = databaseUrlForSchema(databaseUrl!, schema);
+      const admin = new Pool({ connectionString: databaseUrl! });
+      let schemaPool: Pool | undefined;
+      try {
+        await admin.query(`CREATE SCHEMA ${quotedSchema}`);
+        schemaPool = new Pool({ connectionString: schemaUrl });
+        await schemaPool.query(`
+          CREATE TABLE ce_schema_version (
+            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+            version INTEGER NOT NULL CHECK (version > 0),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+          );
+          INSERT INTO ce_schema_version(singleton, version) VALUES (TRUE, 15);
+          CREATE TABLE ce_workspaces (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            source_mode TEXT NOT NULL,
+            revision BIGINT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+          );
+          CREATE TABLE ce_index_jobs (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+            revision BIGINT NOT NULL,
+            mode TEXT NOT NULL,
+            changed_paths JSONB,
+            deleted_paths JSONB,
+            status TEXT NOT NULL,
+            progress JSONB,
+            result JSONB,
+            error TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            started_at TIMESTAMPTZ,
+            completed_at TIMESTAMPTZ
+          );
+          INSERT INTO ce_workspaces(id, name, source_mode)
+          VALUES
+            ('workspace-v15', 'V15 workspace', 'blob'),
+            ('workspace-local-v15', 'V15 local workspace', 'local');
+          INSERT INTO ce_index_jobs(
+            id, workspace_id, revision, mode, status, progress, started_at
+          ) VALUES
+            ('queued-v15', 'workspace-v15', 1, 'rebuild', 'queued',
+             '{"phase":"queued"}'::jsonb, NULL),
+            ('running-v15', 'workspace-v15', 1, 'rebuild', 'running',
+             '{"phase":"chunk"}'::jsonb, clock_timestamp()),
+            ('local-queued-v15', 'workspace-local-v15', 1, 'rebuild', 'queued',
+             '{"phase":"queued"}'::jsonb, NULL),
+            ('local-running-v15', 'workspace-local-v15', 1, 'rebuild', 'running',
+             '{"phase":"chunk"}'::jsonb, clock_timestamp());
+        `);
+        await schemaPool.end();
+        schemaPool = undefined;
+
+        await runEnsureSchemaInFreshProcess(schemaUrl);
+        schemaPool = new Pool({ connectionString: schemaUrl });
+        const marker = await schemaPool.query<{ version: number }>(
+          `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
+        );
+        assert.deepEqual(marker.rows, [{ version: 18 }]);
+        const jobs = await schemaPool.query<{
+          id: string;
+          status: string;
+          attempts: number;
+          locked_at: Date | null;
+          lock_token: string | null;
+          executor_id: string | null;
+          error: string | null;
+          progress: Record<string, unknown>;
+        }>(
+          `SELECT id, status, attempts, locked_at, lock_token, executor_id,
+                  error, progress
+           FROM ce_index_jobs
+           ORDER BY id`,
+        );
+        assert.deepEqual(jobs.rows, [
+          {
+            id: "local-queued-v15",
+            status: "failed",
+            attempts: 0,
+            locked_at: null,
+            lock_token: null,
+            executor_id: null,
+            error:
+              "Local index job requires persistent executor affinity; retry on an eligible v17 executor",
+            progress: {
+              phase: "failed",
+              reason: "executor_affinity_required",
+              recovered_from: "schema_v17",
+            },
+          },
+          {
+            id: "local-running-v15",
+            status: "failed",
+            attempts: 0,
+            locked_at: null,
+            lock_token: null,
+            executor_id: null,
+            error:
+              "Local index job requires persistent executor affinity; retry on an eligible v17 executor",
+            progress: {
+              phase: "failed",
+              reason: "executor_affinity_required",
+              recovered_from: "schema_v17",
+            },
+          },
+          {
+            id: "queued-v15",
+            status: "queued",
+            attempts: 0,
+            locked_at: null,
+            lock_token: null,
+            executor_id: null,
+            error: null,
+            progress: { phase: "queued" },
+          },
+          {
+            id: "running-v15",
+            status: "queued",
+            attempts: 0,
+            locked_at: null,
+            lock_token: null,
+            executor_id: null,
+            error: null,
+            progress: { phase: "queued", recovered_from: "schema_v16" },
+          },
+        ]);
+        await assert.rejects(
+          schemaPool.query(
+            `UPDATE ce_index_jobs SET status = 'running' WHERE id = 'queued-v15'`,
+          ),
+          (error: unknown) =>
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "23514",
+        );
+        await assert.rejects(
+          schemaPool.query(
+            `UPDATE ce_index_jobs
+             SET progress = '{"phase":"legacy-progress"}'::jsonb
+             WHERE id = 'running-v15'`,
+          ),
+          (error: unknown) =>
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "23514",
+        );
+        await assert.rejects(
+          schemaPool.query(
+            `UPDATE ce_index_jobs
+             SET status = 'succeeded', completed_at = clock_timestamp()
+             WHERE id = 'running-v15'`,
+          ),
+          (error: unknown) =>
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "23514",
+        );
+      } finally {
+        if (schemaPool) await schemaPool.end();
+        try {
+          await admin.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+        } finally {
+          await admin.end();
+        }
+      }
+    },
+  );
 
   it("rejects a database schema newer than this build", async () => {
     const schema = `ce_migration_${process.pid}_${randomUUID().replaceAll("-", "")}`;
@@ -1132,11 +1416,11 @@ describePostgres("PostgreSQL schema migration coordination", () => {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         INSERT INTO ${quotedSchema}.ce_schema_version(singleton, version)
-        VALUES (TRUE, 16);
+        VALUES (TRUE, 19);
       `);
       await assert.rejects(
         runEnsureSchemaInFreshProcess(schemaUrl),
-        /schema version 16 is newer than this build \(15\)/,
+        /schema version 19 is newer than this build \(18\)/,
       );
     } finally {
       try {

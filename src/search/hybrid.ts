@@ -1,5 +1,5 @@
 import type { CodeChunk, SearchHit, SearchOptions } from "../types.js";
-import { Bm25Index, tokenize } from "./bm25.js";
+import { Bm25Index } from "./bm25.js";
 import {
   cosineSimilarity,
   type EmbeddingVector,
@@ -11,6 +11,8 @@ import {
   type SymbolGraph,
 } from "../graph/symbol-graph.js";
 import { analyzeQuery, toFtsQuery } from "./query-analyzer.js";
+import { inferPathHints } from "./path-hints.js";
+import { inferSymbolHints } from "./symbol-hints.js";
 import {
   collapseByPath,
   combineFinal,
@@ -187,11 +189,12 @@ export class HybridSearcher {
     }
 
     // --- Channel 2: exact / fuzzy symbols ---
-    if (wantLexical && analyzed.identifiers.length) {
+    const symbolHints = inferSymbolHints(analyzed);
+    if (wantLexical && symbolHints.length) {
       let symHits: Array<{ id: string; score: number }> = [];
       if (this.store) {
         symHits = this.store
-          .searchSymbols(analyzed.identifiers, candidateLimit)
+          .searchSymbols(symbolHints, candidateLimit)
           .filter((r) => allow(r.id));
       } else {
         // memory fallback
@@ -199,7 +202,7 @@ export class HybridSearcher {
         for (const c of this.chunksById.values()) {
           if (!allow(c.id)) continue;
           const sym = (c.symbol ?? "").toLowerCase();
-          for (const id of analyzed.identifiers) {
+          for (const id of symbolHints) {
             const idL = id.toLowerCase();
             if (sym === idL) scores.set(c.id, 3);
             else if (sym.includes(idL))
@@ -218,18 +221,12 @@ export class HybridSearcher {
     }
 
     // --- Channel 3: path hints ---
-    const inferredPathHints = new Set(analyzed.pathHints);
-    for (const identifier of analyzed.identifiers) {
-      inferredPathHints.add(identifier);
-      for (const part of tokenize(identifier)) {
-        if (part.length >= 4) inferredPathHints.add(part);
-      }
-    }
-    if (wantLexical && inferredPathHints.size) {
+    const inferredPathHints = inferPathHints(analyzed);
+    if (wantLexical && inferredPathHints.length) {
       let pathHits: Array<{ id: string; score: number }> = [];
       if (this.store) {
         pathHits = this.store
-          .searchByPathHints([...inferredPathHints], candidateLimit)
+          .searchByPathHints(inferredPathHints, candidateLimit)
           .filter((r) => allow(r.id));
       } else {
         const scores = new Map<string, number>();

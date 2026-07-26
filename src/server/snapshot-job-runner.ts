@@ -11,6 +11,10 @@ import {
   replicateIndexSnapshot,
 } from "../snapshots/snapshot.js";
 import {
+  classifySnapshotStoreError,
+  isNonRetryableSnapshotStoreError,
+} from "../snapshots/store-errors.js";
+import {
   type ClaimedSnapshotJob,
   type StoredSnapshotJob,
   WorkspaceRepository,
@@ -35,6 +39,11 @@ export interface SnapshotJobRunnerOptions {
   replicationMaxAttempts?: number;
   replicationRetryBaseMs?: number;
   pollIntervalMs?: number;
+  /** Bounded event/attempt history retention; null disables pruning. */
+  historyRetention?: {
+    maxAgeMs?: number | null;
+    maxEventsPerJob?: number | null;
+  } | null;
 }
 
 export class SnapshotJobRunner {
@@ -52,9 +61,11 @@ export class SnapshotJobRunner {
   private readonly events = new EventEmitter();
   private readonly queue: string[] = [];
   private readonly queued = new Set<string>();
+  private readonly historyRetention: SnapshotJobRunnerOptions["historyRetention"];
   private drainPromise: Promise<void> | null = null;
   private scanPromise: Promise<void> | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
+  private lastHistoryPruneAt = 0;
   private closed = false;
 
   constructor(options: SnapshotJobRunnerOptions) {
@@ -84,6 +95,7 @@ export class SnapshotJobRunner {
         ),
       ),
     );
+    this.historyRetention = options.historyRetention ?? null;
   }
 
   async start(): Promise<void> {
@@ -128,6 +140,7 @@ export class SnapshotJobRunner {
   }
 
   private async scan(): Promise<void> {
+    await this.pruneHistoryIfDue();
     if (this.replicationTargetIds && this.replicationTargetFor) {
       try {
         const scheduled = await this.repository.scheduleDueSnapshotReplicationJobs(
@@ -144,6 +157,28 @@ export class SnapshotJobRunner {
     const jobs = await this.repository.listQueuedSnapshotJobs(this.leaseMs);
     for (const job of jobs) {
       if (this.canRun(job)) this.enqueue(job.id);
+    }
+  }
+
+  /** Concurrent prunes across instances only race on already-deleted rows. */
+  private async pruneHistoryIfDue(): Promise<void> {
+    const retention = this.historyRetention;
+    if (!retention || (!retention.maxAgeMs && !retention.maxEventsPerJob)) return;
+    const now = Date.now();
+    if (now - this.lastHistoryPruneAt < 10 * 60_000) return;
+    this.lastHistoryPruneAt = now;
+    try {
+      const pruned = await this.repository.pruneSnapshotJobHistory(retention);
+      if (pruned.deletedEvents || pruned.deletedAttempts) {
+        console.log(
+          `[snapshot jobs] pruned history: ${pruned.deletedEvents} event(s), ${pruned.deletedAttempts} attempt(s)`,
+        );
+      }
+    } catch (error) {
+      console.error(
+        "[snapshot jobs] history prune failed:",
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
@@ -177,19 +212,38 @@ export class SnapshotJobRunner {
     const job = await this.repository.claimSnapshotJob(jobId, this.leaseMs);
     if (!job) return;
     this.publish(job);
+    if (job.cancelRequestedAt) {
+      // A cancellation raced the claim (or an expired lease was taken over
+      // after the owner asked to cancel). The fresh attempt token lets this
+      // worker write the terminal state without running the operation.
+      const cancelled = await this.repository.cancelSnapshotJob(
+        job.id,
+        job.attemptToken,
+      );
+      if (cancelled) this.publish(cancelled);
+      return;
+    }
     let heartbeat = Promise.resolve();
+    let cancelRequested = false;
     const abortController = new AbortController();
     const heartbeatTimer = setInterval(() => {
       heartbeat = heartbeat
         .then(async () => {
           if (abortController.signal.aborted) return;
-          const renewed = await this.repository.renewSnapshotJobLease(
+          const lease = await this.repository.renewSnapshotJobLease(
             job.id,
             job.attemptToken,
           );
-          if (!renewed) {
+          if (!lease.renewed) {
             abortController.abort(
               new Error("Snapshot job lease is no longer active"),
+            );
+            return;
+          }
+          if (lease.cancelRequested) {
+            cancelRequested = true;
+            abortController.abort(
+              new Error("Snapshot job cancellation requested"),
             );
           }
         })
@@ -211,12 +265,43 @@ export class SnapshotJobRunner {
         job.attemptToken,
         result,
       );
-      if (completed) this.publish(completed);
+      if (completed) {
+        this.publish(completed);
+        return;
+      }
+      // Success write is fenced against cancel_requested_at: a cancellation
+      // that lands between the last signal check and the terminal write must
+      // win, so convert the finished attempt into the cancelled state.
+      const cancelled = await this.repository.cancelSnapshotJob(
+        job.id,
+        job.attemptToken,
+      );
+      if (cancelled) this.publish(cancelled);
     } catch (error) {
       clearInterval(heartbeatTimer);
       await heartbeat.catch(() => undefined);
-      const message = error instanceof Error ? error.message : String(error);
-      if (job.operation === "replicate" && job.attempts < this.replicationMaxAttempts) {
+      // Capacity and permission failures cannot succeed on retry with the
+      // same configuration, so they skip the retry budget entirely.
+      const failFast = isNonRetryableSnapshotStoreError(error);
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const message = failFast
+        ? `non-retryable ${classifySnapshotStoreError(error)} error: ${rawMessage}`
+        : rawMessage;
+      if (cancelRequested) {
+        const cancelled = await this.repository.cancelSnapshotJob(
+          job.id,
+          job.attemptToken,
+        );
+        if (cancelled) {
+          this.publish(cancelled);
+          return;
+        }
+      }
+      if (
+        job.operation === "replicate" &&
+        job.attempts < this.replicationMaxAttempts &&
+        !failFast
+      ) {
         const delayMs = Math.min(
           5 * 60_000,
           this.replicationRetryBaseMs * 2 ** Math.max(0, job.attempts - 1),
@@ -232,14 +317,25 @@ export class SnapshotJobRunner {
           const timer = setTimeout(() => this.enqueue(job.id), delayMs + 10);
           timer.unref();
         }
-        return;
+        if (retrying) return;
       }
       const failed = await this.repository.failSnapshotJob(
         job.id,
         job.attemptToken,
         message,
       );
-      if (failed) this.publish(failed);
+      if (failed) {
+        this.publish(failed);
+        return;
+      }
+      // Retry and failure writes are also fenced against a cancellation that
+      // arrived after the last heartbeat observation.
+      const lateCancel = await this.repository.cancelSnapshotJob(
+        job.id,
+        job.attemptToken,
+        message,
+      );
+      if (lateCancel) this.publish(lateCancel);
     }
   }
 

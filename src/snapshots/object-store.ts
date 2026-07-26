@@ -69,6 +69,7 @@ export class PrefixedSnapshotObjectStore implements SnapshotObjectStore {
   private readonly prefix: string;
   readonly head?: NonNullable<SnapshotObjectStore["head"]>;
   readonly putConditional?: NonNullable<SnapshotObjectStore["putConditional"]>;
+  readonly list?: NonNullable<SnapshotObjectStore["list"]>;
 
   constructor(
     private readonly inner: SnapshotObjectStore,
@@ -83,6 +84,17 @@ export class PrefixedSnapshotObjectStore implements SnapshotObjectStore {
     if (inner.putConditional) {
       this.putConditional = (key, source, condition, metadata, options) =>
         inner.putConditional!(this.key(key), source, condition, metadata, options);
+    }
+    // Forward list conditionally, like head/putConditional, so capability
+    // detection (supports list?) sees through the prefix wrapper.
+    if (inner.list) {
+      this.list = async (prefixArg = "", options) => {
+        const scopedPrefix = prefixArg ? this.key(prefixArg) : this.prefix;
+        const marker = `${this.prefix}/`;
+        return (await inner.list!(scopedPrefix, options))
+          .filter((key) => key.startsWith(marker))
+          .map((key) => key.slice(marker.length));
+      };
     }
   }
 
@@ -101,20 +113,6 @@ export class PrefixedSnapshotObjectStore implements SnapshotObjectStore {
 
   delete(key: string, options?: SnapshotObjectRequestOptions): Promise<void> {
     return this.inner.delete(this.key(key), options);
-  }
-
-  async list(
-    prefix = "",
-    options?: SnapshotObjectRequestOptions,
-  ): Promise<string[]> {
-    if (!this.inner.list) {
-      throw new Error("Snapshot object store does not support listing");
-    }
-    const scopedPrefix = prefix ? this.key(prefix) : this.prefix;
-    const marker = `${this.prefix}/`;
-    return (await this.inner.list(scopedPrefix, options))
-      .filter((key) => key.startsWith(marker))
-      .map((key) => key.slice(marker.length));
   }
 
   private key(key: string): string {

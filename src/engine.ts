@@ -50,6 +50,8 @@ export class ContextEngine {
     workspaceId?: string;
     dataDir?: string;
     databaseUrl?: string;
+    maxFileBytes?: number;
+    maxChunkChars?: number;
     extraRoots?: IndexRoot[];
   } = {}): ContextEngine {
     const cfg = resolveEngineConfig(opts);
@@ -67,9 +69,10 @@ export class ContextEngine {
 
   async index(
     onProgress?: Parameters<typeof indexWorkspace>[1],
+    signal?: AbortSignal,
   ): Promise<IndexResult> {
     await this.close();
-    const result = await indexWorkspace(this.config, onProgress);
+    const result = await indexWorkspace(this.config, onProgress, signal);
     await this.reloadSearcher();
     return result;
   }

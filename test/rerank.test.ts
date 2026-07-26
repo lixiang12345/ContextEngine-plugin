@@ -111,6 +111,35 @@ describe("rerank", () => {
     assert.ok(featureScore(impl, q) > featureScore(test, q));
   });
 
+  it("strongly prefers exact and segmented basename matches", () => {
+    const requestQuery = analyzeQuery("read request headers query string");
+    const request = chunk({
+      path: "lib/request.js",
+      language: "javascript",
+      content: "export const value = true;",
+    });
+    const response = chunk({
+      path: "lib/response.js",
+      language: "javascript",
+      content: "export const value = true;",
+    });
+    assert.ok(
+      featureScore(request, requestQuery) - featureScore(response, requestQuery) > 1,
+      "an exact basename should be decisive when lexical evidence is otherwise tied",
+    );
+
+    const streamQuery = analyzeQuery("utility that detects a readable stream");
+    const stream = chunk({
+      path: "lib/is-stream.js",
+      language: "javascript",
+      content: "export const value = true;",
+    });
+    assert.ok(
+      featureScore(stream, streamQuery) - featureScore(response, streamQuery) > 0.7,
+      "a hyphenated basename segment should receive a meaningful path boost",
+    );
+  });
+
   it("demotes deprecated/legacy code unless the query asks for it", () => {
     const q = analyzeQuery("processPayment charge order handler");
     const active = chunk({
@@ -276,5 +305,67 @@ describe("rerank", () => {
     const collapsed = collapseByPath(ranked, q);
     assert.equal(collapsed.length, 3);
     assert.equal(collapsed[0].chunk.path, "src/RemoteAgentClient.kt");
+  });
+
+  it("applies basename affinity once per collapsed file", () => {
+    const q = analyzeQuery(
+      "emit transformed TypeScript nodes and source maps to JavaScript",
+    );
+    const mk = (id: string, path: string, final: number) => ({
+      id,
+      chunk: {
+        id,
+        path,
+        language: "typescript",
+        startLine: 1,
+        endLine: 20,
+        content: "transformed nodes and source maps",
+        hash: id,
+      },
+      channels: {},
+      rrf: final,
+      features: final,
+      final,
+    });
+    const collapsed = collapseByPath(
+      [
+        mk("transformer", "compiler/transformer.ts", 0.9),
+        mk("emitter", "compiler/emitter.ts", 0.76),
+      ],
+      q,
+    );
+
+    assert.equal(collapsed[0].chunk.path, "compiler/emitter.ts");
+  });
+
+  it("does not let a same-name test path outrank production code", () => {
+    const q = analyzeQuery(
+      "tsserver Session executes protocol commands and sends responses",
+    );
+    const mk = (id: string, path: string, final: number) => ({
+      id,
+      chunk: {
+        id,
+        path,
+        language: "typescript",
+        startLine: 1,
+        endLine: 20,
+        content: "Session executes protocol commands and sends responses",
+        hash: id,
+      },
+      channels: {},
+      rrf: final,
+      features: final,
+      final,
+    });
+    const collapsed = collapseByPath(
+      [
+        mk("test", "testRunner/unittests/tsserver/session.ts", 0.91),
+        mk("production", "server/session.ts", 0.8),
+      ],
+      q,
+    );
+
+    assert.equal(collapsed[0].chunk.path, "server/session.ts");
   });
 });

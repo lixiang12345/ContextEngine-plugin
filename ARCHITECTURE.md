@@ -76,7 +76,7 @@ remote IDE ── HTTP Bearer API ── Blob plan/commit ──► PostgreSQL
                                            │             ├─ chunks / FTS / symbols
                                            │             └─ pgvector embeddings
                                            ▼
-                                    serialized index jobs
+                              leased durable index jobs
                                            ▼
                                   same ContextEngine retrieval core
 ```
@@ -86,5 +86,17 @@ workspaces. It stores a SHA-256-verified file Blob and a versioned manifest firs
 then indexes changed files in a background job. This keeps large repositories
 database-backed and lets IDE clients synchronize incrementally without a
 process-wide vector cache.
+
+HTTP index execution is coordinated by PostgreSQL schema v17. Each process keeps
+one bounded worker, periodically scans queued or expired Blob-workspace rows,
+and claims with a database-clock heartbeat plus attempt token. Local-path jobs
+carry a persistent executor affinity and only matching workers may list or
+claim them. Progress, success, failure, and graceful release are fenced by the
+token. The generation advisory lock uses cancellable polling, so
+lease loss or shutdown can interrupt a waiter before promotion. SSE observers on
+other instances poll the durable row; an event epoch discards a delayed poll
+that started before a newer local event. Before promotion, a best-effort,
+time-bounded PostgreSQL `ANALYZE` refresh prevents a newly generated physical
+workspace id from receiving severely underestimated query plans.
 
 See [docs/HTTP_API.md](./docs/HTTP_API.md) for the client contract.

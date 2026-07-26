@@ -60,6 +60,7 @@ export interface VirtualIndexOptions {
   sourceRevision?: string | number | null;
   rootLabel?: string;
   onProgress?: (progress: IndexProgress) => void;
+  signal?: AbortSignal;
 }
 
 function localSourceRevision(root: string): string {
@@ -118,17 +119,21 @@ function indexPath(root: ResolvedRoot, rel: string): string {
 export async function indexWorkspace(
   config: EngineConfig,
   onProgress?: (p: IndexProgress) => void,
+  signal?: AbortSignal,
 ): Promise<IndexResult> {
+  signal?.throwIfAborted();
   const started = Date.now();
   const baseStore = await PostgresStore.open({
     databaseUrl: requireDatabaseUrl(config),
     workspaceId: config.workspaceId ?? config.root,
     lockWorkspace: true,
+    signal,
   });
   const sourceRevision = localSourceRevision(config.root);
   let store = baseStore;
   let generationStarted = false;
   try {
+    signal?.throwIfAborted();
     store = await baseStore.beginGeneration(sourceRevision);
     generationStarted = true;
     await store.setMeta("root", config.root);
@@ -160,6 +165,7 @@ export async function indexWorkspace(
     ];
     const jobs: FileJob[] = [];
     for (const root of roots) {
+      signal?.throwIfAborted();
       const files = walkSourceFiles(root.absPath, config.maxFileBytes, {
         extraIgnores,
       });
@@ -190,6 +196,7 @@ export async function indexWorkspace(
 
     let filesRemoved = 0;
     for (const existing of existingPaths) {
+      signal?.throwIfAborted();
       if (!livePaths.has(existing) && !existing.startsWith(".git/commits/")) {
         await store.deleteFile(existing);
         filesRemoved++;
@@ -201,6 +208,7 @@ export async function indexWorkspace(
     let filesDone = 0;
 
     for (const job of jobs) {
+      signal?.throwIfAborted();
       filesDone++;
       const previousHash = await store.getFileHash(job.indexRel);
       const content = readTextFile(job.absPath);
@@ -258,6 +266,7 @@ export async function indexWorkspace(
     // Commit lineage from primary root only (skip rewrite when head set unchanged)
     const commitLimit = Number(process.env.CONTEXTENGINE_COMMIT_LIMIT ?? 80);
     if (commitLimit > 0) {
+      signal?.throwIfAborted();
       onProgress?.({
         phase: "write",
         filesTotal: jobs.length,
@@ -317,15 +326,33 @@ export async function indexWorkspace(
         embedder,
         onProgress,
         jobs.length,
+        signal,
       );
       embeddingsWritten = embedded.written;
       if (embedded.dimension) await store.ensureVectorIndex(embedded.dimension);
       await store.setMeta("embedding_signature", embeddingSignature);
     }
 
+    signal?.throwIfAborted();
     await store.setMeta(SEARCH_TOKENIZER_META_KEY, tokenizerVersion);
     await store.setMeta("last_indexed_at", new Date().toISOString());
     if (embedder) await store.setMeta("embedding_model", embedder.model);
+
+    onProgress?.({
+      phase: "write",
+      filesTotal: jobs.length,
+      filesDone: jobs.length,
+      chunksTotal: chunksWritten,
+      message: "Refreshing PostgreSQL planner statistics…",
+    });
+    const plannerStatsRefreshed = await store.refreshPlannerStatistics();
+    await store.setMeta(
+      "planner_stats_refreshed",
+      JSON.stringify({
+        at: new Date().toISOString(),
+        succeeded: plannerStatsRefreshed,
+      }),
+    );
 
     onProgress?.({
       phase: "done",
@@ -335,7 +362,9 @@ export async function indexWorkspace(
       message: "Index complete",
     });
 
+    signal?.throwIfAborted();
     await store.promoteGeneration();
+    generationStarted = false;
     const generation = await store.generationStatus();
     return {
       filesScanned: jobs.length,
@@ -374,12 +403,14 @@ export async function indexVirtualWorkspace(
   documents: AsyncIterable<VirtualSourceDocument>,
   options: VirtualIndexOptions,
 ): Promise<IndexResult> {
+  options.signal?.throwIfAborted();
   const started = Date.now();
   const workspaceId = config.workspaceId ?? config.root;
   const baseStore = await PostgresStore.open({
     databaseUrl: requireDatabaseUrl(config),
     workspaceId,
     lockWorkspace: true,
+    signal: options.signal,
   });
   const sourceRevision = options.sourceRevision ?? `sync:${Date.now()}`;
   let store = baseStore;
@@ -390,8 +421,10 @@ export async function indexVirtualWorkspace(
   let filesIndexed = 0;
   let filesRemoved = 0;
   let chunksWritten = 0;
+  const signal = options.signal;
 
   try {
+    signal?.throwIfAborted();
     store = await baseStore.beginGeneration(sourceRevision);
     generationStarted = true;
     if (options.rebuild) {
@@ -421,10 +454,12 @@ export async function indexVirtualWorkspace(
     });
 
     for (const relPath of options.deletedPaths ?? []) {
+      signal?.throwIfAborted();
       await store.deleteFile(relPath);
       filesRemoved++;
     }
     for await (const document of documents) {
+      signal?.throwIfAborted();
       filesScanned++;
       const previousHash = await store.getFileHash(document.path);
       if (document.indexable === false) {
@@ -509,17 +544,39 @@ export async function indexVirtualWorkspace(
       ) {
         await store.clearEmbeddings();
       }
-      const embedded = await embedMissing(store, embedder, onProgress, filesTotal);
+      const embedded = await embedMissing(
+        store,
+        embedder,
+        onProgress,
+        filesTotal,
+        signal,
+      );
       embeddingsWritten = embedded.written;
       if (embedded.dimension) await store.ensureVectorIndex(embedded.dimension);
       await store.setMeta("embedding_signature", embeddingSignature);
       await store.setMeta("embedding_model", embedder.model);
     }
 
+    signal?.throwIfAborted();
     if (options.fullScan || !tokenizerChanged) {
       await store.setMeta(SEARCH_TOKENIZER_META_KEY, tokenizerVersion);
     }
     await store.setMeta("last_indexed_at", new Date().toISOString());
+    onProgress?.({
+      phase: "write",
+      filesTotal,
+      filesDone: filesScanned,
+      chunksTotal: chunksWritten,
+      message: "Refreshing PostgreSQL planner statistics…",
+    });
+    const plannerStatsRefreshed = await store.refreshPlannerStatistics();
+    await store.setMeta(
+      "planner_stats_refreshed",
+      JSON.stringify({
+        at: new Date().toISOString(),
+        succeeded: plannerStatsRefreshed,
+      }),
+    );
     onProgress?.({
       phase: "done",
       filesTotal,
@@ -528,7 +585,9 @@ export async function indexVirtualWorkspace(
       message: "Index complete",
     });
 
+    signal?.throwIfAborted();
     await store.promoteGeneration();
+    generationStarted = false;
     const generation = await store.generationStatus();
     return {
       filesScanned,
@@ -561,7 +620,9 @@ async function embedMissing(
   embedder: EmbeddingProvider,
   onProgress: ((p: IndexProgress) => void) | undefined,
   filesTotal: number,
+  signal?: AbortSignal,
 ): Promise<{ written: number; dimension: number | null }> {
+  signal?.throwIfAborted();
   const total = await store.countChunksMissingEmbeddings(embedder.model);
   if (total === 0) return { written: 0, dimension: null };
 
@@ -570,6 +631,7 @@ async function embedMissing(
   let afterId: string | undefined;
   const batchSize = 32;
   for (;;) {
+    signal?.throwIfAborted();
     const batch = await store.chunksMissingEmbeddings(
       embedder.model,
       batchSize,
@@ -587,7 +649,8 @@ async function embedMissing(
       chunksTotal: total,
       message: `Embedding ${written + 1}-${written + batch.length} / ${total}`,
     });
-    const vectors = await embedder.embed(texts);
+    const vectors = await embedder.embed(texts, { signal });
+    signal?.throwIfAborted();
     if (vectors[0]) dimension = vectors[0].length;
     await store.upsertEmbeddings(
       embedder.model,

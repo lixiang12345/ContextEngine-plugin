@@ -8,6 +8,8 @@ import {
 } from "node:http";
 import { once } from "node:events";
 import { existsSync, realpathSync, statSync } from "node:fs";
+import { statfs } from "node:fs/promises";
+import { hostname } from "node:os";
 import path from "node:path";
 import { z, ZodError } from "zod";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -47,6 +49,7 @@ import {
   type OidcAuthenticatorOptions,
 } from "./server/http-auth.js";
 import { IndexJobRunner } from "./server/index-job-runner.js";
+import { MonotonicPollEpoch } from "./server/job-event-sequencer.js";
 import { SnapshotJobRunner } from "./server/snapshot-job-runner.js";
 import {
   PostgresSnapshotJobEventWakeup,
@@ -89,6 +92,7 @@ import {
   type StoredConnectorCiToken,
   type StoredSourceAccessPolicy,
   type StoredWorkspace,
+  type SnapshotReplicationMetrics,
   type WorkspacePermission,
   WorkspaceNotFoundError,
   WorkspaceRepository,
@@ -112,13 +116,25 @@ import {
   snapshotReplicationTargetsFromJson,
   snapshotStoreFromLocation,
 } from "./snapshots/config.js";
+import { FilesystemSnapshotStore } from "./snapshots/filesystem-store.js";
+import { S3SnapshotStore } from "./snapshots/s3-store.js";
+import { probeSnapshotObjectStore } from "./snapshots/probe.js";
+import { withSnapshotStoreTimeouts } from "./snapshots/timeout-store.js";
 
 const DEFAULT_MAX_BLOB_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_MCP_MAX_SESSIONS = 128;
+const DEFAULT_INDEX_JOB_LEASE_MS = 5 * 60 * 1000;
+const DEFAULT_INDEX_JOB_POLL_INTERVAL_MS = 2_000;
+const DEFAULT_INDEX_JOB_MAX_ATTEMPTS = 5;
+const DEFAULT_SNAPSHOT_EVENT_RETENTION_MS = 30 * 24 * 60 * 60_000;
+const DEFAULT_SNAPSHOT_EVENT_MAX_PER_JOB = 500;
 const DEFAULT_SNAPSHOT_REPLICATION_MAX_ATTEMPTS = 3;
 const DEFAULT_SNAPSHOT_REPLICATION_RETRY_BASE_MS = 1_000;
 const DEFAULT_SNAPSHOT_JOB_POLL_INTERVAL_MS = 2_000;
+const DEFAULT_SNAPSHOT_STORE_METADATA_TIMEOUT_MS = 30_000;
+const DEFAULT_SNAPSHOT_STORE_TRANSFER_TIMEOUT_MS = 0;
+const DEFAULT_SNAPSHOT_PROBE_TIMEOUT_MS = 10_000;
 const MAX_BATCH_BLOBS = 16;
 const snapshotNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/);
 const snapshotPruneSchema = z.object({
@@ -193,6 +209,13 @@ export interface HttpServerOptions {
   websiteTimeoutMs?: number;
   webhookPollIntervalMs?: number;
   webhookMaxAttempts?: number;
+  /** Durable index-job ownership lease. */
+  indexJobLeaseMs?: number;
+  /** Database scan interval for index jobs created by another instance. */
+  indexJobPollIntervalMs?: number;
+  indexJobMaxAttempts?: number;
+  /** Stable, non-secret identity used to recover server-local index jobs. */
+  indexJobExecutorId?: string;
   /** Additional read-only source providers available under /sources/{provider}. */
   connectorPlugins?: readonly SourceConnectorPlugin[];
   /** Exact browser origins allowed to call the HTTP API, or ["*"]. */
@@ -207,6 +230,16 @@ export interface HttpServerOptions {
   snapshotReplicationRetryBaseMs?: number;
   /** Database queue and replication-schedule scan interval. */
   snapshotJobPollIntervalMs?: number;
+  /** 0 disables the corresponding retention dimension. */
+  snapshotEventRetentionMs?: number;
+  snapshotEventMaxPerJob?: number;
+  /** Deadline for bounded store operations (head/list/delete/CAS). 0 disables. */
+  snapshotStoreMetadataTimeoutMs?: number;
+  /** Deadline for streaming transfers (put/get). 0 disables; artifact size is
+   * unbounded, so operators size this to their artifacts. */
+  snapshotStoreTransferTimeoutMs?: number;
+  /** Per-operation deadline for snapshot target probes. */
+  snapshotProbeTimeoutMs?: number;
   /** Optional low-latency wakeup transport; durable events remain in PostgreSQL. */
   snapshotJobEventWakeup?: SnapshotJobEventWakeup;
 }
@@ -464,6 +497,26 @@ function optionalIntegerFromEnv(value: string | undefined, name: string): number
   return parsed;
 }
 
+function retentionFromEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  // 0 is meaningful here: it disables the retention dimension entirely.
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+function nonNegativeBoundedOption(
+  value: number,
+  name: string,
+  max: number,
+): number {
+  const normalized = Math.floor(value);
+  if (!Number.isFinite(value) || normalized < 0) {
+    throw new Error(`${name} must be a non-negative finite number`);
+  }
+  if (normalized > max) throw new Error(`${name} must not exceed ${max}`);
+  return normalized;
+}
+
 function positiveOption(value: number, name: string): number {
   const normalized = Math.floor(value);
   if (!Number.isFinite(value) || value <= 0 || normalized < 1) {
@@ -487,6 +540,27 @@ function rangedPositiveOption(
   const normalized = boundedPositiveOption(value, name, max);
   if (normalized < min) throw new Error(`${name} must be at least ${min}`);
   return normalized;
+}
+
+function localIndexJobExecutorId(
+  configured: string | undefined,
+  localRootAllowlist: readonly string[],
+): string {
+  const explicit = configured?.trim();
+  if (explicit) {
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(explicit)) {
+      throw new Error(
+        "CONTEXTENGINE_INDEX_JOB_EXECUTOR_ID must use 1-128 letters, numbers, '.', '_', ':' or '-'",
+      );
+    }
+    return explicit;
+  }
+  const fingerprint = JSON.stringify({
+    hostname: hostname(),
+    cwd: process.cwd(),
+    localRootAllowlist: [...localRootAllowlist].sort(),
+  });
+  return `local:${sha256(fingerprint).slice(0, 32)}`;
 }
 
 function mcpSessionStoreFromEnv(value: string | undefined): McpSessionStoreKind {
@@ -672,6 +746,7 @@ function jobPayload(job: StoredIndexJob): Record<string, unknown> {
   return {
     id: job.id,
     workspace_id: job.workspaceId,
+    executor_affinity: job.executorId ? "local" : "shared",
     revision: job.revision,
     mode: job.mode,
     changed_paths: job.changedPaths,
@@ -680,10 +755,30 @@ function jobPayload(job: StoredIndexJob): Record<string, unknown> {
     progress: job.progress,
     result: job.result,
     error: job.error,
+    attempts: job.attempts,
+    locked_at: job.lockedAt,
     created_at: job.createdAt,
     started_at: job.startedAt,
     completed_at: job.completedAt,
   };
+}
+
+function snapshotStoreType(
+  store: SnapshotObjectStore,
+): "filesystem" | "s3" | "external" {
+  if (store instanceof FilesystemSnapshotStore) return "filesystem";
+  if (store instanceof S3SnapshotStore) return "s3";
+  return "external";
+}
+
+function replicationTargetHealth(
+  metric: SnapshotReplicationMetrics | undefined,
+): "healthy" | "degraded" | "unhealthy" | "unknown" {
+  const failures = metric?.consecutiveFailures ?? 0;
+  if (failures >= 3) return "unhealthy";
+  if (failures > 0) return "degraded";
+  if ((metric?.succeeded ?? 0) > 0) return "healthy";
+  return "unknown";
 }
 
 function snapshotJobPayload(job: StoredSnapshotJob): Record<string, unknown> {
@@ -709,6 +804,7 @@ function snapshotJobPayload(job: StoredSnapshotJob): Record<string, unknown> {
     created_at: job.createdAt,
     started_at: job.startedAt,
     completed_at: job.completedAt,
+    cancel_requested_at: job.cancelRequestedAt,
   };
 }
 
@@ -1132,6 +1228,15 @@ function openApiDocument(): Record<string, unknown> {
       "/v1/workspaces/{workspaceId}/snapshot-replication-targets": {
         get: { summary: "List configured snapshot replication targets and status" },
       },
+      "/v1/workspaces/{workspaceId}/snapshot-replication-targets/{targetId}/probe": {
+        post: {
+          summary:
+            "Probe a replication target's connectivity, permissions, and capacity",
+        },
+      },
+      "/v1/workspaces/{workspaceId}/snapshots:probe": {
+        post: { summary: "Probe the primary snapshot store before scheduling jobs" },
+      },
       "/v1/workspaces/{workspaceId}/snapshots:prune": {
         post: { summary: "Prune snapshots by age and retention count" },
       },
@@ -1149,6 +1254,9 @@ function openApiDocument(): Record<string, unknown> {
       },
       "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry": {
         post: { summary: "Retry a failed snapshot job" },
+      },
+      "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/cancel": {
+        post: { summary: "Cancel a queued or running snapshot job" },
       },
       "/v1/blobs/{sha256}": {
         put: { summary: "Upload a raw source Blob after SHA-256 verification" },
@@ -1228,6 +1336,8 @@ class HttpContextService {
   };
   private readonly databaseUrl: string;
   private readonly disableEmbeddings: boolean;
+  private readonly indexJobExecutorId: string | null;
+  private readonly indexJobPollIntervalMs: number;
   private readonly snapshotStore: SnapshotObjectStore | null;
   private readonly snapshotReplicationTargets: ReadonlyMap<
     string,
@@ -1236,6 +1346,18 @@ class HttpContextService {
   private readonly snapshotReplicationMaxAttempts: number;
   private readonly snapshotReplicationRetryBaseMs: number;
   private readonly snapshotJobPollIntervalMs: number;
+  private readonly snapshotEventRetentionMs: number;
+  private readonly snapshotEventMaxPerJob: number;
+  private readonly snapshotStoreMetadataTimeoutMs: number;
+  private readonly snapshotStoreTransferTimeoutMs: number;
+  private readonly snapshotProbeTimeoutMs: number;
+  /** Timeout-guarded views of the raw stores; raw references stay available
+   * for capability checks and probe capacity/type detection. */
+  private readonly guardedSnapshotStore: SnapshotObjectStore | null;
+  private readonly guardedSnapshotReplicationTargets: ReadonlyMap<
+    string,
+    SnapshotObjectStore
+  >;
   private readonly snapshotJobEventWakeup: SnapshotJobEventWakeup;
   private readonly snapshotJobEventFeed: SnapshotJobEventFeed;
   private readonly activeEventStreamClosers = new Set<() => void>();
@@ -1266,9 +1388,17 @@ class HttpContextService {
         | "websiteTimeoutMs"
         | "webhookPollIntervalMs"
         | "webhookMaxAttempts"
+        | "indexJobLeaseMs"
+        | "indexJobPollIntervalMs"
+        | "indexJobMaxAttempts"
         | "snapshotReplicationMaxAttempts"
         | "snapshotReplicationRetryBaseMs"
         | "snapshotJobPollIntervalMs"
+        | "snapshotEventRetentionMs"
+        | "snapshotEventMaxPerJob"
+        | "snapshotStoreMetadataTimeoutMs"
+        | "snapshotStoreTransferTimeoutMs"
+        | "snapshotProbeTimeoutMs"
         | "corsOrigins"
       >
     > &
@@ -1284,6 +1414,7 @@ class HttpContextService {
         | "bitbucketToken"
         | "bitbucketApiBaseUrl"
         | "bitbucketWebhookSecret"
+        | "indexJobExecutorId"
         | "connectorPlugins"
         | "snapshotStore"
         | "snapshotReplicationTargets"
@@ -1303,6 +1434,13 @@ class HttpContextService {
         return resolved;
       }
     });
+    this.indexJobExecutorId = this.allowLocalWorkspaces
+      ? localIndexJobExecutorId(
+          options.indexJobExecutorId ??
+            process.env.CONTEXTENGINE_INDEX_JOB_EXECUTOR_ID,
+          this.localRootAllowlist,
+        )
+      : null;
     this.maxBlobBytes = options.maxBlobBytes;
     this.mcpSessionIdleTtlMs = options.mcpSessionIdleTtlMs;
     this.mcpMaxSessions = options.mcpMaxSessions;
@@ -1319,6 +1457,7 @@ class HttpContextService {
     this.corsOrigins = new Set(options.corsOrigins);
     this.databaseUrl = options.databaseUrl;
     this.disableEmbeddings = options.disableEmbeddings;
+    this.indexJobPollIntervalMs = options.indexJobPollIntervalMs;
     this.snapshotStore = options.snapshotStore ?? null;
     this.snapshotReplicationTargets = normalizeSnapshotReplicationTargets(
       options.snapshotReplicationTargets,
@@ -1326,6 +1465,24 @@ class HttpContextService {
     this.snapshotReplicationMaxAttempts = options.snapshotReplicationMaxAttempts;
     this.snapshotReplicationRetryBaseMs = options.snapshotReplicationRetryBaseMs;
     this.snapshotJobPollIntervalMs = options.snapshotJobPollIntervalMs;
+    this.snapshotEventRetentionMs = options.snapshotEventRetentionMs;
+    this.snapshotEventMaxPerJob = options.snapshotEventMaxPerJob;
+    this.snapshotStoreMetadataTimeoutMs = options.snapshotStoreMetadataTimeoutMs;
+    this.snapshotStoreTransferTimeoutMs = options.snapshotStoreTransferTimeoutMs;
+    this.snapshotProbeTimeoutMs = options.snapshotProbeTimeoutMs;
+    const snapshotStoreTimeouts = {
+      metadataMs: this.snapshotStoreMetadataTimeoutMs || null,
+      transferMs: this.snapshotStoreTransferTimeoutMs || null,
+    };
+    this.guardedSnapshotStore = this.snapshotStore
+      ? withSnapshotStoreTimeouts(this.snapshotStore, snapshotStoreTimeouts)
+      : null;
+    this.guardedSnapshotReplicationTargets = new Map(
+      [...this.snapshotReplicationTargets].map(([targetId, store]) => [
+        targetId,
+        withSnapshotStoreTimeouts(store, snapshotStoreTimeouts),
+      ]),
+    );
     this.snapshotJobEventWakeup =
       options.snapshotJobEventWakeup ??
       new PostgresSnapshotJobEventWakeup({ databaseUrl: this.databaseUrl });
@@ -1337,6 +1494,10 @@ class HttpContextService {
     this.runner = new IndexJobRunner({
       repository,
       engineFor: (workspace) => this.engineFor(workspace),
+      executorId: this.indexJobExecutorId ?? undefined,
+      leaseMs: options.indexJobLeaseMs,
+      pollIntervalMs: options.indexJobPollIntervalMs,
+      maxAttempts: options.indexJobMaxAttempts,
     });
     this.snapshotRunner = new SnapshotJobRunner({
       repository,
@@ -1353,6 +1514,10 @@ class HttpContextService {
       replicationMaxAttempts: options.snapshotReplicationMaxAttempts,
       replicationRetryBaseMs: options.snapshotReplicationRetryBaseMs,
       pollIntervalMs: options.snapshotJobPollIntervalMs,
+      historyRetention: {
+        maxAgeMs: options.snapshotEventRetentionMs || null,
+        maxEventsPerJob: options.snapshotEventMaxPerJob || null,
+      },
       onImportCompleted: (workspaceId) => this.closeEngine(workspaceId),
     });
     const github = new GitHubConnectorClient({
@@ -1533,6 +1698,39 @@ class HttpContextService {
             numberFromEnv(process.env.CONTEXTENGINE_WEBHOOK_MAX_ATTEMPTS, 5),
           "webhookMaxAttempts",
         ),
+        indexJobLeaseMs: rangedPositiveOption(
+          options.indexJobLeaseMs ??
+            numberFromEnv(
+              process.env.CONTEXTENGINE_INDEX_JOB_LEASE_MS,
+              DEFAULT_INDEX_JOB_LEASE_MS,
+            ),
+          "indexJobLeaseMs",
+          1_000,
+          24 * 60 * 60_000,
+        ),
+        indexJobPollIntervalMs: rangedPositiveOption(
+          options.indexJobPollIntervalMs ??
+            numberFromEnv(
+              process.env.CONTEXTENGINE_INDEX_JOB_POLL_INTERVAL_MS,
+              DEFAULT_INDEX_JOB_POLL_INTERVAL_MS,
+            ),
+          "indexJobPollIntervalMs",
+          100,
+          60_000,
+        ),
+        indexJobMaxAttempts: rangedPositiveOption(
+          options.indexJobMaxAttempts ??
+            numberFromEnv(
+              process.env.CONTEXTENGINE_INDEX_JOB_MAX_ATTEMPTS,
+              DEFAULT_INDEX_JOB_MAX_ATTEMPTS,
+            ),
+          "indexJobMaxAttempts",
+          1,
+          100,
+        ),
+        indexJobExecutorId:
+          options.indexJobExecutorId ??
+          (process.env.CONTEXTENGINE_INDEX_JOB_EXECUTOR_ID?.trim() || undefined),
         connectorPlugins: options.connectorPlugins,
         snapshotStore:
           options.snapshotStore === undefined
@@ -1576,6 +1774,52 @@ class HttpContextService {
           100,
           60_000,
         ),
+        snapshotEventRetentionMs: nonNegativeBoundedOption(
+          options.snapshotEventRetentionMs ??
+            retentionFromEnv(
+              process.env.CONTEXTENGINE_SNAPSHOT_EVENT_RETENTION_MS,
+              DEFAULT_SNAPSHOT_EVENT_RETENTION_MS,
+            ),
+          "snapshotEventRetentionMs",
+          400 * 24 * 60 * 60_000,
+        ),
+        snapshotEventMaxPerJob: nonNegativeBoundedOption(
+          options.snapshotEventMaxPerJob ??
+            retentionFromEnv(
+              process.env.CONTEXTENGINE_SNAPSHOT_EVENT_MAX_PER_JOB,
+              DEFAULT_SNAPSHOT_EVENT_MAX_PER_JOB,
+            ),
+          "snapshotEventMaxPerJob",
+          100_000,
+        ),
+        snapshotStoreMetadataTimeoutMs: nonNegativeBoundedOption(
+          options.snapshotStoreMetadataTimeoutMs ??
+            retentionFromEnv(
+              process.env.CONTEXTENGINE_SNAPSHOT_STORE_METADATA_TIMEOUT_MS,
+              DEFAULT_SNAPSHOT_STORE_METADATA_TIMEOUT_MS,
+            ),
+          "snapshotStoreMetadataTimeoutMs",
+          60 * 60_000,
+        ),
+        snapshotStoreTransferTimeoutMs: nonNegativeBoundedOption(
+          options.snapshotStoreTransferTimeoutMs ??
+            retentionFromEnv(
+              process.env.CONTEXTENGINE_SNAPSHOT_STORE_TRANSFER_TIMEOUT_MS,
+              DEFAULT_SNAPSHOT_STORE_TRANSFER_TIMEOUT_MS,
+            ),
+          "snapshotStoreTransferTimeoutMs",
+          24 * 60 * 60_000,
+        ),
+        snapshotProbeTimeoutMs: rangedPositiveOption(
+          options.snapshotProbeTimeoutMs ??
+            numberFromEnv(
+              process.env.CONTEXTENGINE_SNAPSHOT_PROBE_TIMEOUT_MS,
+              DEFAULT_SNAPSHOT_PROBE_TIMEOUT_MS,
+            ),
+          "snapshotProbeTimeoutMs",
+          100,
+          120_000,
+        ),
         snapshotJobEventWakeup: options.snapshotJobEventWakeup,
         corsOrigins: normalizeCorsOrigins(
           options.corsOrigins ??
@@ -1594,6 +1838,7 @@ class HttpContextService {
     await this.snapshotJobEventWakeup.close();
     clearInterval(this.mcpSessionCleanupTimer);
     await this.webhookProcessor.close();
+    await this.runner.close();
     await this.snapshotRunner.close();
     const sessions = [...new Set(this.mcpSessions.values())];
     this.mcpSessions.clear();
@@ -1764,6 +2009,12 @@ class HttpContextService {
                     : []),
                 ],
             replication_targets: [...this.snapshotReplicationTargets.keys()],
+            target_probe: true,
+            store_timeouts: {
+              metadata_ms: this.snapshotStoreMetadataTimeoutMs,
+              transfer_ms: this.snapshotStoreTransferTimeoutMs,
+              probe_ms: this.snapshotProbeTimeoutMs,
+            },
             replication_retry: {
               max_attempts: this.snapshotReplicationMaxAttempts,
               base_delay_ms: this.snapshotReplicationRetryBaseMs,
@@ -1773,6 +2024,13 @@ class HttpContextService {
               durable: true,
               modes: ["manual", "interval", "nightly"],
               min_interval_ms: 60_000,
+            },
+            jobs: {
+              cancellation: true,
+              history_retention: {
+                max_age_ms: this.snapshotEventRetentionMs,
+                max_events_per_job: this.snapshotEventMaxPerJob,
+              },
             },
           },
           retrieval: ["search", "context", "file", "codebase-retrieval"],
@@ -1805,12 +2063,18 @@ class HttpContextService {
           25,
           100,
         );
-        const [workspaces, jobs, mcpSessions, webhooks] = await Promise.all([
-          this.repository.listWorkspaces(),
-          this.repository.listRecentIndexJobs(jobLimit),
-          this.mcpSessionStore.statistics(),
-          this.repository.getConnectorWebhookStatistics(),
-        ]);
+        const [workspaces, jobs, mcpSessions, webhooks, replicationMetrics] =
+          await Promise.all([
+            this.repository.listWorkspaces(),
+            this.repository.listRecentIndexJobs(jobLimit),
+            this.mcpSessionStore.statistics(),
+            this.repository.getConnectorWebhookStatistics(),
+            // Target health is additive context; a failed aggregate must not
+            // make the whole observability response unusable.
+            this.repository
+              .globalSnapshotReplicationMetrics()
+              .catch(() => [] as SnapshotReplicationMetrics[]),
+          ]);
         const observedWorkspaces = await Promise.all(
           workspaces.map(async (workspace) => {
             try {
@@ -1903,6 +2167,40 @@ class HttpContextService {
             lookup_max_ms: Number(this.mcpSessionMetrics.lookupLatencyMsMax.toFixed(3)),
           },
           connector_webhooks: webhooks,
+          snapshot_targets: (() => {
+            const metricsByTarget = new Map(
+              replicationMetrics.map((metric) => [metric.targetId, metric]),
+            );
+            const targetIds = [
+              ...new Set([
+                ...this.snapshotReplicationTargets.keys(),
+                ...metricsByTarget.keys(),
+              ]),
+            ]
+              .sort()
+              .slice(0, 64);
+            return {
+              store_configured: Boolean(this.snapshotStore),
+              configured_targets: this.snapshotReplicationTargets.size,
+              targets: targetIds.map((targetId) => {
+                const metric = metricsByTarget.get(targetId);
+                return {
+                  id: targetId,
+                  configured: this.snapshotReplicationTargets.has(targetId),
+                  health: replicationTargetHealth(metric),
+                  consecutive_failures: metric?.consecutiveFailures ?? 0,
+                  succeeded: metric?.succeeded ?? 0,
+                  failed: metric?.failed ?? 0,
+                  last_succeeded_at: metric?.lastSucceededAt ?? null,
+                  last_failed_at: metric?.lastFailedAt ?? null,
+                  replication_lag_ms:
+                    metric?.replicationLagMs == null
+                      ? null
+                      : Math.max(0, metric.replicationLagMs),
+                };
+              }),
+            };
+          })(),
           workspaces: observedWorkspaces,
           jobs: jobs.map(jobPayload),
         });
@@ -2126,6 +2424,41 @@ class HttpContextService {
         return;
       }
 
+      const snapshotProbeMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshots:probe$/.exec(pathname);
+      if (request.method === "POST" && snapshotProbeMatch) {
+        const workspaceId = decodeURIComponent(snapshotProbeMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const store = this.requireSnapshotStore(workspaceId);
+        emptySnapshotRequestSchema.parse(await readJsonBody(request, 16 * 1024));
+        json(response, 200, {
+          probe: await this.runSnapshotStoreProbe(store, this.snapshotStore!),
+        });
+        return;
+      }
+
+      const snapshotTargetProbeMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshot-replication-targets\/([^/]+)\/probe$/.exec(
+          pathname,
+        );
+      if (request.method === "POST" && snapshotTargetProbeMatch) {
+        const workspaceId = decodeURIComponent(snapshotTargetProbeMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        const targetId = snapshotReplicationTargetIdSchema.parse(
+          decodeURIComponent(snapshotTargetProbeMatch[2]),
+        );
+        const store = this.requireSnapshotReplicationTarget(workspaceId, targetId);
+        emptySnapshotRequestSchema.parse(await readJsonBody(request, 16 * 1024));
+        const rawTarget = this.snapshotReplicationTargets.get(targetId)!;
+        json(response, 200, {
+          probe: {
+            target_id: targetId,
+            ...(await this.runSnapshotStoreProbe(store, rawTarget)),
+          },
+        });
+        return;
+      }
+
       const snapshotReplicationTargetsMatch =
         /^\/v1\/workspaces\/([^/]+)\/snapshot-replication-targets$/.exec(pathname);
       if (request.method === "GET" && snapshotReplicationTargetsMatch) {
@@ -2187,13 +2520,7 @@ class HttpContextService {
                   : Math.max(0, metric.replicationLagMs),
               };
             })(),
-            health: (() => {
-              const failures = metricsByTarget.get(targetId)?.consecutiveFailures ?? 0;
-              if (failures >= 3) return "unhealthy";
-              if (failures > 0) return "degraded";
-              if ((metricsByTarget.get(targetId)?.succeeded ?? 0) > 0) return "healthy";
-              return "unknown";
-            })(),
+            health: replicationTargetHealth(metricsByTarget.get(targetId)),
             alert: (() => {
               const metric = metricsByTarget.get(targetId);
               return metric && metric.consecutiveFailures >= 3
@@ -2454,6 +2781,29 @@ class HttpContextService {
         if (!job) throw new HttpError(409, "Only failed snapshot jobs can be retried");
         this.snapshotRunner.enqueue(job.id);
         json(response, 202, { job: snapshotJobPayload(job) });
+        return;
+      }
+
+      const snapshotJobCancelMatch =
+        /^\/v1\/workspaces\/([^/]+)\/snapshot-jobs\/([^/]+)\/cancel$/.exec(pathname);
+      if (request.method === "POST" && snapshotJobCancelMatch) {
+        const workspaceId = decodeURIComponent(snapshotJobCancelMatch[1]);
+        await this.requireWorkspaceAccess(principal, workspaceId, "owner");
+        emptySnapshotRequestSchema.parse(await readJsonBody(request, 16 * 1024));
+        const jobId = decodeURIComponent(snapshotJobCancelMatch[2]);
+        const existing = await this.repository.getSnapshotJob(jobId);
+        if (!existing || existing.workspaceId !== workspaceId) {
+          throw new HttpError(404, "Snapshot job not found");
+        }
+        const outcome = await this.repository.requestSnapshotJobCancellation(jobId);
+        if (!outcome) throw new HttpError(404, "Snapshot job not found");
+        if (!outcome.accepted) {
+          throw new HttpError(
+            409,
+            `Snapshot job already ${outcome.job.status}; nothing to cancel`,
+          );
+        }
+        json(response, 202, { job: snapshotJobPayload(outcome.job) });
         return;
       }
 
@@ -2918,8 +3268,18 @@ class HttpContextService {
         const input = z
           .object({ mode: z.enum(["incremental", "rebuild"]).default("incremental") })
           .parse(await readJsonBody(request, 64 * 1024));
+        if (workspace.sourceMode === "local" && !this.indexJobExecutorId) {
+          throw new HttpError(
+            409,
+            "This instance is not an eligible executor for local workspace jobs",
+          );
+        }
         const job = await this.repository.createIndexJob({
           workspaceId,
+          executorId:
+            workspace.sourceMode === "local"
+              ? this.indexJobExecutorId
+              : null,
           revision: workspace.revision,
           mode: input.mode,
           changedPaths: null,
@@ -3778,14 +4138,14 @@ class HttpContextService {
   }
 
   private requireSnapshotStore(workspaceId: string): SnapshotObjectStore {
-    if (!this.snapshotStore) {
+    if (!this.guardedSnapshotStore) {
       throw new HttpError(
         503,
         "Snapshot object store is not configured",
       );
     }
     return new PrefixedSnapshotObjectStore(
-      this.snapshotStore,
+      this.guardedSnapshotStore,
       `workspaces/${sha256(workspaceId).slice(0, 32)}`,
     );
   }
@@ -3802,7 +4162,7 @@ class HttpContextService {
     workspaceId: string,
     targetId: string,
   ): SnapshotObjectStore {
-    const target = this.snapshotReplicationTargets.get(targetId);
+    const target = this.guardedSnapshotReplicationTargets.get(targetId);
     if (!target) {
       throw new HttpError(404, `Snapshot replication target not found: ${targetId}`);
     }
@@ -3810,6 +4170,54 @@ class HttpContextService {
       target,
       `workspaces/${sha256(workspaceId).slice(0, 32)}`,
     );
+  }
+
+  /** Run one bounded, credential-free probe against a workspace-scoped store.
+   * The raw (unwrapped) store only feeds type detection and filesystem
+   * capacity — probe traffic goes through the same prefixed store real
+   * snapshot operations use. */
+  private async runSnapshotStoreProbe(
+    store: SnapshotObjectStore,
+    rawStore: SnapshotObjectStore,
+  ): Promise<Record<string, unknown>> {
+    const result = await probeSnapshotObjectStore(store, {
+      operationTimeoutMs: this.snapshotProbeTimeoutMs,
+      capacity:
+        rawStore instanceof FilesystemSnapshotStore
+          ? async () => {
+              const stats = await statfs(rawStore.root);
+              return {
+                availableBytes: stats.bavail * stats.bsize,
+                totalBytes: stats.blocks * stats.bsize,
+              };
+            }
+          : undefined,
+    });
+    return {
+      ok: result.ok,
+      store: { type: snapshotStoreType(rawStore) },
+      capabilities: {
+        list: result.capabilities.list,
+        head: result.capabilities.head,
+        conditional_write: result.capabilities.conditionalWrite,
+      },
+      checks: result.checks.map((check) => ({
+        operation: check.operation,
+        status: check.status,
+        ...(check.latencyMs === undefined ? {} : { latency_ms: check.latencyMs }),
+        ...(check.classification ? { classification: check.classification } : {}),
+        ...(check.error ? { error: check.error } : {}),
+      })),
+      capacity: result.capacity
+        ? {
+            available_bytes: result.capacity.availableBytes,
+            total_bytes: result.capacity.totalBytes,
+          }
+        : null,
+      operation_timeout_ms: result.operationTimeoutMs,
+      duration_ms: result.durationMs,
+      probed_at: new Date().toISOString(),
+    };
   }
 
   private async requireIndexedEngine(workspace: StoredWorkspace): Promise<ContextEngine> {
@@ -3880,11 +4288,16 @@ class HttpContextService {
     });
     let closed = false;
     let heartbeat: NodeJS.Timeout | null = null;
+    let statusPoll: NodeJS.Timeout | null = null;
+    let pollInFlight = false;
+    const eventEpoch = new MonotonicPollEpoch();
+    let lastPayload = "";
     let unsubscribe = (): void => undefined;
     const cleanup = (): void => {
       if (closed) return;
       closed = true;
       if (heartbeat) clearInterval(heartbeat);
+      if (statusPoll) clearInterval(statusPoll);
       unsubscribe();
       request.off("aborted", cleanup);
       response.off("close", cleanup);
@@ -3894,10 +4307,48 @@ class HttpContextService {
     };
     const send = (job: StoredIndexJob): void => {
       if (closed) return;
-      response.write(`event: job\ndata: ${JSON.stringify({ job: jobPayload(job) })}\n\n`);
+      const payload = JSON.stringify({ job: jobPayload(job) });
+      if (payload === lastPayload) return;
+      if (response.writableLength >= 64 * 1024) return;
+      lastPayload = payload;
+      response.write(`event: job\ndata: ${payload}\n\n`);
       if (isTerminalJobStatus(job.status)) cleanup();
     };
-    unsubscribe = this.runner.subscribe(initial.id, send);
+    unsubscribe = this.runner.subscribe(initial.id, (job) => {
+      eventEpoch.noteLocalEvent();
+      send(job);
+    });
+    statusPoll = setInterval(() => {
+      if (closed || pollInFlight) return;
+      pollInFlight = true;
+      const pollEpoch = eventEpoch.beginPoll();
+      void this.repository
+        .getIndexJob(initial.id)
+        .then((job) => {
+          if (!eventEpoch.isCurrent(pollEpoch)) return;
+          if (job) {
+            send(job);
+            return;
+          }
+          // Workspace deletion cascades the job row away. Without a terminal
+          // frame the stream would idle on keepalives forever.
+          if (closed) return;
+          if (response.writableLength < 64 * 1024) {
+            response.write(`event: gone\ndata: {"job":null}\n\n`);
+          }
+          cleanup();
+        })
+        .catch((error: unknown) => {
+          console.error(
+            `[index jobs] SSE poll failed for ${initial.id}:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        })
+        .finally(() => {
+          pollInFlight = false;
+        });
+    }, this.indexJobPollIntervalMs);
+    statusPoll.unref();
     heartbeat = setInterval(() => {
       if (!closed && response.writableLength < 64 * 1024) {
         response.write(": keepalive\n\n");
@@ -4047,7 +4498,7 @@ function parseHistoryLimit(value: string | null): number {
 }
 
 function isTerminalJobStatus(status: string): boolean {
-  return status === "succeeded" || status === "failed";
+  return status === "succeeded" || status === "failed" || status === "cancelled";
 }
 
 async function writeSnapshotJobEvent(

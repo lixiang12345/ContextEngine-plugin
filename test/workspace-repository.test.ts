@@ -26,33 +26,12 @@ function repositoryWithRows(rows: SourceRow[]): WorkspaceRepository {
   return new RepositoryConstructor(pool);
 }
 
-function repositoryWithLockClient(options: {
-  acquired?: boolean;
-  events: string[];
-  runningWorkspace?: string;
-}): WorkspaceRepository {
-  const client = {
-    query: async (text: string) => {
-      options.events.push(text);
-      if (text.includes("hashtextextended")) return { rows: [{ key: "42" }] };
-      if (text.includes("pg_try_advisory_lock")) {
-        return { rows: [{ acquired: options.acquired ?? true }] };
-      }
-      return { rows: [] };
-    },
-    release: () => options.events.push("release"),
-  };
+function repositoryCapturingQueries(
+  captured: { text: string; values: unknown[] }[],
+): WorkspaceRepository {
   const pool = {
-    connect: async () => client,
-    query: async (text: string) => {
-      options.events.push(`pool:${text}`);
-      if (text.includes("SELECT DISTINCT workspace_id")) {
-        return {
-          rows: options.runningWorkspace
-            ? [{ workspace_id: options.runningWorkspace }]
-            : [],
-        };
-      }
+    query: async (text: string, values: unknown[]) => {
+      captured.push({ text, values });
       return { rows: [] };
     },
   } as unknown as Pool;
@@ -158,41 +137,30 @@ describe("source path policy", () => {
   });
 });
 
-describe("WorkspaceRepository index locks", () => {
-  it("holds and releases a workspace advisory lock around an operation", async () => {
-    const events: string[] = [];
-    const repository = repositoryWithLockClient({ events });
-    await repository.withIndexJobLock("workspace", async () => {
-      events.push("operation");
-    });
+describe("WorkspaceRepository stranded local jobs", () => {
+  it("scopes the stranded scan to foreign-executor local jobs and clamps the limit", async () => {
+    const captured: { text: string; values: unknown[] }[] = [];
+    const repository = repositoryCapturingQueries(captured);
 
-    assert.equal(events[0].includes("hashtextextended"), true);
-    assert.equal(events[1].includes("pg_advisory_lock"), true);
-    assert.equal(events[2], "operation");
-    assert.equal(events[3].includes("pg_advisory_unlock"), true);
-    assert.equal(events[4], "release");
+    const jobs = await repository.listStrandedLocalIndexJobs("executor-a", 500);
+
+    assert.deepEqual(jobs, []);
+    const [call] = captured;
+    assert.ok(call, "expected one query");
+    assert.equal(call.text.includes("executor_id <> $1::text"), true);
+    assert.equal(call.text.includes("source_mode = 'local'"), true);
+    assert.equal(call.text.includes("('queued', 'running')"), true);
+    assert.deepEqual(call.values, ["executor-a", 100]);
   });
 
-  it("does not recover a running job while another instance owns the lock", async () => {
-    const events: string[] = [];
-    const repository = repositoryWithLockClient({
-      acquired: false,
-      events,
-      runningWorkspace: "workspace",
-    });
-    await repository.markRunningJobsFailed();
-    assert.equal(events.some((event) => event.includes("UPDATE ce_index_jobs")), false);
-  });
+  it("bounds the periodic runnable scan", async () => {
+    const captured: { text: string; values: unknown[] }[] = [];
+    const repository = repositoryCapturingQueries(captured);
 
-  it("recovers an abandoned running job after acquiring its workspace lock", async () => {
-    const events: string[] = [];
-    const repository = repositoryWithLockClient({
-      acquired: true,
-      events,
-      runningWorkspace: "workspace",
-    });
-    await repository.markRunningJobsFailed();
-    assert.equal(events.some((event) => event.includes("UPDATE ce_index_jobs")), true);
-    assert.equal(events.some((event) => event.includes("pg_advisory_unlock")), true);
+    await repository.listRunnableIndexJobs(60_000, "executor-a");
+
+    const [call] = captured;
+    assert.ok(call, "expected one query");
+    assert.equal(call.text.includes("LIMIT 100"), true);
   });
 });

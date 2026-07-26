@@ -1,18 +1,86 @@
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 import pgvector from "pgvector/pg";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { CodeChunk, IndexStats, SourcePathPolicy } from "../types.js";
 import { extractSymbolNames } from "../chunker/code-chunker.js";
 import { extractImports } from "../graph/symbol-graph.js";
 import { tokenize } from "../search/bm25.js";
+import { scorePathHint } from "../search/path-hints.js";
 
 export const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 18;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
 const GENERATION_GC_BATCH = 8;
+
+// Shared by the v16 and v17 migration blocks: databases stamped 16 by builds
+// that predate this guard lack the function, so v17 must be able to recreate
+// it before rebuilding the transition trigger.
+const INDEX_JOB_TRANSITION_GUARD_SQL = `CREATE OR REPLACE FUNCTION ce_guard_index_job_transition()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $ce_index_job_transition$
+      BEGIN
+        IF OLD.status = 'queued' THEN
+          IF NEW.status = 'queued' THEN
+            IF NEW.progress IS DISTINCT FROM OLD.progress
+              OR NEW.result IS DISTINCT FROM OLD.result
+              OR NEW.error IS DISTINCT FROM OLD.error
+              OR NEW.attempts IS DISTINCT FROM OLD.attempts
+              OR NEW.locked_at IS DISTINCT FROM OLD.locked_at
+              OR NEW.lock_token IS DISTINCT FROM OLD.lock_token
+              OR NEW.started_at IS DISTINCT FROM OLD.started_at
+              OR NEW.completed_at IS DISTINCT FROM OLD.completed_at THEN
+              RAISE EXCEPTION 'queued index jobs may only be claimed'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSIF NEW.status = 'running' THEN
+            IF NEW.attempts <> OLD.attempts + 1 THEN
+              RAISE EXCEPTION 'index-job claim must create one attempt'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSE
+            RAISE EXCEPTION 'queued index jobs cannot become terminal'
+              USING ERRCODE = '23514';
+          END IF;
+        ELSIF OLD.status = 'running' THEN
+          IF NEW.status = 'running' THEN
+            IF NEW.attempts = OLD.attempts THEN
+              IF NEW.lock_token IS DISTINCT FROM OLD.lock_token THEN
+                RAISE EXCEPTION 'index-job heartbeat must retain its attempt token'
+                  USING ERRCODE = '23514';
+              END IF;
+              IF NEW.progress IS DISTINCT FROM OLD.progress
+                AND NEW.locked_at IS NOT DISTINCT FROM OLD.locked_at THEN
+                RAISE EXCEPTION 'index-job progress must renew its lease'
+                  USING ERRCODE = '23514';
+              END IF;
+            ELSIF NEW.attempts = OLD.attempts + 1 THEN
+              IF NEW.lock_token IS NULL OR NEW.lock_token = OLD.lock_token THEN
+                RAISE EXCEPTION 'index-job takeover requires a new attempt token'
+                  USING ERRCODE = '23514';
+              END IF;
+            ELSE
+              RAISE EXCEPTION 'invalid index-job attempt transition'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSIF NEW.status IN ('queued', 'succeeded', 'failed') THEN
+            IF NEW.attempts <> OLD.attempts THEN
+              RAISE EXCEPTION 'index-job terminal transition cannot change attempts'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSE
+            RAISE EXCEPTION 'invalid index-job status transition'
+              USING ERRCODE = '23514';
+          END IF;
+        ELSIF NEW IS DISTINCT FROM OLD THEN
+          RAISE EXCEPTION 'terminal index jobs are immutable'
+            USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+      END;
+      $ce_index_job_transition$;`;
 
 export interface StoreSearchFilter {
   pathPrefix?: string;
@@ -26,6 +94,8 @@ interface PostgresStoreOptions {
   workspaceId: string;
   /** Hold a cross-process workspace lock for the full indexing operation. */
   lockWorkspace?: boolean;
+  /** Cancel a pending workspace lock wait during lease loss or shutdown. */
+  signal?: AbortSignal;
 }
 
 interface FileMetadata {
@@ -142,6 +212,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms);
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("Operation aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function pgErrorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
     ? String((error as { code?: unknown }).code)
@@ -234,7 +320,10 @@ export class PostgresStore {
         }
       }
       if (options.lockWorkspace && options.workspaceId) {
-        const lock = await bootstrap.acquireWorkspaceLock(options.workspaceId);
+        const lock = await bootstrap.acquireWorkspaceLock(
+          options.workspaceId,
+          options.signal,
+        );
         lockClient = lock.client;
         lockKey = lock.key;
       }
@@ -382,7 +471,9 @@ export class PostgresStore {
 
   private async acquireWorkspaceLock(
     logicalWorkspaceId: string,
+    signal?: AbortSignal,
   ): Promise<{ client: PoolClient; key: string }> {
+    signal?.throwIfAborted();
     const client = await this.pool.connect();
     try {
       const result = await client.query<{ key: string }>(
@@ -391,8 +482,15 @@ export class PostgresStore {
       );
       const key = result.rows[0]?.key;
       if (!key) throw new Error("Unable to derive workspace index lock key");
-      await client.query(`SELECT pg_advisory_lock($1::bigint)`, [key]);
-      return { client, key };
+      for (;;) {
+        signal?.throwIfAborted();
+        const lock = await client.query<{ acquired: boolean }>(
+          `SELECT pg_try_advisory_lock($1::bigint) AS acquired`,
+          [key],
+        );
+        if (lock.rows[0]?.acquired === true) return { client, key };
+        await abortableSleep(100, signal);
+      }
     } catch (error) {
       client.release();
       throw error;
@@ -614,16 +712,29 @@ export class PostgresStore {
   /** Mark a failed staging generation and remove its searchable rows. */
   async discardGeneration(): Promise<void> {
     if (this.generationId === "legacy") return;
-    try {
-      await this.clearWorkspace();
-    } finally {
-      await this.query(
-        `UPDATE ce_workspace_generations
-         SET status = 'failed', pending_revision = NULL, updated_at = now()
-         WHERE id = $1`,
+    await this.transaction(async (tx) => {
+      const eligible = await tx.query<{ id: string }>(
+        `SELECT g.id
+         FROM ce_workspace_generations g
+         WHERE g.id = $1
+           AND g.status = 'building'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM ce_workspace_aliases a
+             WHERE a.generation_id = g.id
+           )
+         FOR UPDATE`,
         [this.generationId],
       );
-    }
+      if (!eligible.rows.length) return;
+      await tx.clearWorkspace();
+      await tx.query(
+        `UPDATE ce_workspace_generations
+         SET status = 'failed', pending_revision = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'building'`,
+        [this.generationId],
+      );
+    });
   }
 
   /** Return false when this reader is pinned to a retired generation. */
@@ -691,6 +802,46 @@ export class PostgresStore {
       }
       return candidates.rows.length;
     });
+  }
+
+  /**
+   * Refresh planner statistics after a bulk generation build. New generation
+   * workspace ids are absent from the previous column statistics and can be
+   * underestimated by orders of magnitude until autovacuum analyzes them.
+   */
+  async refreshPlannerStatistics(
+    timeoutMs = Number(
+      process.env.CONTEXTENGINE_INDEX_ANALYZE_TIMEOUT_MS || 30_000,
+    ),
+  ): Promise<boolean> {
+    // A malformed env value ("30s") yields NaN, which would survive the
+    // clamp, break set_config, and silently disable every refresh.
+    const requestedTimeout = Number.isFinite(timeoutMs) ? timeoutMs : 30_000;
+    const boundedTimeout = Math.max(1_000, Math.min(300_000, requestedTimeout));
+    try {
+      await this.transaction(async (tx) => {
+        await tx.query(
+          `SELECT set_config('statement_timeout', $1, true),
+                  set_config('lock_timeout', $2, true)`,
+          [`${boundedTimeout}ms`, `${Math.min(5_000, boundedTimeout)}ms`],
+        );
+        for (const table of [
+          "ce_files",
+          "ce_chunks",
+          "ce_symbols",
+          "ce_imports",
+          "ce_embeddings",
+        ]) {
+          await tx.query(`ANALYZE ${table}`);
+        }
+      });
+      return true;
+    } catch {
+      // Statistics improve immediate query plans but do not affect index
+      // correctness. Autovacuum remains the fallback on restricted or busy
+      // deployments, and index metadata records that this refresh failed.
+      return false;
+    }
   }
 
   async generationStatus(): Promise<IndexGenerationStatus> {
@@ -1139,42 +1290,53 @@ export class PostgresStore {
     limit: number,
     filter?: StoreSearchFilter,
   ): Promise<Array<{ id: string; score: number }>> {
-    const scores = new Map<string, number>();
-    for (const name of names) {
-      const lower = name.toLowerCase();
-      const params: unknown[] = [this.workspaceId, lower, `${lower}%`, `%${lower}%`];
-      const where = this.filterSql(params, filter, "c");
-      params.push(limit);
-      const result = await this.query<{ id: string; score: number }>(
-        `SELECT s.chunk_id AS id,
+    const normalized = [
+      ...new Set(
+        names
+          .map((name) => name.trim().toLowerCase())
+          .filter((name) => name.length >= 2),
+      ),
+    ].slice(0, 128);
+    if (!normalized.length) return [];
+    const params: unknown[] = [this.workspaceId, normalized];
+    const where = this.filterSql(params, filter, "c");
+    params.push(limit);
+    const result = await this.query<{ id: string; score: number }>(
+      `WITH hints(name) AS (
+         SELECT unnest($2::text[])
+       ), matches AS (
+         SELECT s.chunk_id AS id, hints.name,
            MAX(
              CASE
-               WHEN s.name_lower = $2 THEN 3.0
-               WHEN s.name_lower LIKE $3 THEN 1.5
-               WHEN length($2) >= 4 AND s.name_lower LIKE $4 THEN 0.8
+               WHEN s.name_lower = hints.name THEN 3.0
+               WHEN starts_with(s.name_lower, hints.name) THEN 1.5
+               WHEN length(hints.name) >= 4
+                 AND position(hints.name IN s.name_lower) > 0 THEN 0.8
                ELSE 0
              END
-           ) AS score
+           ) AS hint_score
          FROM ce_symbols s
+         JOIN hints ON (
+           s.name_lower = hints.name
+           OR starts_with(s.name_lower, hints.name)
+           OR (
+             length(hints.name) >= 4
+             AND position(hints.name IN s.name_lower) > 0
+           )
+         )
          JOIN ce_chunks c
            ON c.workspace_id = s.workspace_id AND c.id = s.chunk_id
-         WHERE s.workspace_id = $1
-           AND (s.name_lower = $2 OR s.name_lower LIKE $3
-             OR (length($2) >= 4 AND s.name_lower LIKE $4))
-           AND ${where}
-         GROUP BY s.chunk_id
-         ORDER BY score DESC
-         LIMIT $${params.length}`,
-        params,
-      );
-      for (const row of result.rows) {
-        scores.set(row.id, Math.max(scores.get(row.id) ?? 0, Number(row.score)));
-      }
-    }
-    return [...scores.entries()]
-      .map(([id, score]) => ({ id, score }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
+         WHERE s.workspace_id = $1 AND ${where}
+         GROUP BY s.chunk_id, hints.name
+       )
+       SELECT id, SUM(hint_score) AS score
+       FROM matches
+       GROUP BY id
+       ORDER BY score DESC
+       LIMIT $${params.length}`,
+      params,
+    );
+    return result.rows.map((row) => ({ id: row.id, score: Number(row.score) }));
   }
 
   async searchByPathHints(
@@ -1202,14 +1364,7 @@ export class PostgresStore {
     );
     const scores = new Map<string, number>();
     for (const row of result.rows) {
-      const base = path.basename(row.path).toLowerCase();
-      const stem = base.replace(/\.[^.]+$/, "");
-      const score =
-        stem === row.hint
-          ? 3.2
-          : base.startsWith(`${row.hint}.`)
-            ? 3
-            : 2;
+      const score = scorePathHint(row.path, row.hint);
       scores.set(row.id, Math.max(scores.get(row.id) ?? 0, score));
     }
     return [...scores.entries()]
@@ -1300,7 +1455,9 @@ export class PostgresStore {
     };
 
     if (symbols.size) {
-      addIds(await this.searchSymbols([...symbols], limit, filter));
+      addIds(
+        await this.searchSymbols([...symbols].slice(0, 32), limit, filter),
+      );
     }
 
     const forward = await this.query<{ target_spec: string }>(
@@ -1789,6 +1946,7 @@ export class PostgresStore {
       CREATE TABLE IF NOT EXISTS ce_index_jobs (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+        executor_id TEXT,
         revision BIGINT NOT NULL,
         mode TEXT NOT NULL CHECK (mode IN ('incremental', 'rebuild')),
         changed_paths JSONB,
@@ -1797,12 +1955,18 @@ export class PostgresStore {
         progress JSONB,
         result JSONB,
         error TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        locked_at TIMESTAMPTZ,
+        lock_token TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         started_at TIMESTAMPTZ,
         completed_at TIMESTAMPTZ
       );
       CREATE INDEX IF NOT EXISTS ce_index_jobs_workspace_idx
         ON ce_index_jobs(workspace_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS ce_index_jobs_runnable_idx
+        ON ce_index_jobs(status, created_at, id)
+        WHERE status IN ('queued', 'running');
         `);
           await client.query(
             `INSERT INTO ce_schema_version(singleton, version)
@@ -2590,6 +2754,374 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [15],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 16) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      -- ce_index_jobs is otherwise created only by the fresh-install DDL, so a
+      -- database (or fixture schema) upgrading from a version that predates it
+      -- would resolve the unqualified DDL below to another schema on the
+      -- search_path. Create the pre-v16 shape here so everything binds locally.
+      CREATE TABLE IF NOT EXISTS ce_index_jobs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES ce_workspaces(id) ON DELETE CASCADE,
+        revision BIGINT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('incremental', 'rebuild')),
+        changed_paths JSONB,
+        deleted_paths JSONB,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+        progress JSONB,
+        result JSONB,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS ce_index_jobs_workspace_idx
+        ON ce_index_jobs(workspace_id, created_at DESC);
+
+      -- Old runners have no attempt token. Requeue their in-flight rows while
+      -- holding a write-conflicting lock, then require every future running
+      -- transition and terminal write to carry the durable lease fields.
+      LOCK TABLE ce_index_jobs IN SHARE ROW EXCLUSIVE MODE;
+
+      ALTER TABLE ce_index_jobs
+        ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS lock_token TEXT;
+
+      UPDATE ce_index_jobs
+      SET status = 'queued',
+          progress = jsonb_build_object(
+            'phase', 'queued',
+            'recovered_from', 'schema_v16'
+          ),
+          error = NULL,
+          completed_at = NULL,
+          locked_at = NULL,
+          lock_token = NULL
+      WHERE status = 'running';
+
+      ALTER TABLE ce_index_jobs
+        DROP CONSTRAINT IF EXISTS ce_index_jobs_attempts_nonnegative,
+        DROP CONSTRAINT IF EXISTS ce_index_jobs_lease_state;
+      ALTER TABLE ce_index_jobs
+        ADD CONSTRAINT ce_index_jobs_attempts_nonnegative
+          CHECK (attempts >= 0),
+        ADD CONSTRAINT ce_index_jobs_lease_state
+          CHECK (
+            (
+              status = 'running'
+              AND attempts > 0
+              AND locked_at IS NOT NULL
+              AND lock_token IS NOT NULL
+            )
+            OR (
+              status <> 'running'
+              AND locked_at IS NULL
+              AND lock_token IS NULL
+            )
+          );
+
+      -- A v15 worker can remain in memory during a rolling upgrade. It lacks
+      -- lock-token predicates, so reject its old queued-progress and queued-
+      -- terminal writes after recovered work has been requeued. New v16 paths
+      -- either claim a new attempt or mutate an owned running attempt.
+      ${INDEX_JOB_TRANSITION_GUARD_SQL}
+
+      DROP TRIGGER IF EXISTS ce_index_job_transition_guard ON ce_index_jobs;
+      CREATE TRIGGER ce_index_job_transition_guard
+        BEFORE UPDATE ON ce_index_jobs
+        FOR EACH ROW EXECUTE FUNCTION ce_guard_index_job_transition();
+
+      CREATE INDEX IF NOT EXISTS ce_index_jobs_runnable_idx
+        ON ce_index_jobs(status, created_at, id)
+        WHERE status IN ('queued', 'running');
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [16],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 17) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      LOCK TABLE ce_index_jobs IN SHARE ROW EXCLUSIVE MODE;
+
+      ALTER TABLE ce_index_jobs
+        ADD COLUMN IF NOT EXISTS executor_id TEXT;
+
+      -- v16 had no durable way to prove that a restarted process could read
+      -- the same local path. Surface those orphaned rows as terminal failures
+      -- instead of leaving them queued/running forever or letting a foreign
+      -- replica index different bytes from the same path.
+      DROP TRIGGER IF EXISTS ce_index_job_transition_guard ON ce_index_jobs;
+      UPDATE ce_index_jobs j
+      SET status = 'failed',
+          progress = jsonb_build_object(
+            'phase', 'failed',
+            'reason', 'executor_affinity_required',
+            'recovered_from', 'schema_v17'
+          ),
+          error = 'Local index job requires persistent executor affinity; retry on an eligible v17 executor',
+          completed_at = clock_timestamp(),
+          locked_at = NULL,
+          lock_token = NULL
+      FROM ce_workspaces w
+      WHERE w.id = j.workspace_id
+        AND w.source_mode = 'local'
+        AND j.executor_id IS NULL
+        AND j.status IN ('queued', 'running');
+
+      -- Databases stamped 16 by builds that predate the transition guard have
+      -- no ce_guard_index_job_transition(); recreate it so this upgrade heals.
+      ${INDEX_JOB_TRANSITION_GUARD_SQL}
+
+      CREATE TRIGGER ce_index_job_transition_guard
+        BEFORE UPDATE ON ce_index_jobs
+        FOR EACH ROW EXECUTE FUNCTION ce_guard_index_job_transition();
+
+      ALTER TABLE ce_index_jobs
+        DROP CONSTRAINT IF EXISTS ce_index_jobs_executor_id_format;
+      ALTER TABLE ce_index_jobs
+        ADD CONSTRAINT ce_index_jobs_executor_id_format
+          CHECK (
+            executor_id IS NULL
+            OR executor_id ~ '^[A-Za-z0-9._:-]{1,128}$'
+          );
+
+      CREATE OR REPLACE FUNCTION ce_guard_index_job_executor()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $ce_index_job_executor$
+      BEGIN
+        IF NEW.executor_id IS DISTINCT FROM OLD.executor_id THEN
+          RAISE EXCEPTION 'index-job executor affinity is immutable'
+            USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+      END;
+      $ce_index_job_executor$;
+
+      DROP TRIGGER IF EXISTS ce_index_job_executor_guard ON ce_index_jobs;
+      CREATE TRIGGER ce_index_job_executor_guard
+        BEFORE UPDATE ON ce_index_jobs
+        FOR EACH ROW EXECUTE FUNCTION ce_guard_index_job_executor();
+
+      CREATE INDEX IF NOT EXISTS ce_index_jobs_executor_runnable_idx
+        ON ce_index_jobs(executor_id, status, created_at, id)
+        WHERE executor_id IS NOT NULL AND status IN ('queued', 'running');
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [17],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 18) {
+          await client.query("BEGIN");
+          try {
+            await client.query(`
+      LOCK TABLE ce_snapshot_jobs IN SHARE ROW EXCLUSIVE MODE;
+
+      -- Owner-requested cancellation: queued jobs terminalize immediately,
+      -- running jobs carry a durable flag until the owning worker observes it
+      -- on lease renewal and writes the fenced 'cancelled' terminal state.
+      ALTER TABLE ce_snapshot_jobs
+        ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ;
+
+      ALTER TABLE ce_snapshot_jobs
+        DROP CONSTRAINT IF EXISTS ce_snapshot_jobs_status_check;
+      ALTER TABLE ce_snapshot_jobs
+        ADD CONSTRAINT ce_snapshot_jobs_status_check
+          CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled'));
+
+      ALTER TABLE ce_snapshot_job_attempts
+        DROP CONSTRAINT IF EXISTS ce_snapshot_job_attempts_status_check;
+      ALTER TABLE ce_snapshot_job_attempts
+        ADD CONSTRAINT ce_snapshot_job_attempts_status_check
+          CHECK (status IN (
+            'running', 'succeeded', 'failed', 'retry_scheduled', 'lease_expired',
+            'cancelled'
+          ));
+
+      ALTER TABLE ce_snapshot_job_events
+        DROP CONSTRAINT IF EXISTS ce_snapshot_job_events_kind_check;
+      ALTER TABLE ce_snapshot_job_events
+        ADD CONSTRAINT ce_snapshot_job_events_kind_check
+          CHECK (kind IN (
+            'snapshot', 'queued', 'attempt_started', 'lease_takeover',
+            'progress', 'retry_scheduled', 'manual_retry', 'succeeded', 'failed',
+            'cancel_requested', 'cancelled'
+          ));
+      ALTER TABLE ce_snapshot_job_events
+        DROP CONSTRAINT IF EXISTS ce_snapshot_job_events_status_check;
+      ALTER TABLE ce_snapshot_job_events
+        ADD CONSTRAINT ce_snapshot_job_events_status_check
+          CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled'));
+
+      -- Retention deletes scan by age; the (job_id, event_id) index cannot
+      -- serve a pure created_at predicate.
+      CREATE INDEX IF NOT EXISTS ce_snapshot_job_events_created_idx
+        ON ce_snapshot_job_events(created_at);
+
+      CREATE OR REPLACE FUNCTION ce_record_snapshot_job_audit()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $ce_snapshot_job_audit$
+      DECLARE
+        audit_attempt INTEGER;
+        audit_kind TEXT;
+        audit_details JSONB := '{}'::jsonb;
+        audit_now TIMESTAMPTZ := clock_timestamp();
+      BEGIN
+        IF TG_OP = 'INSERT' THEN
+          audit_kind := 'queued';
+        ELSE
+          IF NEW.status = 'running' AND NEW.attempts > OLD.attempts THEN
+            SELECT attempt INTO audit_attempt
+            FROM ce_snapshot_job_attempts
+            WHERE job_id = NEW.id AND status = 'running'
+            ORDER BY attempt DESC
+            LIMIT 1;
+
+            IF audit_attempt IS NOT NULL THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'lease_expired',
+                  error = COALESCE(error, 'Lease expired and attempt was replaced'),
+                  completed_at = audit_now,
+                  last_heartbeat_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_details := jsonb_build_object(
+                'replaced_attempt', audit_attempt
+              );
+            END IF;
+
+            SELECT COALESCE(MAX(attempt), 0) + 1 INTO audit_attempt
+            FROM ce_snapshot_job_attempts
+            WHERE job_id = NEW.id;
+
+            INSERT INTO ce_snapshot_job_attempts(
+              job_id, attempt, budget_attempt, status, progress,
+              started_at, last_heartbeat_at
+            ) VALUES (
+              NEW.id, audit_attempt, NEW.attempts, 'running', NEW.progress,
+              audit_now, audit_now
+            );
+            audit_kind := CASE
+              WHEN OLD.status = 'running' THEN 'lease_takeover'
+              ELSE 'attempt_started'
+            END;
+          ELSIF OLD.status = 'running' THEN
+            SELECT attempt INTO audit_attempt
+            FROM ce_snapshot_job_attempts
+            WHERE job_id = NEW.id AND status = 'running'
+            ORDER BY attempt DESC
+            LIMIT 1;
+
+            IF NEW.status = 'succeeded' THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'succeeded', progress = NEW.progress,
+                  result = NEW.result, error = NEW.error,
+                  last_heartbeat_at = audit_now, completed_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'succeeded';
+            ELSIF NEW.status = 'failed' THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'failed', progress = NEW.progress,
+                  result = NEW.result, error = NEW.error,
+                  last_heartbeat_at = audit_now, completed_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'failed';
+            ELSIF NEW.status = 'cancelled' THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'cancelled', progress = NEW.progress,
+                  result = NEW.result, error = NEW.error,
+                  last_heartbeat_at = audit_now, completed_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'cancelled';
+            ELSIF NEW.status = 'queued' THEN
+              UPDATE ce_snapshot_job_attempts
+              SET status = 'retry_scheduled', progress = NEW.progress,
+                  result = NEW.result, error = NEW.error,
+                  last_heartbeat_at = audit_now, completed_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'retry_scheduled';
+            ELSIF NEW.cancel_requested_at IS DISTINCT FROM OLD.cancel_requested_at THEN
+              UPDATE ce_snapshot_job_attempts
+              SET last_heartbeat_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'cancel_requested';
+            ELSIF NEW.progress IS DISTINCT FROM OLD.progress THEN
+              UPDATE ce_snapshot_job_attempts
+              SET progress = NEW.progress, last_heartbeat_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+              audit_kind := 'progress';
+            ELSIF NEW.locked_at IS DISTINCT FROM OLD.locked_at THEN
+              UPDATE ce_snapshot_job_attempts
+              SET last_heartbeat_at = audit_now
+              WHERE job_id = NEW.id AND attempt = audit_attempt;
+            END IF;
+          ELSIF OLD.status = 'queued' AND NEW.status = 'cancelled' THEN
+            audit_kind := 'cancelled';
+          ELSIF OLD.status = 'failed' AND NEW.status = 'queued' THEN
+            audit_kind := 'manual_retry';
+          ELSIF NEW.progress IS DISTINCT FROM OLD.progress THEN
+            audit_kind := 'progress';
+          END IF;
+        END IF;
+
+        IF audit_kind IS NOT NULL THEN
+          INSERT INTO ce_snapshot_job_events(
+            job_id, attempt, kind, status, attempts, details, progress, result, error,
+            next_attempt_at, started_at, completed_at
+          ) VALUES (
+            NEW.id, audit_attempt, audit_kind, NEW.status, NEW.attempts,
+            audit_details, NEW.progress, NEW.result, NEW.error, NEW.next_attempt_at,
+            NEW.started_at, NEW.completed_at
+          );
+          PERFORM pg_notify('ce_snapshot_job_events', NEW.id);
+        END IF;
+        RETURN NEW;
+      END;
+      $ce_snapshot_job_audit$;
+
+      -- Recreate rather than assume: a database stamped by an intermediate
+      -- build may carry the marker without the trigger.
+      DROP TRIGGER IF EXISTS ce_snapshot_job_audit_trigger ON ce_snapshot_jobs;
+      CREATE TRIGGER ce_snapshot_job_audit_trigger
+        AFTER INSERT OR UPDATE ON ce_snapshot_jobs
+        FOR EACH ROW EXECUTE FUNCTION ce_record_snapshot_job_audit();
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [18],
             );
             await client.query("COMMIT");
           } catch (error) {

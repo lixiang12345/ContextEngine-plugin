@@ -101,6 +101,16 @@ describe("request telemetry", () => {
       ),
       "/v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/attempts",
     );
+    assert.equal(
+      observableRoute("/v1/workspaces/workspace-a/snapshots:probe"),
+      "/v1/workspaces/{workspaceId}/snapshots:probe",
+    );
+    assert.equal(
+      observableRoute(
+        "/v1/workspaces/workspace-a/snapshot-replication-targets/region-backup/probe",
+      ),
+      "/v1/workspaces/{workspaceId}/snapshot-replication-targets/{targetId}/probe",
+    );
 
     const telemetry = new RequestTelemetry();
     for (let index = 0; index < 250; index++) {
@@ -149,6 +159,10 @@ describe("observability dashboard", () => {
     assert.match(dashboard, /budget-track/);
     // Workspace rules grounded into the pack are surfaced in the trace panel.
     assert.match(dashboard, /var ruleChips/);
+    // Snapshot target health summary renders from the overview payload.
+    assert.match(dashboard, /id="targetHealthTable"/);
+    assert.match(dashboard, /function renderTargetHealth/);
+    assert.match(dashboard, /Snapshot target health/);
     assert.doesNotMatch(dashboard, /<script[^>]+src=/i);
     assert.doesNotMatch(dashboard, /<link[^>]+href=["']https?:/i);
 

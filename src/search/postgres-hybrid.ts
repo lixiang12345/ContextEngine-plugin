@@ -4,8 +4,9 @@ import type {
   PostgresStore,
   StoreSearchFilter,
 } from "../store/postgres-store.js";
-import { tokenize } from "./bm25.js";
 import { analyzeQuery } from "./query-analyzer.js";
+import { inferPathHints } from "./path-hints.js";
+import { inferSymbolHints } from "./symbol-hints.js";
 import {
   collapseByPath,
   combineFinal,
@@ -46,9 +47,8 @@ interface LexicalChannelHits {
   path: RetrievalHit[];
 }
 
-// Each symbol/path term currently maps to an independent PostgreSQL query.
-// Bound user-controlled fanout until those store calls are implemented as
-// set-based SQL queries.
+// Keep user-controlled retrieval vocabularies bounded even though the store
+// executes each channel in one set-based query.
 const MAX_IDENTIFIER_HINTS = 12;
 const MAX_PATH_HINTS = 24;
 const DEFAULT_MODEL_TIMEOUT_MS = 2_000;
@@ -233,35 +233,21 @@ export class PostgresHybridSearcher {
     };
 
     const identifiers = analyzed.identifiers.slice(0, MAX_IDENTIFIER_HINTS);
-    const pathHints = new Set<string>();
-    const addPathHint = (hint: string): boolean => {
-      if (pathHints.size >= MAX_PATH_HINTS) return false;
-      const value = hint.trim();
-      if (value) pathHints.add(value);
-      return pathHints.size < MAX_PATH_HINTS;
-    };
-    for (const hint of analyzed.pathHints) {
-      if (!addPathHint(hint)) break;
-    }
-    if (pathHints.size < MAX_PATH_HINTS) {
-      for (const identifier of identifiers) {
-        if (!addPathHint(identifier)) break;
-        for (const part of tokenize(identifier)) {
-          if (part.length >= 4 && !addPathHint(part)) break;
-        }
-        if (pathHints.size >= MAX_PATH_HINTS) break;
-      }
-    }
+    const symbolHints = inferSymbolHints(analyzed, MAX_IDENTIFIER_HINTS);
+    const pathHints = inferPathHints(
+      { ...analyzed, identifiers },
+      MAX_PATH_HINTS,
+    );
 
     const searchLexical = async (): Promise<LexicalChannelHits> => {
       const [fts, symbol, path] = await Promise.all([
         store.ftsSearch(opts.query, candidateLimit, filter),
-        identifiers.length
-          ? store.searchSymbols(identifiers, candidateLimit, filter)
+        symbolHints.length
+          ? store.searchSymbols(symbolHints, candidateLimit, filter)
           : Promise.resolve([]),
-        pathHints.size
+        pathHints.length
           ? store.searchByPathHints(
-              [...pathHints],
+              pathHints,
               candidateLimit,
               filter,
             )

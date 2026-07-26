@@ -4,10 +4,10 @@
 
 起始基线：`3420ddf` (`main`)
 
-当前数据库：PostgreSQL schema v15
+当前数据库：PostgreSQL schema v17
 
 当前验证：`npx tsc --noEmit`、`npm run build`、`git diff --check` 与 PostgreSQL
-全量测试 `212/212` 通过。
+全量测试 `249/249` 通过。
 
 Phase 1 状态（2026-07-22）：已选择并实现路径 A。PostgreSQL 持久化哈希后的
 session metadata，后续 JSON POST 在任意实例按请求重建 server/transport；GET/SSE
@@ -123,6 +123,13 @@ event log 为事实源，支持十进制 `Last-Event-ID`/`after_event_id` 重放
 PostgreSQL `LISTEN/NOTIFY` 唤醒和轮询兜底；`SnapshotJobEventWakeup` 是公开可插拔边界，
 owner 也可分页查看 attempt history。下一步进入目标 probe、timeout/capacity、job
 cancellation 与事件保留控制面。
+
+Phase 17 状态（2026-07-26）：schema v17 已将普通 index job 从单进程内存调度升级为
+PostgreSQL claim/lease/attempt-token 模式。所有实例周期扫描 queued/过期任务，progress、
+success、failure 与 graceful release 均按 token fencing；lease 丢失会通过 AbortSignal
+中止文件循环和 embedding 请求，并在 generation promotion 前复核。HTTP 关闭会等待
+runner 收敛并重排当前任务；SSE 同时使用本地事件与数据库轮询，因此非执行实例也能观察
+progress/terminal。v15 running 行迁移时会回到 queued，滚动升级需先 drain 旧 worker。
 
 ## 1. 目标
 

@@ -11,11 +11,16 @@ function capturingStore(): {
   queries: CapturedQuery[];
 } {
   const queries: CapturedQuery[] = [];
-  const pool = {
+  const client = {
     query: async (text: string, values: unknown[] = []) => {
       queries.push({ text, values });
       return { rows: [] };
     },
+    release: () => undefined,
+  };
+  const pool = {
+    query: client.query,
+    connect: async () => client,
   } as unknown as Pool;
   const StoreConstructor = PostgresStore as unknown as new (
     databaseUrl: string,
@@ -132,5 +137,40 @@ describe("PostgresStore batched writes", () => {
 
     assert.equal(queries.length, 1);
     assert.doesNotMatch(queries[0].text, /language <> 'git-commit'/);
+  });
+
+  it("searches a bounded symbol set in one database round trip", async () => {
+    const { store, queries } = capturingStore();
+    const names = Array.from({ length: 200 }, (_, index) => `Symbol${index}`);
+
+    await store.searchSymbols(names, 20);
+
+    assert.equal(queries.length, 1);
+    assert.match(queries[0].text, /unnest\(\$2::text\[\]\)/);
+    assert.match(queries[0].text, /GROUP BY s\.chunk_id, hints\.name/);
+    assert.match(queries[0].text, /SUM\(hint_score\)/);
+    assert.equal((queries[0].values[1] as string[]).length, 128);
+    assert.equal(queries[0].values.at(-1), 20);
+  });
+
+  it("refreshes planner statistics with bounded statement and lock timeouts", async () => {
+    const { store, queries } = capturingStore();
+
+    assert.equal(await store.refreshPlannerStatistics(12_000), true);
+
+    assert.equal(queries[0].text, "BEGIN");
+    assert.match(queries[1].text, /set_config\('statement_timeout'/);
+    assert.deepEqual(queries[1].values, ["12000ms", "5000ms"]);
+    assert.deepEqual(
+      queries.slice(2, -1).map((query) => query.text),
+      [
+        "ANALYZE ce_files",
+        "ANALYZE ce_chunks",
+        "ANALYZE ce_symbols",
+        "ANALYZE ce_imports",
+        "ANALYZE ce_embeddings",
+      ],
+    );
+    assert.equal(queries.at(-1)?.text, "COMMIT");
   });
 });

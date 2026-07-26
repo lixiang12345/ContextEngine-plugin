@@ -113,7 +113,7 @@ export function observableRoute(pathname: string, method?: string): string {
   if (/^\/v1\/workspaces\/[^/]+\/snapshots$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/snapshots";
   }
-  if (/^\/v1\/workspaces\/[^/]+\/snapshots:(prune|gc)$/.test(pathname)) {
+  if (/^\/v1\/workspaces\/[^/]+\/snapshots:(prune|gc|probe)$/.test(pathname)) {
     return pathname.replace(
       /^\/v1\/workspaces\/[^/]+/,
       "/v1/workspaces/{workspaceId}",
@@ -133,6 +133,13 @@ export function observableRoute(pathname: string, method?: string): string {
   }
   if (/^\/v1\/workspaces\/[^/]+\/snapshots\/[^/]+$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/snapshots/{name}";
+  }
+  if (
+    /^\/v1\/workspaces\/[^/]+\/snapshot-replication-targets\/[^/]+\/probe$/.test(
+      pathname,
+    )
+  ) {
+    return "/v1/workspaces/{workspaceId}/snapshot-replication-targets/{targetId}/probe";
   }
   if (/^\/v1\/workspaces\/[^/]+\/snapshot-replication-targets$/.test(pathname)) {
     return "/v1/workspaces/{workspaceId}/snapshot-replication-targets";

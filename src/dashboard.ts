@@ -9,28 +9,28 @@ export function observabilityDashboardHtml(): string {
   <style>
     :root {
       color-scheme: light;
-      --bg: #eef1f4;
+      --bg: #f7f8f8;
       --surface: #ffffff;
-      --surface-muted: #f2f4f6;
-      --sidebar-bg: #10171e;
-      --sidebar-text: #c6d2dc;
-      --sidebar-muted: #7c8b98;
-      --sidebar-line: rgba(255,255,255,0.08);
-      --sidebar-active: #1f2c37;
-      --text: #172027;
-      --muted: #66727c;
-      --line: #dde1e6;
-      --line-strong: #c3ccd3;
-      --accent: #176b4d;
-      --accent-soft: #e5f2ec;
-      --warning: #9a5b08;
-      --warning-soft: #fff2d8;
-      --danger: #a43a32;
-      --danger-soft: #fbe9e7;
-      --info: #255f89;
-      --info-soft: #e8f1f7;
-      --shadow: 0 1px 2px rgba(23, 32, 39, 0.06);
-      --shadow-lg: 0 10px 30px rgba(23, 32, 39, 0.12);
+      --surface-muted: #f1f3f3;
+      --sidebar-bg: #fafbfb;
+      --sidebar-text: #3f4954;
+      --sidebar-muted: #8b949e;
+      --sidebar-line: #e7eaec;
+      --sidebar-active: #eef1f1;
+      --text: #1a2129;
+      --muted: #6a747e;
+      --line: #e7eaec;
+      --line-strong: #d3d8dc;
+      --accent: #0f7a4d;
+      --accent-soft: #e6f3ec;
+      --warning: #92590b;
+      --warning-soft: #fbf1da;
+      --danger: #a63a30;
+      --danger-soft: #fae9e7;
+      --info: #275d86;
+      --info-soft: #e9f1f7;
+      --shadow: 0 1px 2px rgba(20, 28, 36, 0.05);
+      --shadow-lg: 0 10px 30px rgba(20, 28, 36, 0.1);
       --radius: 10px;
       --radius-sm: 7px;
       --sidebar-w: 244px;
@@ -38,28 +38,28 @@ export function observabilityDashboardHtml(): string {
     }
     html[data-theme="dark"] {
       color-scheme: dark;
-      --bg: #0b1117;
-      --surface: #121a22;
-      --surface-muted: #19232d;
-      --sidebar-bg: #0a0f14;
-      --sidebar-text: #c6d2dc;
-      --sidebar-muted: #74838f;
-      --sidebar-line: rgba(255,255,255,0.07);
-      --sidebar-active: #182430;
-      --text: #e6edf3;
-      --muted: #91a0ad;
-      --line: #273440;
-      --line-strong: #3b4b58;
-      --accent: #45c08a;
-      --accent-soft: #17382c;
-      --warning: #e1a84b;
-      --warning-soft: #382b18;
-      --danger: #ef7c73;
-      --danger-soft: #3a211f;
-      --info: #67b7ec;
-      --info-soft: #183247;
-      --shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
-      --shadow-lg: 0 12px 34px rgba(0, 0, 0, 0.45);
+      --bg: #0c0e12;
+      --surface: #14171d;
+      --surface-muted: #1b1f27;
+      --sidebar-bg: #0e1116;
+      --sidebar-text: #b3bcc6;
+      --sidebar-muted: #6b757f;
+      --sidebar-line: #22262e;
+      --sidebar-active: #1b1f27;
+      --text: #e8ebef;
+      --muted: #8a949f;
+      --line: #23272f;
+      --line-strong: #333944;
+      --accent: #3fbf82;
+      --accent-soft: #14342a;
+      --warning: #e0a94d;
+      --warning-soft: #33291a;
+      --danger: #ef8078;
+      --danger-soft: #351f1f;
+      --info: #6bb6ea;
+      --info-soft: #17293a;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+      --shadow-lg: 0 12px 34px rgba(0, 0, 0, 0.5);
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
@@ -145,17 +145,16 @@ export function observabilityDashboardHtml(): string {
       padding: 18px 18px 16px;
     }
     .brand-mark {
-      width: 34px; height: 34px;
+      width: 32px; height: 32px;
       display: grid; place-items: center;
-      border-radius: 9px;
+      border-radius: 8px;
       color: #fff;
-      background: linear-gradient(140deg, #1f8f66, #124e39);
-      font-size: 13px;
-      font-weight: 800;
-      box-shadow: 0 3px 10px rgba(18, 78, 57, 0.5);
+      background: var(--accent);
+      flex: 0 0 auto;
     }
+    .brand-mark svg { width: 19px; height: 19px; }
     .brand-copy { display: grid; gap: 1px; min-width: 0; }
-    .brand-copy strong { font-size: 15px; font-weight: 720; line-height: 1.15; color: #fff; }
+    .brand-copy strong { font-size: 15px; font-weight: 720; line-height: 1.15; color: var(--text); }
     .brand-copy span { font-size: 11px; line-height: 1.15; color: var(--sidebar-muted); }
     .nav { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; flex: 1 1 auto; }
     .nav-heading {
@@ -180,10 +179,11 @@ export function observabilityDashboardHtml(): string {
       transition: background 140ms ease, color 140ms ease;
     }
     .nav-link svg { width: 17px; height: 17px; flex: 0 0 auto; opacity: 0.75; }
-    .nav-link:hover { background: var(--sidebar-active); color: #fff; }
+    .nav-link:hover { background: var(--sidebar-active); color: var(--text); }
     .nav-link.active {
       background: var(--sidebar-active);
-      color: #fff;
+      color: var(--text);
+      font-weight: 620;
       box-shadow: inset 2px 0 0 var(--accent);
     }
     .nav-link.active svg { opacity: 1; color: var(--accent); }
@@ -198,7 +198,7 @@ export function observabilityDashboardHtml(): string {
       text-decoration: none;
       font-size: 12px;
     }
-    .sidebar-foot .top-link:hover { color: #fff; }
+    .sidebar-foot .top-link:hover { color: var(--accent); }
     .sidebar-conn {
       display: flex;
       align-items: center;
@@ -354,12 +354,12 @@ export function observabilityDashboardHtml(): string {
       content: "";
       position: absolute;
       inset: 0 auto 0 0;
-      width: 3px;
-      background: var(--info);
-      opacity: 0.8;
+      width: 2px;
+      background: var(--accent);
+      opacity: 0;
+      transition: opacity 160ms ease;
     }
-    .metric:nth-child(3n)::before { background: var(--accent); }
-    .metric:nth-child(3n+2)::before { background: var(--warning); }
+    .metric:hover::before { opacity: 0.7; }
     .metric:hover { border-color: var(--line-strong); box-shadow: var(--shadow); transform: translateY(-1px); }
     .metric-label { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 650; letter-spacing: 0.03em; }
     .metric-value { margin-top: 9px; font-size: 24px; line-height: 1; font-weight: 720; font-variant-numeric: tabular-nums; }
@@ -527,7 +527,7 @@ export function observabilityDashboardHtml(): string {
   <div id="loadingBar" class="loading-bar" aria-hidden="true"></div>
   <div class="layout">
     <aside id="sidebar" class="sidebar" aria-label="Primary navigation">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">CE</span><span class="brand-copy"><strong>ContextEngine</strong><span>Observability</span></span></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1.4" fill="currentColor" stroke="none"/><path d="M2 13v3"/><path d="M22 13v3"/><circle cx="9" cy="14" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="14" r="1.4" fill="currentColor" stroke="none"/></svg></span><span class="brand-copy"><strong>ContextEngine</strong><span>Observability</span></span></div>
       <nav class="nav" aria-label="Dashboard sections">
         <span class="nav-heading">Monitor</span>
         <a class="nav-link" href="#overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>Overview</a>
@@ -594,6 +594,10 @@ export function observabilityDashboardHtml(): string {
                 <div class="runtime-item"><div class="runtime-key">Storage</div><div class="runtime-value">--</div></div>
               </div>
             </div>
+          </div>
+          <div class="subsection">
+            <div class="section-header"><h2>Snapshot target health</h2><span class="section-note">Replication targets across workspaces</span></div>
+            <div id="targetHealthTable" class="empty">No snapshot store configured.</div>
           </div>
         </section>
         <section id="configuration" class="section">
@@ -790,9 +794,9 @@ export function observabilityDashboardHtml(): string {
   function badge(value) {
     var text = String(value || "unknown");
     var tone = "neutral";
-    if (["online", "indexed", "current", "succeeded", "200", "enabled", "bearer"].indexOf(text) >= 0) tone = "good";
-    else if (["queued", "running", "partial", "indexing", "stale", "building", "unknown"].indexOf(text) >= 0) tone = "warn";
-    else if (["failed", "offline", "error", "unavailable"].indexOf(text) >= 0) tone = "bad";
+    if (["online", "indexed", "current", "succeeded", "200", "enabled", "bearer", "healthy", "configured"].indexOf(text) >= 0) tone = "good";
+    else if (["queued", "running", "partial", "indexing", "stale", "building", "unknown", "degraded", "unconfigured"].indexOf(text) >= 0) tone = "warn";
+    else if (["failed", "offline", "error", "unavailable", "unhealthy"].indexOf(text) >= 0) tone = "bad";
     else if (["blob", "local", "incremental", "rebuild", "none", "effective", "empty"].indexOf(text) >= 0) tone = "info";
     else if (["disabled_by_server"].indexOf(text) >= 0) tone = "warn";
     return "<span class=\"badge " + tone + "\">" + escapeHtml(text) + "</span>";
@@ -1044,6 +1048,26 @@ export function observabilityDashboardHtml(): string {
     byId("routeTable").innerHTML = "<table><caption class=\"sr-only\">Route health</caption><thead><tr><th scope=\"col\">Method</th><th scope=\"col\">Route</th><th scope=\"col\" class=\"number\">Requests</th><th scope=\"col\">Errors</th><th scope=\"col\">P95</th></tr></thead><tbody>" + body + "</tbody></table>";
   }
 
+  function renderTargetHealth(data) {
+    var summary = data.snapshot_targets || {};
+    var container = byId("targetHealthTable");
+    var targets = summary.targets || [];
+    if (!targets.length) {
+      container.className = "empty";
+      container.textContent = summary.store_configured
+        ? "No snapshot replication activity yet."
+        : "No snapshot store configured.";
+      return;
+    }
+    var rows = targets.map(function (target) {
+      var lagMs = target.replication_lag_ms;
+      var lag = lagMs == null ? "--" : lagMs < 60000 ? duration(lagMs) : uptime(lagMs / 1000);
+      return "<tr><td class=\"mono truncate\" title=\"" + escapeHtml(target.id) + "\">" + escapeHtml(target.id) + "</td><td>" + badge(target.health) + "</td><td>" + badge(target.configured ? "configured" : "unconfigured") + "</td><td class=\"number\">" + number(target.succeeded) + "</td><td class=\"number\">" + number(target.failed) + "</td><td class=\"number\">" + number(target.consecutive_failures) + "</td><td>" + timeAgo(target.last_succeeded_at) + "</td><td class=\"number\">" + lag + "</td></tr>";
+    }).join("");
+    container.className = "table-wrap";
+    container.innerHTML = "<table><caption class=\"sr-only\">Snapshot target health</caption><thead><tr><th scope=\"col\">Target</th><th scope=\"col\">Health</th><th scope=\"col\">Configured</th><th scope=\"col\" class=\"number\">Succeeded</th><th scope=\"col\" class=\"number\">Failed</th><th scope=\"col\" class=\"number\">Consecutive</th><th scope=\"col\">Last success</th><th scope=\"col\" class=\"number\">Lag</th></tr></thead><tbody>" + rows + "</tbody></table>";
+  }
+
   function renderWorkspaces(data) {
     var workspaces = data.workspaces || [];
     byId("workspaceNote").textContent = workspaces.length + " configured";
@@ -1130,6 +1154,7 @@ export function observabilityDashboardHtml(): string {
     renderRuntime(data);
     if (!state.configDirty) renderConfiguration(data);
     renderRoutes(data);
+    renderTargetHealth(data);
     renderWorkspaces(data);
     renderJobs(data);
     renderRequests(data);

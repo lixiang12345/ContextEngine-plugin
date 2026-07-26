@@ -11,7 +11,24 @@ export type { NeuralRerankConfig };
 export { resolveNeuralRerankConfig };
 
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
+const MAX_CONFIGURABLE_FILE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_CHUNK_CHARS = 2400;
+
+function resolveMaxFileBytes(explicit?: number): number {
+  const raw = explicit ?? process.env.CONTEXTENGINE_MAX_FILE_BYTES;
+  if (raw === undefined || raw === "") return DEFAULT_MAX_FILE_BYTES;
+  const value = typeof raw === "number" ? raw : Number(raw);
+  if (
+    !Number.isInteger(value) ||
+    value <= 0 ||
+    value > MAX_CONFIGURABLE_FILE_BYTES
+  ) {
+    throw new Error(
+      `CONTEXTENGINE_MAX_FILE_BYTES must be an integer between 1 and ${MAX_CONFIGURABLE_FILE_BYTES}`,
+    );
+  }
+  return value;
+}
 
 /** Load KEY=VALUE pairs from a .env file if present (no dependency). */
 export function loadDotEnv(cwd: string = process.cwd()): void {
@@ -101,7 +118,7 @@ export function resolveEngineConfig(opts: {
     extraIgnores: opts.extraIgnores,
     embeddings: resolveEmbeddingsConfig(),
     neuralRerank: resolveNeuralRerankConfig(),
-    maxFileBytes: opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
+    maxFileBytes: resolveMaxFileBytes(opts.maxFileBytes),
     maxChunkChars: opts.maxChunkChars ?? DEFAULT_MAX_CHUNK_CHARS,
   };
 }

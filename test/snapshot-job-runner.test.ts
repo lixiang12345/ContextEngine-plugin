@@ -30,7 +30,7 @@ describe("snapshot job runner fencing", () => {
         return claimed;
       },
       async renewSnapshotJobLease() {
-        return true;
+        return { renewed: true, cancelRequested: false };
       },
       async withSnapshotArtifactGuard(
         _workspaceId: string,
@@ -44,6 +44,9 @@ describe("snapshot job runner fencing", () => {
       },
       async completeSnapshotJob() {
         completed = true;
+        return null;
+      },
+      async cancelSnapshotJob() {
         return null;
       },
       async failSnapshotJob() {
@@ -97,7 +100,7 @@ describe("snapshot job runner fencing", () => {
         return claimed;
       },
       async renewSnapshotJobLease() {
-        return false;
+        return { renewed: false, cancelRequested: false };
       },
       async getSnapshotReplicationPublication() {
         return {
@@ -126,6 +129,9 @@ describe("snapshot job runner fencing", () => {
       },
       async completeSnapshotJob() {
         completed = true;
+        return null;
+      },
+      async cancelSnapshotJob() {
         return null;
       },
       async failSnapshotJob() {
@@ -179,7 +185,103 @@ describe("snapshot job runner fencing", () => {
     assert.equal(completed, false);
     assert.equal(failed, true);
   });
+
+  it("fails fast on capacity errors instead of spending the retry budget", async () => {
+    const { failed, failMessage, retryScheduled } = await runReplicationFailure(
+      Object.assign(new Error("no space left on device"), { code: "ENOSPC" }),
+    );
+    assert.equal(retryScheduled, false);
+    assert.equal(failed, true);
+    assert.match(failMessage ?? "", /^non-retryable capacity error: /);
+  });
+
+  it("fails fast on permission errors instead of spending the retry budget", async () => {
+    const s3Denied = Object.assign(new Error("Access Denied"), {
+      name: "AccessDenied",
+      $metadata: { httpStatusCode: 403 },
+    });
+    const { failed, failMessage, retryScheduled } =
+      await runReplicationFailure(s3Denied);
+    assert.equal(retryScheduled, false);
+    assert.equal(failed, true);
+    assert.match(failMessage ?? "", /^non-retryable permission error: /);
+  });
+
+  it("still retries transient replication errors", async () => {
+    const { failed, retryScheduled } = await runReplicationFailure(
+      new Error("replication target temporarily unavailable"),
+    );
+    assert.equal(retryScheduled, true);
+    assert.equal(failed, false);
+  });
 });
+
+/** Drive one replicate attempt whose publication load throws, and report
+ * whether the runner retried or failed terminally. */
+async function runReplicationFailure(error: Error): Promise<{
+  failed: boolean;
+  failMessage: string | null;
+  retryScheduled: boolean;
+}> {
+  const queued = snapshotJob("queued");
+  const claimed: ClaimedSnapshotJob = {
+    ...snapshotJob("running"),
+    attemptToken: "attempt-fail-fast",
+  };
+  let failed = false;
+  let failMessage: string | null = null;
+  let retryScheduled = false;
+  const repository = {
+    async getSnapshotJob() {
+      return queued;
+    },
+    async claimSnapshotJob() {
+      return claimed;
+    },
+    async updateSnapshotJobProgress() {
+      return claimed;
+    },
+    async renewSnapshotJobLease() {
+      return { renewed: true, cancelRequested: false };
+    },
+    async getSnapshotReplicationPublication() {
+      throw error;
+    },
+    async completeSnapshotJob() {
+      return null;
+    },
+    async cancelSnapshotJob() {
+      return null;
+    },
+    async failSnapshotJob(_id: string, _token: string, message: string) {
+      failed = true;
+      failMessage = message;
+      return snapshotJob("failed");
+    },
+    async scheduleSnapshotJobRetry() {
+      retryScheduled = true;
+      return snapshotJob("queued");
+    },
+  } as unknown as WorkspaceRepository;
+  const unusedStore: SnapshotObjectStore = {
+    async put() {},
+    async get() {
+      return Readable.from("unused");
+    },
+    async delete() {},
+  };
+  const runner = new SnapshotJobRunner({
+    repository,
+    databaseUrl: "postgresql://unused",
+    storeFor: () => unusedStore,
+    replicationTargetFor: () => unusedStore,
+    replicationMaxAttempts: 3,
+    replicationRetryBaseMs: 10,
+  });
+  runner.enqueue(claimed.id);
+  await runner.close();
+  return { failed, failMessage, retryScheduled };
+}
 
 function snapshotJob(
   status: StoredSnapshotJob["status"],

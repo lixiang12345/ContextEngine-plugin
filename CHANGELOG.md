@@ -2,6 +2,70 @@
 
 ## Unreleased
 
+- Added snapshot target probes plus store timeout and fail-fast controls.
+  Owners can `POST …/snapshots:probe` and
+  `POST …/snapshot-replication-targets/{targetId}/probe` to diagnose a
+  filesystem/S3 target before scheduling jobs: one short-lived object is
+  written through the workspace-scoped prefix, then head visibility, read-back
+  content, conditional-write (CAS) fencing, and listing are verified where
+  supported and the object is deleted. Responses are bounded and
+  credential-free: per-operation status/latency, a failure classification
+  (`permission`/`capacity`/`timeout`/`not_found`/`transient`), detected
+  capabilities, store type, and free/total bytes for filesystem targets;
+  absolute server paths are scrubbed from error text. Probe objects embed a
+  timestamp and each list-capable probe sweeps stale orphans left by a crash.
+  Every store operation now carries an independent deadline
+  (`CONTEXTENGINE_SNAPSHOT_STORE_METADATA_TIMEOUT_MS` for head/list/delete/CAS,
+  default 30 s; `CONTEXTENGINE_SNAPSHOT_STORE_TRANSFER_TIMEOUT_MS` for
+  streaming put/get, default unbounded;
+  `CONTEXTENGINE_SNAPSHOT_PROBE_TIMEOUT_MS` per probe operation). Deadlines
+  race the pending call — a store stuck in a non-signal-aware syscall (hung
+  network mount) still settles for the caller — and the get deadline also
+  covers body streaming, destroying a stalled download instead of pinning the
+  job lease forever. Capacity (`ENOSPC`, quota) and permission (`EACCES`, S3
+  `AccessDenied`/403) failures fail snapshot jobs on the first attempt with a
+  `non-retryable … error:` prefix instead of consuming the replication retry
+  budget — wherever the full disk sits, target or local spool — while
+  rotating-credential errors (`ExpiredToken`, `TokenRefreshRequired`) stay
+  retryable despite their 403 status. `PrefixedSnapshotObjectStore` now
+  forwards `list` conditionally like `head`/`putConditional`, so capability
+  detection sees through the prefix wrapper. The operator
+  observability overview gained a `snapshot_targets` block aggregating
+  per-target health across workspaces, rendered on the dashboard as a
+  "Snapshot target health" table; capabilities advertise
+  `snapshots.target_probe` and the configured timeouts.
+
+- Added schema v17 durable ordinary index jobs. PostgreSQL claim leases and
+  attempt tokens fence progress and terminal writes across instances; persistent
+  executor affinity safely recovers local-path work without foreign replicas,
+  cooperative abort is checked before staging-generation promotion, and
+  index-job SSE polls durable state on non-executing instances.
+- Added schema v18 snapshot job cancellation and bounded history retention.
+  Owners can `POST …/snapshot-jobs/{jobId}/cancel`: queued jobs terminalize as
+  `cancelled` immediately, running jobs carry a durable `cancel_requested_at`
+  flag observed on lease renewal before the worker writes the token-fenced
+  `cancelled` terminal state; success/failure/retry writes are fenced against a
+  pending cancellation, repeat requests are idempotent, and lease takeovers of
+  cancel-requested jobs terminalize instead of re-running. Snapshot job
+  event/attempt history now prunes by age and per-job count
+  (`CONTEXTENGINE_SNAPSHOT_EVENT_RETENTION_MS`,
+  `CONTEXTENGINE_SNAPSHOT_EVENT_MAX_PER_JOB`) without breaking monotonic SSE
+  cursors.
+- Hardened the durable index-job runner after independent review. A retry
+  budget (`CONTEXTENGINE_INDEX_JOB_MAX_ATTEMPTS`, default 5) terminally fails
+  jobs that keep killing their worker instead of re-claiming them forever;
+  transient lease-renewal and progress-write errors no longer abort a long
+  build while the lease margin still holds; job SSE streams end with a `gone`
+  event when the job row is deleted; the runner warns at startup about
+  local-workspace jobs stranded on a foreign executor identity; and the
+  periodic runnable scan is bounded.
+- Made the index-job lease migrations self-contained. The v17 upgrade recreates
+  the transition-guard function on databases stamped 16 by builds that predate
+  it, and the v16 block creates `ce_index_jobs` when a pre-index-job schema
+  lacks the table, so unqualified DDL can no longer resolve to another schema
+  on the `search_path`. Malformed `CONTEXTENGINE_INDEX_ANALYZE_TIMEOUT_MS`
+  values now fall back to the 30s default instead of silently disabling the
+  post-build planner-statistics refresh.
 - Hardened the connector webhook inbox worker for long-running syncs. Processing
   claims now renew their database-clock lease with the same attempt fence until
   completion; stale workers cannot complete or retry a replacement attempt.

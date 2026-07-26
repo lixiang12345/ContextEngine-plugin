@@ -16,6 +16,38 @@ const databaseUrl =
 const describePostgres = databaseUrl ? describe : describe.skip;
 
 describePostgres("index generation lifecycle", () => {
+  it("never discards a generation after it becomes active", async () => {
+    const workspaceId = `generation-active-discard-${Date.now()}-${process.pid}`;
+    const initial = await PostgresStore.open({
+      databaseUrl: databaseUrl!,
+      workspaceId,
+    });
+    const active = await initial.beginGeneration("1");
+    try {
+      await active.replaceChunksForFile("src/active.ts", [
+        {
+          id: "active-chunk",
+          path: "src/active.ts",
+          language: "typescript",
+          startLine: 1,
+          endLine: 1,
+          content: "export const activeGeneration = true;",
+          symbol: "activeGeneration",
+          hash: "active-hash",
+        },
+      ]);
+      await active.promoteGeneration();
+
+      await active.discardGeneration();
+
+      assert.equal((await active.generationStatus()).status, "active");
+      assert.equal(await active.chunkCount(), 1);
+      assert.equal(await active.isCurrentGeneration(), true);
+    } finally {
+      await active.close();
+    }
+  });
+
   it("rejects a generation that would roll the active revision backward", async () => {
     const workspaceId = `generation-revision-${Date.now()}-${process.pid}`;
     const initial = await PostgresStore.open({
@@ -88,6 +120,106 @@ describePostgres("index generation lifecycle", () => {
       );
     } finally {
       await Promise.all([reader.close(), writer.close()]);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("discards a staging generation when lease cancellation arrives before promotion", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ce-index-abort-"));
+    const workspaceId = `index-abort-${Date.now()}-${process.pid}`;
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(
+      path.join(root, "src", "abort.ts"),
+      `export function abortBeforePromotion() { return true; }\n`,
+    );
+    const engine = ContextEngine.open({ root, workspaceId, databaseUrl });
+    const controller = new AbortController();
+    try {
+      await assert.rejects(
+        engine.index((progress) => {
+          if (progress.phase === "chunk") {
+            controller.abort(new Error("index lease lost"));
+          }
+        }, controller.signal),
+        /index lease lost/,
+      );
+      const pool = new Pool({ connectionString: databaseUrl! });
+      try {
+        const generations = await pool.query<{ status: string; count: string }>(
+          `SELECT status, COUNT(*)::text AS count
+           FROM ce_workspace_generations
+           WHERE logical_workspace_id = $1
+           GROUP BY status
+           ORDER BY status`,
+          [workspaceId],
+        );
+        assert.deepEqual(generations.rows, [
+          { status: "active", count: "1" },
+          { status: "failed", count: "1" },
+        ]);
+        const aliases = await pool.query<{ status: string }>(
+          `SELECT g.status
+           FROM ce_workspace_aliases a
+           JOIN ce_workspace_generations g ON g.id = a.generation_id
+           WHERE a.logical_workspace_id = $1`,
+          [workspaceId],
+        );
+        assert.deepEqual(aliases.rows, [{ status: "active" }]);
+      } finally {
+        await pool.end();
+      }
+    } finally {
+      await engine.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels while waiting for a held workspace generation lock", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ce-index-lock-abort-"));
+    const workspaceId = `index-lock-abort-${Date.now()}-${process.pid}`;
+    writeFileSync(
+      path.join(root, "blocked.ts"),
+      `export const blockedByGenerationLock = true;\n`,
+    );
+    await PostgresStore.ensureSchema(databaseUrl!);
+    const pool = new Pool({ connectionString: databaseUrl! });
+    const blocker = await pool.connect();
+    const key = await blocker.query<{ key: string }>(
+      `SELECT hashtextextended($1, 0)::text AS key`,
+      [workspaceId],
+    );
+    const lockKey = key.rows[0]?.key;
+    assert.ok(lockKey);
+    await blocker.query(`SELECT pg_advisory_lock($1::bigint)`, [lockKey]);
+    const engine = ContextEngine.open({ root, workspaceId, databaseUrl });
+    const controller = new AbortController();
+    const abortTimer = setTimeout(
+      () => controller.abort(new Error("shutdown cancelled lock wait")),
+      50,
+    );
+    const fallbackUnlock = setTimeout(
+      () => void blocker.query(`SELECT pg_advisory_unlock($1::bigint)`, [lockKey]),
+      500,
+    );
+    const started = Date.now();
+    try {
+      await assert.rejects(
+        engine.index(undefined, controller.signal),
+        /shutdown cancelled lock wait/,
+      );
+      assert.ok(
+        Date.now() - started < 400,
+        "lock wait should reject before the fallback unlock",
+      );
+    } finally {
+      clearTimeout(abortTimer);
+      clearTimeout(fallbackUnlock);
+      await blocker
+        .query(`SELECT pg_advisory_unlock($1::bigint)`, [lockKey])
+        .catch(() => undefined);
+      blocker.release();
+      await pool.end();
+      await engine.close();
       rmSync(root, { recursive: true, force: true });
     }
   });

@@ -512,10 +512,18 @@ describePostgres("ContextEngine HTTP service", () => {
         } | null;
       }>;
       jobs: Array<{ id: string; status: string }>;
+      snapshot_targets: {
+        store_configured: boolean;
+        configured_targets: number;
+        targets: Array<{ id: string; health: string }>;
+      };
     };
     assert.equal(overviewPayload.service.status, "online");
     assert.equal(overviewPayload.service.storage, "postgresql+pgvector");
     assert.ok(overviewPayload.requests.total > 0);
+    assert.equal(overviewPayload.snapshot_targets.store_configured, false);
+    assert.equal(overviewPayload.snapshot_targets.configured_targets, 0);
+    assert.deepEqual(overviewPayload.snapshot_targets.targets, []);
     assert.ok(
       overviewPayload.requests.recent.some(
         (item) => item.route === "/v1/workspaces/{workspaceId}/context",

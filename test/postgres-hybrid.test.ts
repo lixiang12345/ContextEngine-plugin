@@ -156,6 +156,60 @@ describe("PostgresHybridSearcher", () => {
     assert.equal(hits[0]?.source, "bm25");
   });
 
+  it("sends explicit paths and structured identifiers through the bounded path channel", async () => {
+    const target = chunk("request", "lib/request.ts");
+    let capturedHints: string[] = [];
+    const store = fakeStore([target], {
+      ftsSearch: async () => [{ id: target.id, score: 1 }],
+      searchByPathHints: async (hints) => {
+        capturedHints = hints;
+        return [{ id: target.id, score: 3.2 }];
+      },
+    });
+    const searcher = new PostgresHybridSearcher();
+    searcher.load({ store, hasEmbeddings: false });
+
+    await searcher.search({
+      query: "read src/request.ts with RequestHeaders",
+      mode: "bm25",
+      expandGraph: false,
+      diversify: false,
+    });
+
+    assert.ok(capturedHints.includes("src/request.ts"));
+    assert.ok(capturedHints.includes("headers"));
+    assert.ok(capturedHints.length <= 24);
+  });
+
+  it("uses bounded natural symbol hints for concept-only queries", async () => {
+    const target = chunk("serverChain", "cmd/kube-apiserver/app/server.go");
+    let capturedNames: string[] = [];
+    const store = fakeStore([target], {
+      ftsSearch: async () => [],
+      searchSymbols: async (names) => {
+        capturedNames = names;
+        return [{ id: target.id, score: 0.8 }];
+      },
+    });
+    const searcher = new PostgresHybridSearcher();
+    searcher.load({ store, hasEmbeddings: false });
+
+    const hits = await searcher.search({
+      query: "create the kube apiserver delegation chain and install APIs",
+      mode: "bm25",
+      expandGraph: false,
+      diversify: false,
+    });
+
+    assert.deepEqual(capturedNames, [
+      "serverchain",
+      "serverdelegation",
+      "kubeapiserver",
+      "apiserverdelegation",
+    ]);
+    assert.equal(hits[0]?.chunk.path, target.path);
+  });
+
   it("fails closed for commit candidates and graph expansion under a source policy", async () => {
     const visible = chunk("visibleImplementation");
     const directCommit: CodeChunk = {

@@ -243,6 +243,7 @@ export type {
   ConnectorSyncAttempt,
   ConnectorSyncCommit,
   ConnectorSyncLease,
+  ClaimedIndexJob,
   StoredIndexJob,
   StoredConnectorFile,
   StoredConnectorSource,

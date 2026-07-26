@@ -15,13 +15,19 @@ export type SyncOperation = "upsert" | "delete" | "rename";
 export type IndexJobMode = "incremental" | "rebuild";
 export type IndexJobStatus = "queued" | "running" | "succeeded" | "failed";
 export type SnapshotJobOperation = "export" | "import" | "prune" | "gc" | "replicate";
-export type SnapshotJobStatus = "queued" | "running" | "succeeded" | "failed";
+export type SnapshotJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
 export type SnapshotJobAttemptStatus =
   | "running"
   | "succeeded"
   | "failed"
   | "retry_scheduled"
-  | "lease_expired";
+  | "lease_expired"
+  | "cancelled";
 export type SnapshotJobEventKind =
   | "snapshot"
   | "queued"
@@ -31,7 +37,9 @@ export type SnapshotJobEventKind =
   | "retry_scheduled"
   | "manual_retry"
   | "succeeded"
-  | "failed";
+  | "failed"
+  | "cancel_requested"
+  | "cancelled";
 export type SnapshotReplicationScheduleMode = "manual" | "interval" | "nightly";
 export type WorkspacePermission = "reader" | "writer" | "owner";
 /** Lowercase provider id registered by a SourceConnectorPlugin. */
@@ -200,6 +208,7 @@ export interface StoredSourceAccessPolicy extends SourcePathPolicy {
 export interface StoredIndexJob {
   id: string;
   workspaceId: string;
+  executorId: string | null;
   revision: number;
   mode: IndexJobMode;
   changedPaths: string[] | null;
@@ -208,9 +217,15 @@ export interface StoredIndexJob {
   progress: Record<string, unknown> | null;
   result: Record<string, unknown> | null;
   error: string | null;
+  attempts: number;
+  lockedAt: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
+}
+
+export interface ClaimedIndexJob extends StoredIndexJob {
+  attemptToken: string;
 }
 
 export interface StoredSnapshotJob {
@@ -230,6 +245,7 @@ export interface StoredSnapshotJob {
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  cancelRequestedAt: string | null;
 }
 
 export interface ClaimedSnapshotJob extends StoredSnapshotJob {
@@ -370,6 +386,7 @@ interface SourceRow extends QueryResultRow {
 interface JobRow extends QueryResultRow {
   id: string;
   workspace_id: string;
+  executor_id: string | null;
   revision: string | number;
   mode: IndexJobMode;
   changed_paths: unknown;
@@ -378,10 +395,16 @@ interface JobRow extends QueryResultRow {
   progress: unknown;
   result: unknown;
   error: string | null;
+  attempts: string | number;
+  locked_at: string | Date | null;
   created_at: string | Date;
   started_at: string | Date | null;
   completed_at: string | Date | null;
 }
+
+const INDEX_JOB_COLUMNS = `id, workspace_id, executor_id, revision, mode, changed_paths,
+  deleted_paths, status, progress, result, error, attempts, locked_at,
+  created_at, started_at, completed_at`;
 
 interface SnapshotJobRow extends QueryResultRow {
   id: string;
@@ -401,6 +424,7 @@ interface SnapshotJobRow extends QueryResultRow {
   created_at: string | Date;
   started_at: string | Date | null;
   completed_at: string | Date | null;
+  cancel_requested_at: string | Date | null;
 }
 
 interface SnapshotJobAttemptRow extends QueryResultRow {
@@ -509,8 +533,6 @@ interface ConnectorCiTokenRow extends QueryResultRow {
   created_by: string;
   created_at: string | Date;
 }
-
-type AdvisoryLockClient = PoolClient;
 
 export class WorkspaceNotFoundError extends Error {
   constructor(workspaceId: string) {
@@ -725,6 +747,7 @@ function jobFromRow(row: JobRow): StoredIndexJob {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
+    executorId: row.executor_id,
     revision: Number(row.revision),
     mode: row.mode,
     changedPaths: row.changed_paths === null ? null : asStringArray(row.changed_paths),
@@ -733,6 +756,8 @@ function jobFromRow(row: JobRow): StoredIndexJob {
     progress: asObject(row.progress),
     result: asObject(row.result),
     error: row.error,
+    attempts: Number(row.attempts),
+    lockedAt: iso(row.locked_at),
     createdAt: iso(row.created_at)!,
     startedAt: iso(row.started_at),
     completedAt: iso(row.completed_at),
@@ -757,6 +782,7 @@ function snapshotJobFromRow(row: SnapshotJobRow): StoredSnapshotJob {
     createdAt: iso(row.created_at)!,
     startedAt: iso(row.started_at),
     completedAt: iso(row.completed_at),
+    cancelRequestedAt: iso(row.cancel_requested_at),
   };
 }
 
@@ -1252,40 +1278,6 @@ export class WorkspaceRepository {
       expired: Number(result.rows[0]?.expired ?? 0),
       closed: Number(result.rows[0]?.closed ?? 0),
     };
-  }
-
-  /**
-   * Serialize indexing for one logical workspace across HTTP server
-   * instances. The lock is held on a dedicated PostgreSQL session for the
-   * whole callback, so a second process cannot build from an old generation
-   * while the first process is promoting a new one.
-   */
-  async withIndexJobLock<T>(
-    workspaceId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const client: AdvisoryLockClient = await this.pool.connect();
-    let lockKey: string | null = null;
-    try {
-      const key = await client.query<{ key: string }>(
-        `SELECT hashtextextended($1, 0)::text AS key`,
-        [`contextengine:index-job:${workspaceId}`],
-      );
-      lockKey = key.rows[0]?.key ?? null;
-      if (!lockKey) throw new Error("Unable to derive workspace index lock key");
-      await client.query(`SELECT pg_advisory_lock($1::bigint)`, [lockKey]);
-      return await operation();
-    } finally {
-      if (lockKey) {
-        try {
-          await client.query(`SELECT pg_advisory_unlock($1::bigint)`, [lockKey]);
-        } finally {
-          client.release();
-        }
-      } else {
-        client.release();
-      }
-    }
   }
 
   async getMeta(workspaceId: string, key: string): Promise<string | null> {
@@ -2970,8 +2962,7 @@ export class WorkspaceRepository {
            )
            VALUES ($1, $2, $3, 'incremental', $4::jsonb, $5::jsonb,
                    'queued', $6::jsonb)
-           RETURNING id, workspace_id, revision, mode, changed_paths, deleted_paths,
-                     status, progress, result, error, created_at, started_at, completed_at`,
+           RETURNING ${INDEX_JOB_COLUMNS}`,
           [
             jobId,
             workspaceId,
@@ -3007,6 +2998,7 @@ export class WorkspaceRepository {
 
   async createIndexJob(input: {
     workspaceId: string;
+    executorId?: string | null;
     revision: number;
     mode: IndexJobMode;
     changedPaths?: string[] | null;
@@ -3015,14 +3007,15 @@ export class WorkspaceRepository {
     const id = randomUUID();
     const result = await this.pool.query<JobRow>(
       `INSERT INTO ce_index_jobs(
-         id, workspace_id, revision, mode, changed_paths, deleted_paths, status, progress
+         id, workspace_id, executor_id, revision, mode, changed_paths,
+         deleted_paths, status, progress
        )
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, 'queued', $7::jsonb)
-       RETURNING id, workspace_id, revision, mode, changed_paths, deleted_paths,
-                 status, progress, result, error, created_at, started_at, completed_at`,
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, 'queued', $8::jsonb)
+       RETURNING ${INDEX_JOB_COLUMNS}`,
       [
         id,
         input.workspaceId,
+        input.executorId ?? null,
         input.revision,
         input.mode,
         input.changedPaths === undefined ? null : JSON.stringify(input.changedPaths),
@@ -3035,8 +3028,7 @@ export class WorkspaceRepository {
 
   async getIndexJob(jobId: string): Promise<StoredIndexJob | null> {
     const result = await this.pool.query<JobRow>(
-      `SELECT id, workspace_id, revision, mode, changed_paths, deleted_paths,
-              status, progress, result, error, created_at, started_at, completed_at
+      `SELECT ${INDEX_JOB_COLUMNS}
        FROM ce_index_jobs
        WHERE id = $1`,
       [jobId],
@@ -3047,8 +3039,7 @@ export class WorkspaceRepository {
   async listRecentIndexJobs(limit = 25): Promise<StoredIndexJob[]> {
     const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
     const result = await this.pool.query<JobRow>(
-      `SELECT id, workspace_id, revision, mode, changed_paths, deleted_paths,
-              status, progress, result, error, created_at, started_at, completed_at
+      `SELECT ${INDEX_JOB_COLUMNS}
        FROM ce_index_jobs
        ORDER BY created_at DESC, id DESC
        LIMIT $1`,
@@ -3057,111 +3048,225 @@ export class WorkspaceRepository {
     return result.rows.map(jobFromRow);
   }
 
-  async listQueuedIndexJobs(): Promise<StoredIndexJob[]> {
+  async listRunnableIndexJobs(
+    leaseMs = 5 * 60_000,
+    executorId?: string,
+  ): Promise<StoredIndexJob[]> {
+    const safeLeaseMs = Math.max(
+      1,
+      Math.min(24 * 60 * 60_000, Math.floor(leaseMs)),
+    );
     const result = await this.pool.query<JobRow>(
-      `SELECT id, workspace_id, revision, mode, changed_paths, deleted_paths,
-              status, progress, result, error, created_at, started_at, completed_at
-       FROM ce_index_jobs
-       WHERE status = 'queued'
-       ORDER BY created_at, id`,
+      `SELECT ${INDEX_JOB_COLUMNS}
+       FROM ce_index_jobs j
+       WHERE (
+           (
+             j.executor_id IS NULL
+             AND j.workspace_id IN (
+               SELECT id FROM ce_workspaces WHERE source_mode = 'blob'
+             )
+           )
+           OR j.executor_id = $2::text
+         )
+         AND (
+           j.status = 'queued'
+           OR (
+             j.status = 'running'
+             AND (
+               j.locked_at IS NULL
+               OR j.locked_at < clock_timestamp() - ($1::bigint * interval '1 millisecond')
+             )
+           )
+         )
+       ORDER BY j.created_at, j.id
+       LIMIT 100`,
+      [safeLeaseMs, executorId ?? null],
     );
     return result.rows.map(jobFromRow);
   }
 
-  async markRunningJobsFailed(): Promise<void> {
-    // A running job may belong to another live server instance. Only recover
-    // it after acquiring the same workspace advisory lock used by runners;
-    // a live owner keeps the lock and is left untouched.
-    const workspaces = await this.pool.query<{ workspace_id: string }>(
-      `SELECT DISTINCT workspace_id
-       FROM ce_index_jobs
-       WHERE status = 'running'`,
+  /**
+   * Local-workspace jobs pinned to a different executor identity. They can
+   * never run on this instance, so the runner surfaces them at startup
+   * instead of leaving them silently queued forever.
+   */
+  async listStrandedLocalIndexJobs(
+    executorId: string,
+    limit = 20,
+  ): Promise<StoredIndexJob[]> {
+    const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
+    const result = await this.pool.query<JobRow>(
+      `SELECT ${INDEX_JOB_COLUMNS}
+       FROM ce_index_jobs j
+       WHERE j.executor_id IS NOT NULL
+         AND j.executor_id <> $1::text
+         AND j.status IN ('queued', 'running')
+         AND j.workspace_id IN (
+           SELECT id FROM ce_workspaces WHERE source_mode = 'local'
+         )
+       ORDER BY j.created_at, j.id
+       LIMIT $2`,
+      [executorId, safeLimit],
     );
-    for (const row of workspaces.rows) {
-      const client = await this.pool.connect();
-      let lockKey: string | null = null;
-      try {
-        const key = await client.query<{ key: string }>(
-          `SELECT hashtextextended($1, 0)::text AS key`,
-          [`contextengine:index-job:${row.workspace_id}`],
-        );
-        lockKey = key.rows[0]?.key ?? null;
-        if (!lockKey) continue;
-        const acquired = await client.query<{ acquired: boolean }>(
-          `SELECT pg_try_advisory_lock($1::bigint) AS acquired`,
-          [lockKey],
-        );
-        if (!acquired.rows[0]?.acquired) continue;
-        await this.pool.query(
-          `UPDATE ce_index_jobs
-           SET status = 'failed',
-               error = 'Server restarted while the job was running',
-               completed_at = now()
-           WHERE workspace_id = $1 AND status = 'running'`,
-          [row.workspace_id],
-        );
-        await client.query(`SELECT pg_advisory_unlock($1::bigint)`, [lockKey]);
-      } finally {
-        client.release();
-      }
-    }
+    return result.rows.map(jobFromRow);
   }
 
-  async markIndexJobRunning(jobId: string): Promise<StoredIndexJob | null> {
-    const result = await this.pool.query<JobRow>(
-      `UPDATE ce_index_jobs
-       SET status = 'running', started_at = now(), progress = $2::jsonb, error = NULL
-       WHERE id = $1 AND status = 'queued'
-       RETURNING id, workspace_id, revision, mode, changed_paths, deleted_paths,
-                 status, progress, result, error, created_at, started_at, completed_at`,
-      [jobId, JSON.stringify({ phase: "starting" })],
+  async claimIndexJob(
+    jobId: string,
+    leaseMs = 5 * 60_000,
+    executorId?: string,
+  ): Promise<ClaimedIndexJob | null> {
+    const safeLeaseMs = Math.max(
+      1,
+      Math.min(24 * 60 * 60_000, Math.floor(leaseMs)),
     );
-    return result.rows[0] ? jobFromRow(result.rows[0]) : null;
+    const client = await this.pool.connect();
+    const token = randomUUID();
+    try {
+      await client.query("BEGIN");
+      const selected = await client.query<JobRow>(
+        `SELECT ${INDEX_JOB_COLUMNS}
+         FROM ce_index_jobs
+         WHERE id = $1
+           AND (
+             executor_id = $3::text
+             OR (
+               executor_id IS NULL
+               AND workspace_id IN (
+                 SELECT id FROM ce_workspaces WHERE source_mode = 'blob'
+               )
+             )
+           )
+           AND (
+             status = 'queued'
+             OR (
+               status = 'running'
+               AND (
+                 locked_at IS NULL
+                 OR locked_at < clock_timestamp() - ($2::bigint * interval '1 millisecond')
+               )
+             )
+           )
+         FOR UPDATE SKIP LOCKED`,
+        [jobId, safeLeaseMs, executorId ?? null],
+      );
+      if (!selected.rows[0]) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      const updated = await client.query<JobRow>(
+        `UPDATE ce_index_jobs
+         SET status = 'running', attempts = attempts + 1,
+             locked_at = clock_timestamp(), lock_token = $2,
+             started_at = COALESCE(started_at, clock_timestamp()),
+             completed_at = NULL, progress = $3::jsonb, error = NULL
+         WHERE id = $1
+         RETURNING ${INDEX_JOB_COLUMNS}`,
+        [jobId, token, JSON.stringify({ phase: "starting" })],
+      );
+      await client.query("COMMIT");
+      const claimed = updated.rows[0];
+      return claimed ? { ...jobFromRow(claimed), attemptToken: token } : null;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async updateIndexJobProgress(
     jobId: string,
+    attemptToken: string,
     progress: Record<string, unknown>,
   ): Promise<StoredIndexJob | null> {
     const result = await this.pool.query<JobRow>(
       `UPDATE ce_index_jobs
-       SET progress = $2::jsonb
-       WHERE id = $1
-       RETURNING id, workspace_id, revision, mode, changed_paths, deleted_paths,
-                 status, progress, result, error, created_at, started_at, completed_at`,
-      [jobId, JSON.stringify(progress)],
+       SET progress = $3::jsonb, locked_at = clock_timestamp()
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING ${INDEX_JOB_COLUMNS}`,
+      [jobId, attemptToken, JSON.stringify(progress)],
     );
     return result.rows[0] ? jobFromRow(result.rows[0]) : null;
   }
 
+  async renewIndexJobLease(jobId: string, attemptToken: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE ce_index_jobs
+       SET locked_at = clock_timestamp()
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'`,
+      [jobId, attemptToken],
+    );
+    return (result.rowCount ?? 0) === 1;
+  }
+
   async completeIndexJob(
     jobId: string,
+    attemptToken: string,
     resultPayload: object,
   ): Promise<StoredIndexJob | null> {
     const result = await this.pool.query<JobRow>(
       `UPDATE ce_index_jobs
        SET status = 'succeeded',
            result = $2::jsonb,
-           completed_at = now(),
-           progress = $3::jsonb
-       WHERE id = $1
-       RETURNING id, workspace_id, revision, mode, changed_paths, deleted_paths,
-                 status, progress, result, error, created_at, started_at, completed_at`,
-      [jobId, JSON.stringify(resultPayload), JSON.stringify({ phase: "done" })],
+           completed_at = clock_timestamp(),
+           progress = $4::jsonb,
+           locked_at = NULL,
+           lock_token = NULL
+       WHERE id = $1 AND lock_token = $3 AND status = 'running'
+       RETURNING ${INDEX_JOB_COLUMNS}`,
+      [
+        jobId,
+        JSON.stringify(resultPayload),
+        attemptToken,
+        JSON.stringify({ phase: "done" }),
+      ],
     );
     return result.rows[0] ? jobFromRow(result.rows[0]) : null;
   }
 
-  async failIndexJob(jobId: string, message: string): Promise<StoredIndexJob | null> {
+  async failIndexJob(
+    jobId: string,
+    attemptToken: string,
+    message: string,
+  ): Promise<StoredIndexJob | null> {
     const result = await this.pool.query<JobRow>(
       `UPDATE ce_index_jobs
        SET status = 'failed',
-           error = $2,
-           completed_at = now()
-       WHERE id = $1
-       RETURNING id, workspace_id, revision, mode, changed_paths, deleted_paths,
-                 status, progress, result, error, created_at, started_at, completed_at`,
-      [jobId, message.slice(0, 4000)],
+           error = $3,
+           progress = $4::jsonb,
+           completed_at = clock_timestamp(),
+           locked_at = NULL,
+           lock_token = NULL
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING ${INDEX_JOB_COLUMNS}`,
+      [
+        jobId,
+        attemptToken,
+        message.slice(0, 4000),
+        JSON.stringify({ phase: "failed" }),
+      ],
+    );
+    return result.rows[0] ? jobFromRow(result.rows[0]) : null;
+  }
+
+  async releaseIndexJob(
+    jobId: string,
+    attemptToken: string,
+    message: string,
+  ): Promise<StoredIndexJob | null> {
+    const result = await this.pool.query<JobRow>(
+      `UPDATE ce_index_jobs
+       SET status = 'queued', error = $3, completed_at = NULL,
+           progress = $4::jsonb, locked_at = NULL, lock_token = NULL
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING ${INDEX_JOB_COLUMNS}`,
+      [
+        jobId,
+        attemptToken,
+        message.slice(0, 4000),
+        JSON.stringify({ phase: "queued", recovered: true }),
+      ],
     );
     return result.rows[0] ? jobFromRow(result.rows[0]) : null;
   }
@@ -3183,7 +3288,7 @@ export class WorkspaceRepository {
        RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                  parameters, status, progress, result, error, attempts,
                  locked_at, lock_token, next_attempt_at, created_at,
-                 started_at, completed_at`,
+                 started_at, completed_at, cancel_requested_at`,
       [
         id,
         input.workspaceId,
@@ -3235,7 +3340,7 @@ export class WorkspaceRepository {
            RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                      parameters, status, progress, result, error, attempts,
                      locked_at, lock_token, next_attempt_at, created_at,
-                     started_at, completed_at`,
+                     started_at, completed_at, cancel_requested_at`,
           [
             id,
             input.workspaceId,
@@ -3255,7 +3360,7 @@ export class WorkspaceRepository {
         `SELECT id, workspace_id, principal_id, operation, snapshot_name,
                 parameters, status, progress, result, error, attempts,
                 locked_at, lock_token, next_attempt_at, created_at,
-                started_at, completed_at
+                started_at, completed_at, cancel_requested_at
          FROM ce_snapshot_jobs
          WHERE workspace_id = $1 AND operation = 'replicate'
            AND snapshot_name = $2
@@ -3503,7 +3608,7 @@ export class WorkspaceRepository {
              RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                        parameters, status, progress, result, error, attempts,
                        locked_at, lock_token, next_attempt_at, created_at,
-                       started_at, completed_at`,
+                       started_at, completed_at, cancel_requested_at`,
             [
               jobId,
               schedule.workspace_id,
@@ -3522,7 +3627,7 @@ export class WorkspaceRepository {
             `SELECT id, workspace_id, principal_id, operation, snapshot_name,
                     parameters, status, progress, result, error, attempts,
                     locked_at, lock_token, next_attempt_at, created_at,
-                    started_at, completed_at
+                    started_at, completed_at, cancel_requested_at
              FROM ce_snapshot_jobs
              WHERE workspace_id = $1 AND operation = 'replicate'
                AND snapshot_name = $2
@@ -3848,7 +3953,7 @@ export class WorkspaceRepository {
       `SELECT id, workspace_id, principal_id, operation, snapshot_name,
               parameters, status, progress, result, error, attempts,
               locked_at, lock_token, next_attempt_at, created_at,
-              started_at, completed_at
+              started_at, completed_at, cancel_requested_at
        FROM ce_snapshot_jobs WHERE id = $1`,
       [jobId],
     );
@@ -3920,7 +4025,7 @@ export class WorkspaceRepository {
               id, workspace_id, principal_id, operation, snapshot_name,
               parameters, status, progress, result, error, attempts,
               locked_at, lock_token, next_attempt_at, created_at,
-              started_at, completed_at
+              started_at, completed_at, cancel_requested_at
        FROM ce_snapshot_jobs
        WHERE workspace_id = $1 AND operation = 'replicate'
        ORDER BY parameters->>'target_id', snapshot_name, created_at DESC, id DESC`,
@@ -3931,6 +4036,17 @@ export class WorkspaceRepository {
 
   async snapshotReplicationMetrics(
     workspaceId: string,
+  ): Promise<SnapshotReplicationMetrics[]> {
+    return this.replicationMetrics(workspaceId);
+  }
+
+  /** Cross-workspace target metrics for the operator observability overview. */
+  async globalSnapshotReplicationMetrics(): Promise<SnapshotReplicationMetrics[]> {
+    return this.replicationMetrics(null);
+  }
+
+  private async replicationMetrics(
+    workspaceId: string | null,
   ): Promise<SnapshotReplicationMetrics[]> {
     const result = await this.pool.query<{
       target_id: string;
@@ -3965,7 +4081,8 @@ export class WorkspaceRepository {
                 COALESCE(jobs.result->>'publication_status', 'published')
                   <> 'superseded' AS effective_publication
          FROM ce_snapshot_jobs AS jobs
-         WHERE jobs.workspace_id = $1 AND jobs.operation = 'replicate'
+         WHERE ($1::text IS NULL OR jobs.workspace_id = $1)
+           AND jobs.operation = 'replicate'
        ), latest_success AS (
          SELECT target_id, MAX(completed_at) AS completed_at
          FROM replication_jobs
@@ -4078,7 +4195,7 @@ export class WorkspaceRepository {
       `SELECT id, workspace_id, principal_id, operation, snapshot_name,
               parameters, status, progress, result, error, attempts,
               locked_at, lock_token, next_attempt_at, created_at,
-              started_at, completed_at
+              started_at, completed_at, cancel_requested_at
        FROM ce_snapshot_jobs
        WHERE (status = 'queued' AND next_attempt_at <= clock_timestamp())
           OR (status = 'running' AND locked_at < clock_timestamp() - ($1::bigint * interval '1 millisecond'))
@@ -4100,7 +4217,7 @@ export class WorkspaceRepository {
         `SELECT id, workspace_id, principal_id, operation, snapshot_name,
                 parameters, status, progress, result, error, attempts,
                 locked_at, lock_token, next_attempt_at, created_at,
-                started_at, completed_at
+                started_at, completed_at, cancel_requested_at
          FROM ce_snapshot_jobs
          WHERE id = $1
            AND ((status = 'queued' AND next_attempt_at <= clock_timestamp())
@@ -4122,7 +4239,7 @@ export class WorkspaceRepository {
          RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                    parameters, status, progress, result, error, attempts,
                    locked_at, lock_token, next_attempt_at, created_at,
-                   started_at, completed_at`,
+                   started_at, completed_at, cancel_requested_at`,
         [jobId, token, JSON.stringify({ phase: "starting" })],
       );
       await client.query("COMMIT");
@@ -4148,7 +4265,7 @@ export class WorkspaceRepository {
        RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                  parameters, status, progress, result, error, attempts,
                  locked_at, lock_token, next_attempt_at, created_at,
-                 started_at, completed_at`,
+                 started_at, completed_at, cancel_requested_at`,
       [jobId, attemptToken, JSON.stringify(progress)],
     );
     return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
@@ -4157,13 +4274,18 @@ export class WorkspaceRepository {
   async renewSnapshotJobLease(
     jobId: string,
     attemptToken: string,
-  ): Promise<boolean> {
-    const result = await this.pool.query(
+  ): Promise<{ renewed: boolean; cancelRequested: boolean }> {
+    const result = await this.pool.query<{
+      cancel_requested_at: string | Date | null;
+    }>(
       `UPDATE ce_snapshot_jobs SET locked_at = clock_timestamp()
-       WHERE id = $1 AND lock_token = $2 AND status = 'running'`,
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING cancel_requested_at`,
       [jobId, attemptToken],
     );
-    return (result.rowCount ?? 0) === 1;
+    const row = result.rows[0];
+    if (!row) return { renewed: false, cancelRequested: false };
+    return { renewed: true, cancelRequested: row.cancel_requested_at !== null };
   }
 
   async completeSnapshotJob(
@@ -4176,10 +4298,11 @@ export class WorkspaceRepository {
        SET status = 'succeeded', result = $3::jsonb, progress = $4::jsonb,
            completed_at = clock_timestamp(), locked_at = NULL, lock_token = NULL
        WHERE id = $1 AND lock_token = $2 AND status = 'running'
+         AND cancel_requested_at IS NULL
        RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                  parameters, status, progress, result, error, attempts,
                  locked_at, lock_token, next_attempt_at, created_at,
-                 started_at, completed_at`,
+                 started_at, completed_at, cancel_requested_at`,
       [jobId, attemptToken, JSON.stringify(resultPayload), JSON.stringify({ phase: "done" })],
     );
     return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
@@ -4195,10 +4318,11 @@ export class WorkspaceRepository {
        SET status = 'failed', error = $3, completed_at = clock_timestamp(),
            locked_at = NULL, lock_token = NULL, progress = $4::jsonb
        WHERE id = $1 AND lock_token = $2 AND status = 'running'
+         AND cancel_requested_at IS NULL
        RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                  parameters, status, progress, result, error, attempts,
                  locked_at, lock_token, next_attempt_at, created_at,
-                 started_at, completed_at`,
+                 started_at, completed_at, cancel_requested_at`,
       [jobId, attemptToken, message.slice(0, 4000), JSON.stringify({ phase: "failed" })],
     );
     return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
@@ -4218,10 +4342,11 @@ export class WorkspaceRepository {
            locked_at = NULL, lock_token = NULL, completed_at = NULL,
            progress = $5::jsonb
        WHERE id = $1 AND lock_token = $2 AND status = 'running'
+         AND cancel_requested_at IS NULL
        RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                  parameters, status, progress, result, error, attempts,
                  locked_at, lock_token, next_attempt_at, created_at,
-                 started_at, completed_at`,
+                 started_at, completed_at, cancel_requested_at`,
       [
         jobId,
         attemptToken,
@@ -4245,7 +4370,7 @@ export class WorkspaceRepository {
          RETURNING id, workspace_id, principal_id, operation, snapshot_name,
                    parameters, status, progress, result, error, attempts,
                    locked_at, lock_token, next_attempt_at, created_at,
-                   started_at, completed_at`,
+                   started_at, completed_at, cancel_requested_at`,
         [jobId, JSON.stringify({ phase: "queued", retry: true })],
       );
       return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
@@ -4253,6 +4378,183 @@ export class WorkspaceRepository {
       if (isUniqueViolation(error)) return null;
       throw error;
     }
+  }
+
+  /**
+   * Owner-facing cancellation. Queued jobs terminalize immediately; running
+   * jobs get a durable cancellation flag that the owning worker observes on
+   * its next lease renewal. Repeat requests are idempotent, and jobs that
+   * already succeeded or failed are reported back unchanged.
+   */
+  async requestSnapshotJobCancellation(
+    jobId: string,
+  ): Promise<{ job: StoredSnapshotJob; accepted: boolean } | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const selected = await client.query<SnapshotJobRow>(
+        `SELECT id, workspace_id, principal_id, operation, snapshot_name,
+                parameters, status, progress, result, error, attempts,
+                locked_at, lock_token, next_attempt_at, created_at,
+                started_at, completed_at, cancel_requested_at
+         FROM ce_snapshot_jobs
+         WHERE id = $1
+         FOR UPDATE`,
+        [jobId],
+      );
+      const row = selected.rows[0];
+      if (!row) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      if (row.status === "succeeded" || row.status === "failed") {
+        await client.query("ROLLBACK");
+        return { job: snapshotJobFromRow(row), accepted: false };
+      }
+      if (row.status === "cancelled") {
+        await client.query("ROLLBACK");
+        return { job: snapshotJobFromRow(row), accepted: true };
+      }
+      if (row.status === "queued") {
+        const updated = await client.query<SnapshotJobRow>(
+          `UPDATE ce_snapshot_jobs
+           SET status = 'cancelled',
+               cancel_requested_at = COALESCE(cancel_requested_at, clock_timestamp()),
+               completed_at = clock_timestamp(),
+               locked_at = NULL, lock_token = NULL,
+               error = COALESCE(error, 'Cancelled before execution'),
+               progress = '{"phase":"cancelled"}'::jsonb
+           WHERE id = $1
+           RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                     parameters, status, progress, result, error, attempts,
+                     locked_at, lock_token, next_attempt_at, created_at,
+                     started_at, completed_at, cancel_requested_at`,
+          [jobId],
+        );
+        await client.query("COMMIT");
+        return { job: snapshotJobFromRow(updated.rows[0]), accepted: true };
+      }
+      if (row.cancel_requested_at !== null) {
+        await client.query("ROLLBACK");
+        return { job: snapshotJobFromRow(row), accepted: true };
+      }
+      const flagged = await client.query<SnapshotJobRow>(
+        `UPDATE ce_snapshot_jobs
+         SET cancel_requested_at = clock_timestamp()
+         WHERE id = $1
+         RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                   parameters, status, progress, result, error, attempts,
+                   locked_at, lock_token, next_attempt_at, created_at,
+                   started_at, completed_at, cancel_requested_at`,
+        [jobId],
+      );
+      await client.query("COMMIT");
+      return { job: snapshotJobFromRow(flagged.rows[0]), accepted: true };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Worker-side terminal write for an observed cancellation, fenced by the
+   * attempt token so a stale worker cannot cancel a successor's attempt. */
+  async cancelSnapshotJob(
+    jobId: string,
+    attemptToken: string,
+    message = "Cancelled by owner request",
+  ): Promise<StoredSnapshotJob | null> {
+    const result = await this.pool.query<SnapshotJobRow>(
+      `UPDATE ce_snapshot_jobs
+       SET status = 'cancelled', error = $3, completed_at = clock_timestamp(),
+           locked_at = NULL, lock_token = NULL,
+           progress = '{"phase":"cancelled"}'::jsonb
+       WHERE id = $1 AND lock_token = $2 AND status = 'running'
+       RETURNING id, workspace_id, principal_id, operation, snapshot_name,
+                 parameters, status, progress, result, error, attempts,
+                 locked_at, lock_token, next_attempt_at, created_at,
+                 started_at, completed_at, cancel_requested_at`,
+      [jobId, attemptToken, message.slice(0, 4000)],
+    );
+    return result.rows[0] ? snapshotJobFromRow(result.rows[0]) : null;
+  }
+
+  /**
+   * Bounded retention for snapshot job history. Events prune by age and by
+   * per-job count (newest kept); attempts prune by age, but only once no
+   * retained event still references them. Deleting old rows keeps the
+   * monotonic event_id cursor semantics intact for SSE consumers.
+   */
+  async pruneSnapshotJobHistory(options: {
+    maxAgeMs?: number | null;
+    maxEventsPerJob?: number | null;
+    maxBatch?: number;
+  }): Promise<{ deletedEvents: number; deletedAttempts: number }> {
+    const batch = Math.min(20_000, Math.max(100, Math.floor(options.maxBatch ?? 5_000)));
+    let deletedEvents = 0;
+    let deletedAttempts = 0;
+    const maxAgeMs =
+      options.maxAgeMs && Number.isFinite(options.maxAgeMs) && options.maxAgeMs > 0
+        ? Math.floor(options.maxAgeMs)
+        : null;
+    const maxPerJob =
+      options.maxEventsPerJob &&
+      Number.isFinite(options.maxEventsPerJob) &&
+      options.maxEventsPerJob > 0
+        ? Math.floor(options.maxEventsPerJob)
+        : null;
+    if (maxAgeMs !== null) {
+      const aged = await this.pool.query(
+        `DELETE FROM ce_snapshot_job_events
+         WHERE event_id IN (
+           SELECT event_id FROM ce_snapshot_job_events
+           WHERE created_at < clock_timestamp() - ($1::bigint * interval '1 millisecond')
+           ORDER BY event_id
+           LIMIT $2
+         )`,
+        [maxAgeMs, batch],
+      );
+      deletedEvents += aged.rowCount ?? 0;
+    }
+    if (maxPerJob !== null) {
+      const excess = await this.pool.query(
+        `DELETE FROM ce_snapshot_job_events
+         WHERE event_id IN (
+           SELECT event_id FROM (
+             SELECT event_id,
+                    row_number() OVER (
+                      PARTITION BY job_id ORDER BY event_id DESC
+                    ) AS newest_rank
+             FROM ce_snapshot_job_events
+           ) ranked
+           WHERE newest_rank > $1
+           ORDER BY event_id
+           LIMIT $2
+         )`,
+        [maxPerJob, batch],
+      );
+      deletedEvents += excess.rowCount ?? 0;
+    }
+    if (maxAgeMs !== null) {
+      const attempts = await this.pool.query(
+        `DELETE FROM ce_snapshot_job_attempts a
+         WHERE (a.job_id, a.attempt) IN (
+           SELECT job_id, attempt FROM ce_snapshot_job_attempts
+           WHERE status <> 'running'
+             AND completed_at < clock_timestamp() - ($1::bigint * interval '1 millisecond')
+           ORDER BY completed_at
+           LIMIT $2
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ce_snapshot_job_events e
+           WHERE e.job_id = a.job_id AND e.attempt = a.attempt
+         )`,
+        [maxAgeMs, batch],
+      );
+      deletedAttempts += attempts.rowCount ?? 0;
+    }
+    return { deletedEvents, deletedAttempts };
   }
 
   async countSourceFiles(

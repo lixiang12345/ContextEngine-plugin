@@ -46,6 +46,22 @@ class FailingSnapshotStore implements SnapshotObjectStore {
   }
 }
 
+/** Every write reports a full disk, mimicking an out-of-capacity target. */
+class CapacityFailingSnapshotStore implements SnapshotObjectStore {
+  async put(_key: string, source: Readable): Promise<void> {
+    source.destroy();
+    throw Object.assign(new Error("no space left on device"), {
+      code: "ENOSPC",
+    });
+  }
+
+  async get(): Promise<Readable> {
+    throw new Error("capacity-failing target has no readable objects");
+  }
+
+  async delete(): Promise<void> {}
+}
+
 const databaseUrl =
   process.env.CONTEXTENGINE_TEST_DATABASE_URL ??
   process.env.CONTEXTENGINE_DATABASE_URL;
@@ -98,6 +114,7 @@ describePostgres("owner-managed snapshot HTTP API", () => {
           new FilesystemSnapshotStore(flakyReplicaDirectory),
           Number.POSITIVE_INFINITY,
         ),
+        full: new CapacityFailingSnapshotStore(),
       },
       snapshotReplicationMaxAttempts: 3,
       snapshotReplicationRetryBaseMs: 10,
@@ -187,15 +204,23 @@ describePostgres("owner-managed snapshot HTTP API", () => {
     assert.equal(capabilities.status, 200);
     const snapshotCapabilities = (
       (await capabilities.json()) as {
-        snapshots: { configured: boolean; replication_targets: string[] };
+        snapshots: {
+          configured: boolean;
+          replication_targets: string[];
+          target_probe: boolean;
+          store_timeouts: { metadata_ms: number };
+        };
       }
     ).snapshots;
     assert.equal(snapshotCapabilities.configured, true);
     assert.deepEqual(snapshotCapabilities.replication_targets, [
       "flaky",
+      "full",
       "offline",
       "region-backup",
     ]);
+    assert.equal(snapshotCapabilities.target_probe, true);
+    assert.equal(snapshotCapabilities.store_timeouts.metadata_ms, 30_000);
 
     const invalid = await request(
       "alice",
@@ -448,6 +473,10 @@ describePostgres("owner-managed snapshot HTTP API", () => {
           succeeded: 1, failed: 0, retries: 1,
         },
         {
+          id: "full", configured: true, status: undefined, snapshot: undefined,
+          succeeded: 0, failed: 0, retries: 0,
+        },
+        {
           id: "offline", configured: true, status: "failed", snapshot: "team-main",
           succeeded: 0, failed: 1, retries: 2,
         },
@@ -627,6 +656,188 @@ describePostgres("owner-managed snapshot HTTP API", () => {
     assert.equal(gcResult.preserved_replication_artifacts.length, 1);
   });
 
+  it("probes the primary store and replication targets without leaking store internals", async () => {
+    const workspaceId = await createWorkspace("alice", "Probe targets");
+
+    const primary = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/snapshots:probe`,
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(primary.status, 200);
+    const primaryText = await primary.text();
+    assert.ok(
+      !primaryText.includes(directory),
+      "probe response must not leak the store root path",
+    );
+    const primaryProbe = (
+      JSON.parse(primaryText) as {
+        probe: {
+          ok: boolean;
+          store: { type: string };
+          capabilities: Record<string, boolean>;
+          checks: Array<{
+            operation: string;
+            status: string;
+            error?: string;
+            classification?: string;
+          }>;
+          capacity: { available_bytes: number; total_bytes: number } | null;
+          operation_timeout_ms: number;
+        };
+      }
+    ).probe;
+    assert.equal(primaryProbe.ok, true, JSON.stringify(primaryProbe.checks));
+    assert.equal(primaryProbe.store.type, "filesystem");
+    assert.deepEqual(primaryProbe.capabilities, {
+      list: true,
+      head: true,
+      conditional_write: true,
+    });
+    assert.ok(primaryProbe.capacity);
+    assert.ok(primaryProbe.capacity.available_bytes > 0);
+    assert.ok(primaryProbe.capacity.total_bytes >= primaryProbe.capacity.available_bytes);
+    assert.deepEqual(
+      primaryProbe.checks.map((check) => [check.operation, check.status]),
+      [
+        ["write", "ok"],
+        ["head", "ok"],
+        ["read", "ok"],
+        ["conditional_write", "ok"],
+        ["list", "ok"],
+        ["delete", "ok"],
+      ],
+    );
+
+    const target = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/snapshot-replication-targets/region-backup/probe`,
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(target.status, 200);
+    const targetText = await target.text();
+    assert.ok(!targetText.includes(replicaDirectory));
+    const targetProbe = (
+      JSON.parse(targetText) as { probe: { target_id: string; ok: boolean } }
+    ).probe;
+    assert.equal(targetProbe.target_id, "region-backup");
+    assert.equal(targetProbe.ok, true);
+
+    const offline = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/snapshot-replication-targets/offline/probe`,
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(offline.status, 200);
+    const offlineProbe = (
+      (await offline.json()) as {
+        probe: {
+          ok: boolean;
+          checks: Array<{ operation: string; status: string; error?: string }>;
+        };
+      }
+    ).probe;
+    assert.equal(offlineProbe.ok, false);
+    const offlineWrite = offlineProbe.checks.find(
+      (check) => check.operation === "write",
+    );
+    assert.equal(offlineWrite?.status, "failed");
+    assert.match(offlineWrite?.error ?? "", /temporarily unavailable/);
+
+    const capacityProbe = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/snapshot-replication-targets/full/probe`,
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(capacityProbe.status, 200);
+    const fullProbe = (
+      (await capacityProbe.json()) as {
+        probe: {
+          ok: boolean;
+          checks: Array<{ operation: string; classification?: string; status: string }>;
+        };
+      }
+    ).probe;
+    assert.equal(fullProbe.ok, false);
+    assert.equal(
+      fullProbe.checks.find((check) => check.operation === "write")?.classification,
+      "capacity",
+    );
+
+    assert.equal(
+      (
+        await request("bob", `/v1/workspaces/${workspaceId}/snapshots:probe`, {
+          method: "POST",
+          body: "{}",
+        })
+      ).status,
+      404,
+    );
+    assert.equal(
+      (
+        await request(
+          "bob",
+          `/v1/workspaces/${workspaceId}/snapshot-replication-targets/region-backup/probe`,
+          { method: "POST", body: "{}" },
+        )
+      ).status,
+      404,
+    );
+    assert.equal(
+      (
+        await request(
+          "alice",
+          `/v1/workspaces/${workspaceId}/snapshot-replication-targets/unknown/probe`,
+          { method: "POST", body: "{}" },
+        )
+      ).status,
+      404,
+    );
+  });
+
+  it("fails replication fast when the target reports no capacity", async () => {
+    const workspaceId = await createWorkspace("alice", "Fail fast capacity");
+    const exported = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/snapshots`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "fail-fast" }),
+      },
+    );
+    assert.equal(exported.status, 202);
+    const exportJobId = ((await exported.json()) as { job: { id: string } }).job.id;
+    const exportJob = await waitSnapshotJob("alice", workspaceId, exportJobId);
+    assert.equal(exportJob.status, "succeeded", exportJob.error ?? undefined);
+
+    const replicated = await request(
+      "alice",
+      `/v1/workspaces/${workspaceId}/snapshots/fail-fast/replicate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target_id: "full" }),
+      },
+    );
+    assert.equal(replicated.status, 202);
+    const replicationJobId = ((await replicated.json()) as { job: { id: string } })
+      .job.id;
+    const replicationJob = await waitSnapshotJob(
+      "alice",
+      workspaceId,
+      replicationJobId,
+    );
+    assert.equal(replicationJob.status, "failed");
+    // One attempt only: capacity errors must not consume the retry budget
+    // (contrast: the offline target's transient failures reach attempts=3).
+    assert.equal(replicationJob.attempts, 1);
+    assert.match(
+      replicationJob.error ?? "",
+      /non-retryable capacity error: .*no space left on device/,
+    );
+  });
+
   it("returns service unavailable when no snapshot store is configured", async () => {
     const isolated = await startHttpServer({
       host: "127.0.0.1",
@@ -653,6 +864,15 @@ describePostgres("owner-managed snapshot HTTP API", () => {
         { headers: { authorization: "Bearer snapshot-unconfigured" } },
       );
       assert.equal(response.status, 503);
+      const probe = await fetch(
+        `${isolated.url}/v1/workspaces/${workspaceId}/snapshots:probe`,
+        {
+          method: "POST",
+          headers: { authorization: "Bearer snapshot-unconfigured" },
+          body: "{}",
+        },
+      );
+      assert.equal(probe.status, 503);
     } finally {
       await isolated.close();
     }

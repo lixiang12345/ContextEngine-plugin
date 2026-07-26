@@ -8,6 +8,7 @@ import {
   type EmbeddingVector,
   vectorToBuffer,
 } from "../embeddings/provider.js";
+import { scorePathHint } from "../search/path-hints.js";
 
 const INDEX_VERSION = 2;
 
@@ -376,14 +377,7 @@ export class SqliteStore {
         )
         .all(h, limit * 2) as Array<{ id: string; path: string }>;
       for (const r of rows) {
-        const base = path.basename(r.path).toLowerCase();
-        const stem = base.replace(/\.[^.]+$/, "");
-        const score =
-          stem === normalized
-            ? 3.2
-            : base.startsWith(`${normalized}.`)
-              ? 3
-              : 2;
+        const score = scorePathHint(r.path, normalized);
         scores.set(r.id, Math.max(scores.get(r.id) ?? 0, score));
       }
     }

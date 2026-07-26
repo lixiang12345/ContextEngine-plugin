@@ -439,6 +439,14 @@ Content-Type: application/json
 
 GET /v1/workspaces/{workspaceId}/snapshot-replication-targets
 
+POST /v1/workspaces/{workspaceId}/snapshots:probe
+Content-Type: application/json
+{}
+
+POST /v1/workspaces/{workspaceId}/snapshot-replication-targets/{targetId}/probe
+Content-Type: application/json
+{}
+
 GET /v1/workspaces/{workspaceId}/snapshot-replication-schedules
 
 PUT /v1/workspaces/{workspaceId}/snapshots/{name}/replication-schedules/{targetId}
@@ -470,12 +478,22 @@ GET /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/attempts?limit=100&before
 POST /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/retry
 Content-Type: application/json
 {}
+
+POST /v1/workspaces/{workspaceId}/snapshot-jobs/{jobId}/cancel
+Content-Type: application/json
+{}
 ```
 
 Export, import, prune, GC, and replication return `202` with a durable `job` payload. Poll the
 status endpoint or subscribe to its SSE endpoint; the payload includes operation,
 attempt count, phase progress, result, and a terminal error. Failed jobs can be
-requeued through the retry endpoint. A PostgreSQL claim
+requeued through the retry endpoint. Owners can cancel a queued or running job:
+queued jobs terminalize as `cancelled` immediately, running jobs carry a durable
+`cancel_requested_at` flag that the owning worker observes on its next lease
+renewal before writing the fenced `cancelled` terminal state. Repeat cancel
+requests are idempotent (`202`); jobs that already succeeded or failed return
+`409`. After the `cancelled` terminal state, success, failure, retry, and
+progress writes from any stale attempt are rejected. A PostgreSQL claim
 uses `FOR UPDATE SKIP LOCKED` plus a lease token, so multiple HTTP instances can
 share the queue and an expired worker cannot overwrite a newer attempt. Import
 verifies the artifact before promotion and refreshes the cached engine after
@@ -492,6 +510,28 @@ count, and a low-cardinality `health`/`alert` summary. Replication failures retr
 automatically with bounded exponential backoff; configure
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` and
 `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` to tune the policy.
+Capacity (`ENOSPC`, quota) and permission (`EACCES`, S3 `AccessDenied`/403)
+failures are classified as non-retryable: the job fails on the first attempt
+with a `non-retryable capacity error:` / `non-retryable permission error:`
+prefix instead of consuming the retry budget.
+The probe endpoints diagnose a target before scheduling work: they write one
+short-lived object through the same workspace-scoped prefix real jobs use,
+then verify head visibility, read-back content, conditional-write (CAS)
+fencing, and listing where the store supports them, and finally delete the
+object. The response reports per-operation `status`/`latency_ms`, a failure
+`classification` (`permission`/`capacity`/`timeout`/`not_found`/`transient`),
+detected capabilities, the store `type` (`filesystem`/`s3`/`external`), and
+free/total bytes for filesystem targets; error text is bounded and credentials
+never appear. Every probe operation runs under its own deadline
+(`CONTEXTENGINE_SNAPSHOT_PROBE_TIMEOUT_MS`, default 10 s). Regular store
+operations get independent deadlines too: bounded metadata operations
+(head/list/delete/CAS) default to 30 s via
+`CONTEXTENGINE_SNAPSHOT_STORE_METADATA_TIMEOUT_MS`, while streaming transfers
+(put/get) are unbounded by default because artifact size is unbounded —
+`CONTEXTENGINE_SNAPSHOT_STORE_TRANSFER_TIMEOUT_MS` opts in. The operator
+observability overview (`GET /v1/observability/overview`) includes a
+`snapshot_targets` summary aggregating per-target health across workspaces,
+and the dashboard renders it as a "Snapshot target health" table.
 Schema v15 appends a durable event in the same transaction as every job state
 mutation. With no cursor, `/events` emits the latest state. `Last-Event-ID` or
 `after_event_id` replays later events by decimal PostgreSQL `BIGINT` id; frames
@@ -663,13 +703,29 @@ Poll `GET /v1/index-jobs/{jobId}` or subscribe to
       "message": "Embedding 1-8 / 49"
     },
     "result": null,
-    "error": null
+    "error": null,
+    "executor_affinity": "local",
+    "attempts": 1,
+    "locked_at": "2026-07-26T08:00:00.000Z"
   }
 }
 ```
 
-Jobs are serialized inside one service process so the embedding endpoint/GPU is
-not overloaded by concurrent full-repository indexing.
+Schema v17 stores each running attempt's database-clock heartbeat and opaque
+fencing token. Every HTTP instance periodically scans queued or lease-expired
+**Blob-workspace** rows, but concurrent claims can produce only one owner. Local
+workspace jobs carry an immutable executor affinity and are visible only to a
+matching worker, including after graceful restart or lease expiry. Set
+`CONTEXTENGINE_INDEX_JOB_EXECUTOR_ID` explicitly for containers or multi-host
+deployments; the fallback hashes hostname, cwd, and the local-root allowlist.
+Progress and terminal writes require the
+attempt token, so a stale worker cannot overwrite a takeover. Each process still
+executes one job at a time to bound embedding pressure. Graceful shutdown
+cooperatively aborts staging work and a pending generation-lock wait, then
+requeues the owned attempt. The SSE route combines local notifications with
+PostgreSQL polling and discards polls older than a newer local event, so clients
+can connect to any healthy instance without observing state regression; streams
+end at a terminal state.
 
 ## Retrieval and file access
 
@@ -791,6 +847,7 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_MCP_SESSION_STORE` | `postgres` (default, cross-instance) or `memory` (single-process rollback) |
 | `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` | Idle lifetime for remote MCP sessions (default 30 minutes) |
 | `CONTEXTENGINE_MCP_MAX_SESSIONS` | Global PostgreSQL Remote MCP session limit (default 128; per-process in memory mode) |
+| `CONTEXTENGINE_MAX_FILE_BYTES` | Source-file index limit; default 524288 bytes, hard maximum 33554432 bytes |
 | `CONTEXTENGINE_HTTP_ALLOW_UNAUTHENTICATED` | Explicitly disable auth; local development only |
 | `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | Permit server-local root workspaces; default off |
 | `CONTEXTENGINE_LOCAL_ROOT_ALLOWLIST` | Path-delimited allowlist for local workspaces |
@@ -798,6 +855,10 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_GITHUB_WEBHOOK_SECRET` | Enables HMAC-SHA256 GitHub push delivery; minimum 16 characters |
 | `CONTEXTENGINE_WEBHOOK_POLL_INTERVAL_MS` | Persistent inbox poll interval; default 2000 ms |
 | `CONTEXTENGINE_WEBHOOK_MAX_ATTEMPTS` | Terminal failure threshold; default 5 |
+| `CONTEXTENGINE_INDEX_JOB_LEASE_MS` | Durable index-job lease; default 300000 ms, range 1000-86400000 ms |
+| `CONTEXTENGINE_INDEX_JOB_POLL_INTERVAL_MS` | Cross-instance index queue scan and SSE fallback poll interval; default 2000 ms, range 100-60000 ms |
+| `CONTEXTENGINE_INDEX_JOB_EXECUTOR_ID` | Stable non-secret local-filesystem executor identity; explicit value recommended for containers/multi-host deployments |
+| `CONTEXTENGINE_INDEX_ANALYZE_TIMEOUT_MS` | Best-effort PostgreSQL planner-statistics refresh timeout after a generation build; default 30000 ms |
 | `CONTEXTENGINE_WEBSITE_ALLOW_PRIVATE_NETWORK` | Trusted deployment override for private-network/plain-HTTP website crawling; default off |
 | `CONTEXTENGINE_WEBSITE_TIMEOUT_MS` | Per-request website crawl timeout; default 15000 ms |
 | `CONTEXTENGINE_GITLAB_TOKEN` | Optional GitLab API `PRIVATE-TOKEN`; never returned or stored in source config |
@@ -814,6 +875,11 @@ workspace revision locally and retry only after handling a `409` conflict.
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_MAX_ATTEMPTS` | Automatic replication attempts per job (default 3, maximum 10) |
 | `CONTEXTENGINE_SNAPSHOT_REPLICATION_RETRY_BASE_MS` | Initial automatic retry delay (default 1000 ms, maximum 60000 ms) |
 | `CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS` | Durable snapshot job/schedule scan and SSE fallback poll interval (default 2000 ms, range 100-60000 ms) |
+| `CONTEXTENGINE_SNAPSHOT_EVENT_RETENTION_MS` | Snapshot job event/attempt history age retention (default 30 days; 0 disables age-based pruning) |
+| `CONTEXTENGINE_SNAPSHOT_EVENT_MAX_PER_JOB` | Newest snapshot job events kept per job (default 500; 0 disables count-based pruning) |
+| `CONTEXTENGINE_SNAPSHOT_STORE_METADATA_TIMEOUT_MS` | Deadline for bounded store operations — head/list/delete/CAS (default 30000 ms; 0 disables) |
+| `CONTEXTENGINE_SNAPSHOT_STORE_TRANSFER_TIMEOUT_MS` | Deadline for streaming put/get transfers (default 0 = unbounded; artifact size is unbounded) |
+| `CONTEXTENGINE_SNAPSHOT_PROBE_TIMEOUT_MS` | Per-operation snapshot target probe deadline (default 10000 ms, range 100-120000 ms) |
 | `CONTEXTENGINE_S3_ENDPOINT` / `_FORCE_PATH_STYLE` | Optional S3-compatible service endpoint and path-style mode |
 | `CONTEXTENGINE_S3_SSE` / `_KMS_KEY_ID` | Optional `AES256` or `aws:kms` server-side encryption |
 
@@ -868,6 +934,22 @@ installation, so already-running v14 workers append history after commit; those
 old HTTP instances still lack durable SSE and must leave request routing before
 the new stream guarantee is advertised. Deploy new workers before enabling
 schedules, replication fencing, or cross-instance streams.
+
+Schema v16 adds leases and attempt fencing to ordinary index jobs. Its migration
+locks `ce_index_jobs`, adds the lease fields and requeues any v15 `running` row
+because it has no trustworthy owner token. Drain v15 workers before applying the
+migration. Schema v17 then adds immutable executor affinity. Existing local
+queued/running rows have no trustworthy filesystem identity, so the migration
+marks them failed with an explicit retry message; shared Blob rows remain
+recoverable. Drain v15/v16 workers first, deploy every v17 worker with a stable
+executor ID, and only then restore index-job routing. Binary rollback requires a
+pre-v17 database restore or a reviewed down migration.
+
+Schema v18 adds snapshot job cancellation (a `cancelled` terminal status plus
+`cancel_requested_at`) and history-retention support. The migration extends the
+status/kind constraints, recreates the audit trigger, and adds a `created_at`
+index for retention deletes; existing rows are untouched. Pre-v18 workers do not
+observe cancellation flags, so drain them before relying on cancel semantics.
 
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former

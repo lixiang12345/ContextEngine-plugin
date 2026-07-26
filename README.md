@@ -348,6 +348,14 @@ alerts. See [docs/SNAPSHOTS.md](./docs/SNAPSHOTS.md) for the schedule contract.
 See the complete client contract, payloads, SSE job stream, and packaged IntelliJ
 plugin mapping in [docs/HTTP_API.md](./docs/HTTP_API.md).
 
+HTTP index jobs use the same production posture: schema v17 stores attempt
+leases and fencing tokens, every instance polls claimable Blob-workspace work,
+stale workers cannot overwrite a replacement attempt, and an SSE client can
+observe monotonic progress through any healthy instance. Local-path jobs carry
+a stable executor affinity so only replicas with the same filesystem identity
+can recover them. Graceful shutdown cancels lock waits and requeues owned work
+before database and engine pools close.
+
 ---
 
 ## CLI reference
@@ -394,7 +402,15 @@ explicitly need a smaller packed payload; omitting it returns all selected hits.
 | `CONTEXTENGINE_MCP_SESSION_STORE` | `postgres` (default, cross-instance) or `memory` (single-process rollback) |
 | `CONTEXTENGINE_MCP_SESSION_IDLE_TTL_MS` | Remote MCP idle session lifetime (default 30 minutes) |
 | `CONTEXTENGINE_MCP_MAX_SESSIONS` | Global PostgreSQL Remote MCP session cap (default 128; per-process in memory mode) |
+| `CONTEXTENGINE_MAX_FILE_BYTES` | Source-file index limit (default 512 KiB; hard maximum 32 MiB) |
+| `CONTEXTENGINE_INDEX_JOB_LEASE_MS` | Durable index-job ownership lease (default 300000 ms; 1000-86400000 ms) |
+| `CONTEXTENGINE_INDEX_JOB_POLL_INTERVAL_MS` | Cross-instance index-job scan and SSE fallback interval (default 2000 ms; 100-60000 ms) |
+| `CONTEXTENGINE_INDEX_JOB_MAX_ATTEMPTS` | Retry budget before a repeatedly re-claimed index job fails terminally (default 5; 1-100) |
+| `CONTEXTENGINE_INDEX_JOB_EXECUTOR_ID` | Stable non-secret local-filesystem executor identity; set explicitly for containers/multi-host deployments |
+| `CONTEXTENGINE_INDEX_ANALYZE_TIMEOUT_MS` | Best-effort PostgreSQL planner-statistics refresh timeout after a generation build (default 30000 ms) |
 | `CONTEXTENGINE_SNAPSHOT_JOB_POLL_INTERVAL_MS` | Durable snapshot job/schedule scan interval (default 2000 ms; 100-60000 ms) |
+| `CONTEXTENGINE_SNAPSHOT_EVENT_RETENTION_MS` | Snapshot job history age retention (default 30 days; 0 disables) |
+| `CONTEXTENGINE_SNAPSHOT_EVENT_MAX_PER_JOB` | Newest snapshot job events kept per job (default 500; 0 disables) |
 | `CONTEXTENGINE_HTTP_ALLOW_LOCAL_WORKSPACES` | Allow server-local workspace roots (default off) |
 | `CONTEXTENGINE_HTTP_ALLOW_PRIVATE_MODEL_URLS` | Permit runtime model URLs on private/local networks in trusted deployments (default off) |
 | `CONTEXTENGINE_COMMIT_LIMIT` | How many recent commits to index (default `80`, `0` = off) |
