@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added bounded task-subquery decomposition to context packing. A long,
+  multi-facet task now plans up to four focused subqueries (identifier, path,
+  clause, and history facets — at most 120 characters each, deterministic,
+  no model, nothing but the caller's own query text) that run as additional
+  retrieval hops and fuse with the primary ranking via weighted
+  reciprocal-rank fusion: the primary query dominates, subqueries surface
+  files the broad query buried. Short or single-facet queries keep the
+  single-query path, and any subquery failure falls back to the primary
+  result. The retrieval trace records each subquery with its facet, hit
+  count, and fused contribution; opt out via `subqueries: false`
+  (CLI `--no-subqueries`, HTTP/MCP `subqueries`). On the fixed PR-history
+  corpus the decomposition is measured at retrieval level by
+  base-revision gold-path recall (see task notes).
+
 - Added a tag-driven release workflow. `verify` re-runs the full PostgreSQL
   suite and corpus validation, packs the tarball, records its SHA-256 as a
   90-day build artifact, and runs `scripts/release-smoke.mjs`

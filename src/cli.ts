@@ -280,6 +280,7 @@ program
     "raw",
   )
   .option("--no-rules", "skip workspace rule files (AGENTS.md, CLAUDE.md, …)")
+  .option("--no-subqueries", "disable multi-facet task subquery decomposition")
   .option("--json", "JSON output")
   .action(
     async (
@@ -291,6 +292,7 @@ program
         maxTokens?: string;
         packing?: string;
         rules?: boolean;
+        subqueries?: boolean;
         json?: boolean;
       },
     ) => {
@@ -304,6 +306,7 @@ program
         maxTokens: optionalPositiveInteger(opts.maxTokens),
         packing: opts.packing === "extractive" ? "extractive" : "raw",
         includeRules: opts.rules !== false,
+        subqueries: opts.subqueries !== false,
       });
       await engine.close();
       if (opts.json) {
@@ -324,6 +327,11 @@ program
               : null,
             `files: ${trace.fileCount}`,
             trace.rules && trace.rules.length ? `rules: ${trace.rules.length}` : null,
+            trace.subqueries && trace.subqueries.length
+              ? `subqueries: ${trace.subqueries
+                  .map((subquery) => `${subquery.reason}+${subquery.contributed}`)
+                  .join(",")}`
+              : null,
             trace.generationId ? `gen: ${trace.generationId.slice(0, 8)}` : null,
           ]
             .filter(Boolean)

@@ -732,7 +732,7 @@ end at a terminal state.
 | Endpoint | Input | Output |
 |---|---|---|
 | `POST /v1/workspaces/{id}/search` | `query`, optional `top_k`, `path_prefix`, `language`, `mode`, `expand_graph`, `neural_rerank` | Ranked chunks with path, line range, content, score, retrieval channels, and an `index` generation snapshot |
-| `POST /v1/workspaces/{id}/context` | `task` or `information_request`, optional `top_k`, `max_tokens`, `path_prefix`, `packing` (`raw`/`extractive`) | `packed_text`, token estimate, truncation flag, applied `packing`, a reproducible `trace` (intent, contributing channels, degraded channels, candidate/packed counts, generation/revision), used hits, and an `index` generation snapshot |
+| `POST /v1/workspaces/{id}/context` | `task` or `information_request`, optional `top_k`, `max_tokens`, `path_prefix`, `packing` (`raw`/`extractive`), `subqueries` (default true — bounded multi-facet task decomposition fused into the ranking) | `packed_text`, token estimate, truncation flag, applied `packing`, a reproducible `trace` (intent, contributing channels, degraded channels, candidate/packed counts, fused `subqueries` with facet and contribution, generation/revision), used hits, and an `index` generation snapshot |
 | `GET /v1/workspaces/{id}/file?path=...&start_line=...&end_line=...` | Relative path and optional 1-based range | `{path, content, start_line, end_line}` |
 | `GET /v1/workspaces/{id}/status` | None | Workspace revision and index stats |
 

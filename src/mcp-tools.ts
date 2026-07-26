@@ -45,6 +45,12 @@ const retrievalSchema = {
     .describe(
       "Prepend workspace convention files (AGENTS.md, CLAUDE.md, .augment/rules) as a grounding preamble. Default true.",
     ),
+  subqueries: z
+    .boolean()
+    .optional()
+    .describe(
+      "Decompose a multi-facet task into bounded focused subqueries fused with the primary ranking. Default true; short queries always use the single-query path.",
+    ),
 };
 
 /**
@@ -63,12 +69,14 @@ export function registerCodebaseRetrievalTools(
     max_tokens,
     packing,
     include_rules,
+    subqueries,
   }: {
     information_request: string;
     top_k?: number;
     max_tokens?: number;
     packing?: "raw" | "extractive";
     include_rules?: boolean;
+    subqueries?: boolean;
   }) => {
     try {
       const engine = await runtime.ensureReady();
@@ -79,6 +87,7 @@ export function registerCodebaseRetrievalTools(
         sourceAccess,
         packing,
         includeRules: include_rules,
+        subqueries,
       });
       return {
         content: [{ type: "text" as const, text: packed.packedText }],

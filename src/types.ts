@@ -158,6 +158,13 @@ export interface TaskContextOptions {
    * pass false to omit them.
    */
   includeRules?: boolean;
+  /**
+   * Decompose a multi-facet task into bounded focused subqueries and fuse
+   * their rankings with the primary query (default true). Short or
+   * single-facet queries always keep the single-query path; pass false to
+   * disable decomposition entirely.
+   */
+  subqueries?: boolean;
 }
 
 export type SourceAccessEffect = "allow" | "deny";
@@ -209,6 +216,18 @@ export interface RetrievalTrace {
    * .augment/rules …), with their precedence scope. Absent when none apply.
    */
   rules?: Array<{ path: string; scope: "always" | "agent-requested" }>;
+  /**
+   * Focused subqueries fused into the ranking for a multi-facet task, with
+   * the facet that produced each one, how many candidates it retrieved, and
+   * how many fused candidates it discovered or boosted. Absent when the
+   * single-query path served the request.
+   */
+  subqueries?: Array<{
+    query: string;
+    reason: "identifier" | "path" | "clause" | "history";
+    hits: number;
+    contributed: number;
+  }>;
   /** Immutable index generation that served the query. */
   generationId?: string;
   /** Revision of the generation currently serving queries. */

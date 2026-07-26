@@ -3370,6 +3370,7 @@ class HttpContextService {
             path_prefix: z.string().min(1).max(4096).optional(),
             packing: z.enum(["raw", "extractive"]).optional(),
             include_rules: z.boolean().optional(),
+            subqueries: z.boolean().optional(),
           })
           .parse(await readJsonBody(request, 128 * 1024));
         const task = input.task ?? input.information_request ?? input.informationRequest;
@@ -3391,6 +3392,7 @@ class HttpContextService {
           // skip the disk scan for them unless the caller explicitly opts in.
           includeRules:
             input.include_rules ?? (workspace.sourceMode === "local"),
+          subqueries: input.subqueries,
         });
         const index = await engine.indexStatus();
         json(response, 200, {

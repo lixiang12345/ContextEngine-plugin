@@ -24,6 +24,11 @@ import { createEmbeddingProvider } from "./embeddings/provider.js";
 import { readTextFile } from "./util/fs.js";
 import { analyzeQuery } from "./search/query-analyzer.js";
 import {
+  fuseSubqueryHits,
+  planTaskSubqueries,
+  type SubqueryContribution,
+} from "./search/task-subqueries.js";
+import {
   loadWorkspaceRules,
   formatRulesSection,
   type WorkspaceRule,
@@ -157,7 +162,7 @@ export class ContextEngine {
             sourcePathPrefix: this.config.extraRoots?.length ? "main" : undefined,
           });
 
-    const hits = await this.search({
+    const primaryHits = await this.search({
       query: opts.task,
       topK,
       pathPrefix: opts.pathPrefix,
@@ -166,6 +171,37 @@ export class ContextEngine {
       diversify: opts.diversify !== false,
       includeCommits: analyzed.prefersCommits ? true : undefined,
     });
+
+    // Multi-facet tasks additionally run a bounded set of focused subqueries
+    // (identifier/path/clause/history facets) and fuse the rankings. Any
+    // subquery failure falls back to the proven single-query result.
+    let hits = primaryHits;
+    let subqueryContributions: SubqueryContribution[] | undefined;
+    const plan = opts.subqueries === false ? [] : planTaskSubqueries(analyzed);
+    if (plan.length) {
+      try {
+        const subqueryTopK = Math.max(4, Math.floor(topK / 2));
+        const subqueryHits = await Promise.all(
+          plan.map((subquery) =>
+            this.search({
+              query: subquery.query,
+              topK: subqueryTopK,
+              pathPrefix: opts.pathPrefix,
+              sourceAccess: opts.sourceAccess,
+              mode: "auto",
+              diversify: false,
+              includeCommits: subquery.reason === "history" ? true : undefined,
+            }),
+          ),
+        );
+        const fused = fuseSubqueryHits(primaryHits, plan, subqueryHits, topK);
+        hits = fused.hits;
+        subqueryContributions = fused.contributions;
+      } catch {
+        hits = primaryHits;
+        subqueryContributions = undefined;
+      }
+    }
     const orderedHits = orderContextHits(hits);
 
     const headerText = [
@@ -275,6 +311,9 @@ export class ContextEngine {
       rules: rules.length
         ? rules.map((rule) => ({ path: rule.path, scope: rule.scope }))
         : undefined,
+      subqueries: subqueryContributions?.length
+        ? subqueryContributions
+        : undefined,
       candidateCount: hits.length,
       packedCount: used.length,
       fileCount: new Set(used.map((hit) => hit.chunk.path)).size,
@@ -311,6 +350,7 @@ export class ContextEngine {
       sourceAccess?: import("./types.js").SourcePathPolicy;
       packing?: PackingPolicy;
       includeRules?: boolean;
+      subqueries?: boolean;
     },
   ): Promise<PackedContext> {
     return this.getTaskContext({
@@ -321,6 +361,7 @@ export class ContextEngine {
       diversify: true,
       packing: opts?.packing,
       includeRules: opts?.includeRules,
+      subqueries: opts?.subqueries,
     });
   }
 
