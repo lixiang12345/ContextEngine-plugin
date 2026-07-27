@@ -5,7 +5,11 @@ import type {
   StoreSearchFilter,
 } from "../store/postgres-store.js";
 import { analyzeQuery } from "./query-analyzer.js";
-import { inferPathHints } from "./path-hints.js";
+import { tokenize } from "./bm25.js";
+import {
+  inferPathHints,
+  isLanguageQualifier,
+} from "./path-hints.js";
 import { inferSymbolHints } from "./symbol-hints.js";
 import {
   collapseByPath,
@@ -51,9 +55,41 @@ interface LexicalChannelHits {
 // executes each channel in one set-based query.
 const MAX_IDENTIFIER_HINTS = 12;
 const MAX_PATH_HINTS = 24;
+const MIN_CANDIDATE_LIMIT = 96;
+const CANDIDATES_PER_HIT = 8;
 const DEFAULT_MODEL_TIMEOUT_MS = 2_000;
 const DEFAULT_BREAKER_FAILURE_THRESHOLD = 3;
 const DEFAULT_BREAKER_COOLDOWN_MS = 30_000;
+
+function isStrongIdentifier(identifier: string): boolean {
+  return (
+    /[a-z0-9][A-Z]/.test(identifier) ||
+    (/^[A-Z][a-z0-9]+$/.test(identifier) && identifier.length >= 7)
+  );
+}
+
+function ftsPriorityTerms(
+  identifiers: string[],
+  tokens: string[],
+): string[] {
+  const identifierTerms = [
+    ...new Set(identifiers.flatMap((identifier) => tokenize(identifier))),
+  ]
+    .filter((term) => term.length >= 4)
+    .sort((left, right) => right.length - left.length);
+  const priority: string[] = [];
+  for (const term of identifierTerms) {
+    if (!priority.includes(term)) priority.push(term);
+    const index = tokens.indexOf(term);
+    if (index < 0) continue;
+    for (const neighbor of [tokens[index - 1], tokens[index + 1]]) {
+      if (neighbor?.length >= 4 && !priority.includes(neighbor)) {
+        priority.push(neighbor);
+      }
+    }
+  }
+  return priority;
+}
 
 function boundedNumber(
   value: number | string | undefined,
@@ -224,7 +260,10 @@ export class PostgresHybridSearcher {
         : requested;
     const degradedChannels = new Set<string>();
     const analyzed = analyzeQuery(opts.query);
-    const candidateLimit = Math.max(topK * 16, 128);
+    const candidateLimit = Math.max(
+      topK * CANDIDATES_PER_HIT,
+      MIN_CANDIDATE_LIMIT,
+    );
     const filter: StoreSearchFilter = {
       pathPrefix: opts.pathPrefix,
       sourceAccess: opts.sourceAccess,
@@ -232,18 +271,31 @@ export class PostgresHybridSearcher {
       includeCommits: opts.includeCommits,
     };
 
-    const identifiers = analyzed.identifiers.slice(0, MAX_IDENTIFIER_HINTS);
+    const identifiers = analyzed.identifiers
+      .filter((identifier) => !isLanguageQualifier(identifier))
+      .slice(0, MAX_IDENTIFIER_HINTS);
     const symbolHints = inferSymbolHints(analyzed, MAX_IDENTIFIER_HINTS);
     const pathHints = inferPathHints(
       { ...analyzed, identifiers },
       MAX_PATH_HINTS,
     );
+    const useFts = analyzed.pathHints.length === 0;
+    const priorityTerms = ftsPriorityTerms(identifiers, analyzed.tokens);
 
     const searchLexical = async (): Promise<LexicalChannelHits> => {
       const [fts, symbol, path] = await Promise.all([
-        store.ftsSearch(opts.query, candidateLimit, filter),
-        symbolHints.length
-          ? store.searchSymbols(symbolHints, candidateLimit, filter)
+        useFts
+          ? store.ftsSearch(
+              opts.query,
+              candidateLimit,
+              filter,
+              priorityTerms,
+            )
+          : Promise.resolve([]),
+        identifiers.length
+          ? store.searchExactSymbols(identifiers, candidateLimit, filter)
+          : symbolHints.length
+            ? store.searchSymbols(symbolHints, candidateLimit, filter)
           : Promise.resolve([]),
         pathHints.length
           ? store.searchByPathHints(
@@ -340,7 +392,14 @@ export class PostgresHybridSearcher {
     if (semanticHits.length) lists.push(semanticHits);
 
     if (!lists.length) return [];
-    const rrfMap = rrfFuse(lists);
+    const rrfMap = new Map(
+      [...rrfFuse(lists).entries()]
+        .sort(
+          ([leftId, leftScore], [rightId, rightScore]) =>
+            rightScore - leftScore || leftId.localeCompare(rightId),
+        )
+        .slice(0, candidateLimit),
+    );
     const chunks = await store.getChunksByIds([...rrfMap.keys()]);
     const chunksById = new Map(chunks.map((chunk) => [chunk.id, chunk]));
 
@@ -388,7 +447,10 @@ export class PostgresHybridSearcher {
     }
 
     candidates.sort(preferImplementation);
-    if (opts.expandGraph !== false && candidates.length) {
+    const expandGraph =
+      opts.expandGraph === true ||
+      (opts.expandGraph !== false && !identifiers.some(isStrongIdentifier));
+    if (expandGraph && candidates.length) {
       const expanded = await store.expandGraph(
         candidates.slice(0, Math.max(topK * 2, 8)).map((candidate) => candidate.chunk),
         Math.max(topK * 2, 12),

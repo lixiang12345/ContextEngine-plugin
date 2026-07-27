@@ -66,7 +66,8 @@ export function inferSymbolHints(
     }
   }
   suffixCompounds.sort((left, right) => left.length - right.length);
-  return [...new Set([...suffixCompounds, ...compounds, ...terms])].slice(
+  const structured = [...new Set([...suffixCompounds, ...compounds])];
+  return (structured.length ? structured : [...new Set(terms)]).slice(
     0,
     maxNaturalTerms,
   );

@@ -278,6 +278,97 @@ describe("rerank", () => {
     );
   });
 
+  it("keeps same-basename implementations from distinct monorepo layers", () => {
+    const mk = (id: string, path: string, final: number) => ({
+      id,
+      chunk: {
+        id,
+        path,
+        language: "typescript",
+        startLine: 1,
+        endLine: 2,
+        content: "configuration model",
+        hash: id,
+      },
+      channels: {},
+      rrf: final,
+      features: final,
+      final,
+    });
+    const ranked = [
+      mk("workbench", "vs/workbench/services/configuration/browser/configuration.ts", 1.4),
+      mk("model", "vs/platform/configuration/common/configurationModels.ts", 1.25),
+      mk("plural", "vs/platform/configuration/common/configurations.ts", 1.2),
+      mk("service", "vs/workbench/services/configuration/browser/configurationService.ts", 1.1),
+      mk("target", "vs/platform/configuration/common/configuration.ts", 1.03),
+      mk("other", "vs/platform/workspace/common/workspace.ts", 1.0),
+    ];
+
+    const pick = mmrSelect(ranked, 5, 0.8);
+    assert.ok(
+      pick.some(
+        (candidate) =>
+          candidate.chunk.path ===
+          "vs/platform/configuration/common/configuration.ts",
+      ),
+    );
+  });
+
+  it("diversifies platform copies with the same package-relative path", () => {
+    const mk = (id: string, path: string, final: number) => ({
+      id,
+      chunk: {
+        id,
+        path,
+        language: "java",
+        startLine: 1,
+        endLine: 2,
+        content: "future utilities",
+        hash: id,
+      },
+      channels: {},
+      rrf: final,
+      features: final,
+      final,
+    });
+    const ranked = [
+      mk(
+        "main-interface",
+        "guava/src/com/google/common/util/concurrent/ListenableFuture.java",
+        1.15,
+      ),
+      mk(
+        "android-interface",
+        "android/guava/src/com/google/common/util/concurrent/ListenableFuture.java",
+        1.14,
+      ),
+      mk(
+        "gwt-interface",
+        "guava-gwt/src-super/com/google/common/util/concurrent/ListenableFuture.java",
+        1.13,
+      ),
+      mk(
+        "emulated-interface",
+        "guava-gwt/src-super/com/google/common/util/concurrent/super/com/google/common/util/concurrent/ListenableFuture.java",
+        1.12,
+      ),
+      mk(
+        "target",
+        "guava/src/com/google/common/util/concurrent/Futures.java",
+        1.05,
+      ),
+    ];
+
+    const pick = mmrSelect(ranked, 3, 0.8);
+    assert.ok(
+      pick.some(
+        (candidate) =>
+          candidate.chunk.path ===
+          "guava/src/com/google/common/util/concurrent/Futures.java",
+      ),
+    );
+  });
+
   it("collapses chunks and rewards implementation evidence across a file", () => {
     const q = analyzeQuery("consume backend SSE events submit tool results continuation");
     const mk = (id: string, path: string, content: string, final: number, language = "kotlin") => ({
@@ -338,6 +429,37 @@ describe("rerank", () => {
     assert.equal(collapsed[0].chunk.path, "compiler/emitter.ts");
   });
 
+  it("keeps an exact basename ahead of a close plural file", () => {
+    const q = analyzeQuery(
+      "configuration model merges workspace folder memory and override settings",
+    );
+    const mk = (id: string, path: string, final: number) => ({
+      id,
+      chunk: {
+        id,
+        path,
+        language: "typescript",
+        startLine: 1,
+        endLine: 2,
+        content: "configuration model workspace folder memory override settings",
+        hash: id,
+      },
+      channels: { fts: 1 },
+      rrf: final,
+      features: final,
+      final,
+    });
+
+    const collapsed = collapseByPath(
+      [
+        mk("plural", "src/configurations.ts", 1.02),
+        mk("exact", "src/configuration.ts", 1),
+      ],
+      q,
+    );
+    assert.equal(collapsed[0].chunk.path, "src/configuration.ts");
+  });
+
   it("does not let a same-name test path outrank production code", () => {
     const q = analyzeQuery(
       "tsserver Session executes protocol commands and sends responses",
@@ -361,6 +483,9 @@ describe("rerank", () => {
     const collapsed = collapseByPath(
       [
         mk("test", "testRunner/unittests/tsserver/session.ts", 0.91),
+        mk("go-test", "server/session_test.go", 0.91),
+        mk("java-test", "server/SessionTest.java", 0.91),
+        mk("python-test", "server/session_test.py", 0.91),
         mk("production", "server/session.ts", 0.8),
       ],
       q,

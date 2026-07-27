@@ -37,10 +37,23 @@ describe("query analyzer", () => {
     assert.ok(q.identifiers.includes("analyzeQuery"));
   });
 
+  it("keeps conventional single-letter-prefixed interface identifiers", () => {
+    const q = analyzeQuery(
+      "IFileService resolves reads writes watches and registers providers",
+    );
+    assert.deepEqual(q.identifiers, ["IFileService"]);
+    assert.equal(q.intent, "mixed");
+  });
+
   it("recognizes a single PascalCase class without treating question words as symbols", () => {
     const q = analyzeQuery("Where is Optional implemented and transformed?");
     assert.ok(q.identifiers.includes("Optional"));
     assert.equal(q.identifiers.includes("Where"), false);
     assert.equal(q.intent, "symbol");
+  });
+
+  it("recognizes short TitleCase project qualifiers", () => {
+    const q = analyzeQuery("read Koa request headers and accepted types");
+    assert.deepEqual(q.identifiers, ["Koa"]);
   });
 });

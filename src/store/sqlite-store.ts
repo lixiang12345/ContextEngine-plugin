@@ -362,7 +362,7 @@ export class SqliteStore {
     limit: number,
   ): Array<{ id: string; score: number }> {
     if (!hints.length) return [];
-    const scores = new Map<string, number>();
+    const scores = new Map<string, Map<string, number>>();
     for (const hint of hints) {
       const normalized = hint.trim().toLowerCase();
       if (normalized.length < 2) continue;
@@ -370,19 +370,38 @@ export class SqliteStore {
       const h = `%${escaped}%`;
       const rows = this.db
         .prepare(
-          `SELECT id, path FROM chunks
-           WHERE lower(path) LIKE ? ESCAPE '\\'
-           ORDER BY length(path), path
+          `SELECT c.id, f.path
+           FROM files f
+           JOIN chunks c ON c.id = (
+             SELECT representative.id
+             FROM chunks representative
+             WHERE representative.path = f.path
+             ORDER BY representative.start_line, representative.id
+             LIMIT 1
+           )
+           WHERE lower(f.path) LIKE ? ESCAPE '\\'
+           ORDER BY length(f.path), f.path
            LIMIT ?`,
         )
         .all(h, limit * 2) as Array<{ id: string; path: string }>;
       for (const r of rows) {
         const score = scorePathHint(r.path, normalized);
-        scores.set(r.id, Math.max(scores.get(r.id) ?? 0, score));
+        const byHint = scores.get(r.id) ?? new Map<string, number>();
+        byHint.set(normalized, Math.max(byHint.get(normalized) ?? 0, score));
+        scores.set(r.id, byHint);
       }
     }
     return [...scores.entries()]
-      .map(([id, score]) => ({ id, score }))
+      .map(([id, byHint]) => {
+        const values = [...byHint.values()].sort((left, right) => right - left);
+        const support = values
+          .slice(1)
+          .reduce((sum, value) => sum + value, 0);
+        return {
+          id,
+          score: values[0] + Math.min(0.8, support * 0.1),
+        };
+      })
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
   }

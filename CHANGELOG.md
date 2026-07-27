@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Hardened BM25 fallback and file-level ranking across the canonical eight-
+  repository small/medium/large suite. PostgreSQL and SQLite path hints now
+  select files before representative chunks; exact strong identifiers use a
+  bounded symbol fast path; broad FTS queries use bounded anchor/support
+  groups; RRF candidate loading, graph fanout, symbol substring matching, and
+  MMR platform-copy diversity are bounded. PostgreSQL schema v19 installs
+  `pg_trgm` in `public` and adds GIN trigram indexes for lower-cased symbol
+  names and file paths. The canonical BM25-only protocol (three repetitions,
+  one warmup, per-case cold CLI) passes all 8/8 suite gates without relaxing
+  Recall, MRR, nDCG, Top3/Top5, latency, or throughput thresholds. Hybrid and
+  neural production eligibility still requires the separately configured
+  model services.
+
 - Extended the task-retrieval corpus with a public-repository manifest
   (`benchmarks/task-retrieval/public-v1.json`): six real cross-module fixes
   from hono and zod, pinned by base revision with PR-style prompts and the

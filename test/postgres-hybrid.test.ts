@@ -10,6 +10,7 @@ type SearchStoreOverrides = Partial<
     PostgresStore,
     | "ftsSearch"
     | "searchSymbols"
+    | "searchExactSymbols"
     | "searchByPathHints"
     | "semanticSearch"
     | "getChunksByIds"
@@ -38,6 +39,7 @@ function fakeStore(
   return {
     ftsSearch: async () => [],
     searchSymbols: async () => [],
+    searchExactSymbols: async () => [],
     searchByPathHints: async () => [],
     semanticSearch: async () => [],
     getChunksByIds: async (ids: string[]) =>
@@ -72,11 +74,11 @@ describe("PostgresHybridSearcher", () => {
         await gate;
         return [{ id: lexicalChunk.id, score: 1 }];
       },
-      searchSymbols: async (names) => {
+      searchExactSymbols: async (names) => {
         started.add("symbol");
         symbolArgs = names;
         await gate;
-        return [];
+        return [{ id: lexicalChunk.id, score: 3 }];
       },
       searchByPathHints: async (hints) => {
         started.add("path");
@@ -116,7 +118,7 @@ describe("PostgresHybridSearcher", () => {
 
     assert.deepEqual(
       startedBeforeRelease,
-      new Set(["fts", "symbol", "path", "embed", "semantic"]),
+      new Set(["symbol", "path", "embed", "semantic"]),
       "all independent channels should start before any channel completes",
     );
     assert.equal(capturedSymbols.length, 12);
@@ -210,6 +212,116 @@ describe("PostgresHybridSearcher", () => {
     assert.equal(hits[0]?.chunk.path, target.path);
   });
 
+  it("bounds the fused candidate union before loading chunk bodies", async () => {
+    const chunks = Array.from({ length: 288 }, (_, index) =>
+      chunk(`candidate-${index}`),
+    );
+    let loadedIds: string[] = [];
+    const rows = (offset: number) =>
+      Array.from({ length: 96 }, (_, index) => ({
+        id: chunks[offset + index].id,
+        score: 96 - index,
+      }));
+    const store = fakeStore(chunks, {
+      ftsSearch: async () => rows(0),
+      searchSymbols: async () => rows(96),
+      searchByPathHints: async () => rows(192),
+      getChunksByIds: async (ids) => {
+        loadedIds = ids;
+        return ids.map((id) => chunks.find((item) => item.id === id)!);
+      },
+    });
+    const searcher = new PostgresHybridSearcher();
+    searcher.load({ store, hasEmbeddings: false });
+
+    await searcher.search({
+      query: "deployment controller syncs replica sets and rolls out deployments",
+      mode: "bm25",
+      topK: 12,
+      expandGraph: false,
+      diversify: false,
+    });
+
+    assert.equal(loadedIds.length, 96);
+  });
+
+  it("keeps bounded FTS alongside exact strong-identifier retrieval", async () => {
+    const target = chunk("IFileService", "vs/platform/files/common/files.ts");
+    let ftsCalls = 0;
+    let exactNames: string[] = [];
+    const store = fakeStore([target], {
+      ftsSearch: async () => {
+        ftsCalls += 1;
+        return [{ id: target.id, score: 1 }];
+      },
+      searchExactSymbols: async (names) => {
+        exactNames = names;
+        return [{ id: target.id, score: 3 }];
+      },
+    });
+    const searcher = new PostgresHybridSearcher();
+    searcher.load({ store, hasEmbeddings: false });
+
+    const hits = await searcher.search({
+      query: "IFileService resolves reads writes and watches providers",
+      mode: "bm25",
+      expandGraph: false,
+      diversify: false,
+    });
+
+    assert.equal(ftsCalls, 1);
+    assert.deepEqual(exactNames, ["IFileService"]);
+    assert.equal(hits[0]?.chunk.path, target.path);
+  });
+
+  it("does not route a language qualifier through exact-symbol retrieval", async () => {
+    const target = chunk("checker", "compiler/checker.ts");
+    let exactCalls = 0;
+    const store = fakeStore([target], {
+      ftsSearch: async () => [{ id: target.id, score: 1 }],
+      searchExactSymbols: async () => {
+        exactCalls += 1;
+        return [];
+      },
+    });
+    const searcher = new PostgresHybridSearcher();
+    searcher.load({ store, hasEmbeddings: false });
+
+    const hits = await searcher.search({
+      query: "TypeScript type checker resolves signatures and diagnostics",
+      mode: "bm25",
+      expandGraph: false,
+      diversify: false,
+    });
+
+    assert.equal(exactCalls, 0);
+    assert.equal(hits[0]?.chunk.path, target.path);
+  });
+
+  it("lets callers explicitly request graph expansion for a strong identifier", async () => {
+    const target = chunk("IFileService", "vs/platform/files/common/files.ts");
+    const related = chunk("DiskProvider", "vs/platform/files/common/disk.ts");
+    let graphCalls = 0;
+    const store = fakeStore([target, related], {
+      searchExactSymbols: async () => [{ id: target.id, score: 3 }],
+      expandGraph: async () => {
+        graphCalls += 1;
+        return [related];
+      },
+    });
+    const searcher = new PostgresHybridSearcher();
+    searcher.load({ store, hasEmbeddings: false });
+
+    await searcher.search({
+      query: "IFileService reads files",
+      mode: "bm25",
+      expandGraph: true,
+      diversify: false,
+    });
+
+    assert.equal(graphCalls, 1);
+  });
+
   it("fails closed for commit candidates and graph expansion under a source policy", async () => {
     const visible = chunk("visibleImplementation");
     const directCommit: CodeChunk = {
@@ -226,6 +338,10 @@ describe("PostgresHybridSearcher", () => {
       ftsSearch: async () => [
         { id: directCommit.id, score: 2 },
         { id: visible.id, score: 1 },
+      ],
+      searchExactSymbols: async () => [
+        { id: directCommit.id, score: 3 },
+        { id: visible.id, score: 3 },
       ],
       expandGraph: async () => [expandedCommit],
     });

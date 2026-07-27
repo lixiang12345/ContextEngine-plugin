@@ -22,7 +22,7 @@ export interface AnalyzedQuery {
 }
 
 const IDENT_RE =
-  /\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\b[a-z]+[A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9_]{1,}\b|\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b|\b[A-Z][a-z][A-Za-z0-9]{2,}\b/g;
+  /\b[A-Z][a-z0-9]*(?:[A-Z][a-z0-9]+)+\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\b[a-z]+[A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9_]{1,}\b|\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b|\b[A-Z][a-z][A-Za-z0-9]{1,}\b/g;
 
 const CAPITALIZED_PROSE = new Set([
   "explain",

@@ -63,7 +63,7 @@ export function collapseByPath(
       ? Math.min(0.12, supportingScore * 0.04)
       : 0;
     const basenameWeight =
-      TEST_LIKE_PATH.test(best.chunk.path) && !TEST_QUERY.test(q.raw) ? 0.25 : 1;
+      isTestLikePath(best.chunk.path) && !TEST_QUERY.test(q.raw) ? 0.25 : 1;
     const basenameBoost =
       basenameQueryAffinity(best.chunk.path, q) * 0.24 * basenameWeight;
     collapsed.push({
@@ -101,8 +101,22 @@ const DOC_QUERY =
 const TEST_QUERY =
   /\b(test|tests|spec|fixture|fixtures|mock|mocks|benchmark|bench|example|examples|demo)\b/i;
 
-const TEST_LIKE_PATH =
-  /(^|\/)(test|tests|__tests__|spec|testRunner|test-helpers|fixtures?|benchmarks?)(\/|$)|\.(test|spec)\.[cm]?[jt]sx?$/i;
+const TEST_DIRECTORY =
+  /^(?:tests?|__tests__|spec|fixtures?|benchmarks?|test[-_][^/]*)$/i;
+const CAMEL_TEST_DIRECTORY = /^test[A-Z][^/]*$/;
+const TEST_FILE =
+  /(?:^|[._-])(?:test|spec)(?:[._-]|$)|Tests?\.java$|_test\.(?:go|py|rb)$/i;
+
+function isTestLikePath(filePath: string): boolean {
+  const segments = filePath.replaceAll("\\", "/").split("/");
+  const base = segments.at(-1) ?? "";
+  return (
+    segments.slice(0, -1).some(
+      (segment) =>
+        TEST_DIRECTORY.test(segment) || CAMEL_TEST_DIRECTORY.test(segment),
+    ) || TEST_FILE.test(base)
+  );
+}
 
 const DEPRECATED_QUERY =
   /\b(deprecat\w*|legacy|obsolete|old|outdated|superseded|removed)\b/i;
@@ -354,7 +368,24 @@ function pathSimilarity(a: string, b: string): number {
     if (pa[i] === pb[i]) common++;
     else break;
   }
-  if (pa[pa.length - 1] === pb[pb.length - 1]) return 0.85;
+  if (pa[pa.length - 1] === pb[pb.length - 1]) {
+    let commonSuffix = 0;
+    for (let i = 1; i <= n; i++) {
+      if (pa[pa.length - i] === pb[pb.length - i]) commonSuffix++;
+      else break;
+    }
+    // Generated and platform-specific source trees often contain the same
+    // package-relative file. Once the basename and two parent segments match,
+    // treat those copies as near-duplicates so they cannot occupy every MMR
+    // slot ahead of a distinct implementation in the same package.
+    if (commonSuffix >= 3) return 0.85;
+    // Common basenames such as configuration.ts or index.ts frequently
+    // represent distinct architecture layers in monorepos. Keep a useful
+    // diversity penalty without hiding a relevant implementation solely
+    // because an unrelated package uses the same filename.
+    const sharedRatio = common / Math.max(pa.length, pb.length);
+    return Math.min(0.5, Math.max(0.15, sharedRatio));
+  }
   // Deep language/package roots are organizational, not duplicate content.
   // Cap their similarity so MMR does not discard several relevant files from
   // the same subsystem merely because they share src/main/... directories.

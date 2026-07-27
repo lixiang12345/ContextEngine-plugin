@@ -951,6 +951,14 @@ status/kind constraints, recreates the audit trigger, and adds a `created_at`
 index for retention deletes; existing rows are untouched. Pre-v18 workers do not
 observe cancellation flags, so drain them before relying on cancel semantics.
 
+Schema v19 enables `pg_trgm` in the `public` schema and creates GIN trigram
+indexes for lower-cased symbol names and file paths. These indexes bound fuzzy
+symbol and path-hint retrieval on large repositories without changing stored
+rows. Creating either index can hold PostgreSQL DDL locks while the existing
+table is scanned, so drain older workers and schedule the first v19 startup in
+a maintenance window for large shared databases. Older binaries reject a v19
+database; rollback requires a pre-v19 backup or a reviewed down migration.
+
 For application rollback after migration, keep the v5 binary and set
 `CONTEXTENGINE_MCP_SESSION_STORE=memory`; this restores the former
 single-process behavior and requires sticky routing. A binary rollback requires

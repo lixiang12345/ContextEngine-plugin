@@ -114,7 +114,7 @@ async function waitForPendingRelationLock(
 
 describePostgres("PostgreSQL schema migration coordination", () => {
   it(
-    "installs pgvector in public when a scoped schema migrates first",
+    "installs search extensions in public when a scoped schema migrates first",
     { timeout: 30_000 },
     async () => {
       const suffix = randomUUID().replaceAll("-", "");
@@ -134,14 +134,22 @@ describePostgres("PostgreSQL schema migration coordination", () => {
           databaseUrlForSchema(freshDatabaseUrl, schema),
         );
 
-        const extension = await freshPool.query<{ schema: string }>(
-          `SELECT namespaces.nspname AS schema
+        const extensions = await freshPool.query<{
+          extension: string;
+          schema: string;
+        }>(
+          `SELECT extensions.extname AS extension,
+                  namespaces.nspname AS schema
            FROM pg_extension AS extensions
            JOIN pg_namespace AS namespaces
              ON namespaces.oid = extensions.extnamespace
-           WHERE extensions.extname = 'vector'`,
+           WHERE extensions.extname IN ('pg_trgm', 'vector')
+           ORDER BY extensions.extname`,
         );
-        assert.deepEqual(extension.rows, [{ schema: "public" }]);
+        assert.deepEqual(extensions.rows, [
+          { extension: "pg_trgm", schema: "public" },
+          { extension: "vector", schema: "public" },
+        ]);
         const vectorType = await freshPool.query<{ type: string | null }>(
           `SELECT to_regtype('vector')::text AS type`,
         );
@@ -274,7 +282,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            ORDER BY workspace_id, blob_hash`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 18 }]);
+        assert.deepEqual(marker.rows, [{ version: 19 }]);
         const ciTokens = await schemaPool.query<{ table_name: string | null }>(
           `SELECT to_regclass('ce_connector_ci_tokens')::text AS table_name`,
         );
@@ -341,7 +349,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await admin.query<{ version: number }>(
           `SELECT version FROM ${quotedSchema}.ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 18 }]);
+        assert.deepEqual(marker.rows, [{ version: 19 }]);
 
         const mcpSessionColumns = await admin.query<{ column_name: string }>(
           `SELECT column_name
@@ -492,7 +500,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await admin.query<{ version: number }>(
           `SELECT version FROM ${quotedSchema}.ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 18 }]);
+        assert.deepEqual(marker.rows, [{ version: 19 }]);
 
         const guardFunction = await admin.query<{ proname: string }>(
           `SELECT p.proname
@@ -645,7 +653,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v2'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 18 }]);
+        assert.deepEqual(marker.rows, [{ version: 19 }]);
         assert.deepEqual(source.rows, [
           {
             id: "source-v2",
@@ -803,7 +811,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
            WHERE id = 'session-v3'`,
         );
 
-        assert.deepEqual(marker.rows, [{ version: 18 }]);
+        assert.deepEqual(marker.rows, [{ version: 19 }]);
         assert.deepEqual(source.rows, [
           {
             status: "syncing",
@@ -888,7 +896,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await schemaPool.query<{ version: number }>(
           `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 18 }]);
+        assert.deepEqual(marker.rows, [{ version: 19 }]);
         const snapshotJob = await schemaPool.query<{
           status: string;
           attempts: number;
@@ -1107,7 +1115,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
       const marker = await schemaPool.query<{ version: number }>(
         `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
       );
-      assert.deepEqual(marker.rows, [{ version: 18 }]);
+      assert.deepEqual(marker.rows, [{ version: 19 }]);
       const attempts = await schemaPool.query<{
         job_id: string;
         attempt: number;
@@ -1265,7 +1273,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
       const marker = await schemaPool.query<{ version: number }>(
         `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
       );
-      assert.deepEqual(marker.rows, [{ version: 18 }]);
+      assert.deepEqual(marker.rows, [{ version: 19 }]);
     } finally {
       if (schemaPool) await schemaPool.end();
       try {
@@ -1342,7 +1350,7 @@ describePostgres("PostgreSQL schema migration coordination", () => {
         const marker = await schemaPool.query<{ version: number }>(
           `SELECT version FROM ce_schema_version WHERE singleton = TRUE`,
         );
-        assert.deepEqual(marker.rows, [{ version: 18 }]);
+        assert.deepEqual(marker.rows, [{ version: 19 }]);
         const jobs = await schemaPool.query<{
           id: string;
           status: string;
@@ -1469,11 +1477,11 @@ describePostgres("PostgreSQL schema migration coordination", () => {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         INSERT INTO ${quotedSchema}.ce_schema_version(singleton, version)
-        VALUES (TRUE, 19);
+        VALUES (TRUE, 20);
       `);
       await assert.rejects(
         runEnsureSchemaInFreshProcess(schemaUrl),
-        /schema version 19 is newer than this build \(18\)/,
+        /schema version 20 is newer than this build \(19\)/,
       );
     } finally {
       try {

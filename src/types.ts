@@ -124,7 +124,11 @@ export interface SearchOptions {
   language?: string;
   /** Prefer semantic if available; falls back to BM25. */
   mode?: "auto" | "bm25" | "semantic" | "hybrid";
-  /** Expand results via import/symbol graph (default true). */
+  /**
+   * Expand results via import/symbol graph. PostgreSQL searches enable this by
+   * default for non-identifier queries; strong identifiers use the exact
+   * symbol/path fast path unless callers explicitly pass true.
+   */
   expandGraph?: boolean;
   /** Include git commit lineage chunks (default true). */
   includeCommits?: boolean;

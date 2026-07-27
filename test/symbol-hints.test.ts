@@ -26,4 +26,15 @@ describe("symbol hints", () => {
       ],
     );
   });
+
+  it("does not append a broad natural term when compounds are available", () => {
+    assert.deepEqual(
+      inferSymbolHints(
+        analyzeQuery(
+          "configuration model merges workspace folder memory and override settings",
+        ),
+      ),
+      ["configurationmodel", "modelmerges", "mergesworkspace"],
+    );
+  });
 });

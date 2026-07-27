@@ -8,11 +8,98 @@ import { tokenize } from "../search/bm25.js";
 import { scorePathHint } from "../search/path-hints.js";
 
 export const INDEX_VERSION = 3;
-const SCHEMA_VERSION = 18;
+const SCHEMA_VERSION = 19;
 const SCHEMA_LOCK_ID = 842847321;
 const SCHEMA_DDL_MAX_ATTEMPTS = 4;
 const DEFAULT_GENERATION_RETENTION_MS = 60 * 60 * 1000;
 const GENERATION_GC_BATCH = 8;
+const FTS_QUERY_TERM_LIMIT = 4;
+const FTS_SUPPORT_TERM_LIMIT = 6;
+const FTS_GENERIC_LEADING_TERMS = new Set([
+  "create",
+  "find",
+  "implement",
+  "locate",
+  "show",
+]);
+const FTS_QUERY_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "by",
+  "for",
+  "from",
+  "how",
+  "in",
+  "into",
+  "is",
+  "it",
+  "of",
+  "on",
+  "or",
+  "out",
+  "the",
+  "to",
+  "with",
+  "where",
+]);
+
+function buildFtsQuery(
+  query: string,
+  priorityTerms: string[] = [],
+): string {
+  const terms = [...new Set(tokenize(query))].filter(
+    (term) => !FTS_QUERY_STOP_WORDS.has(term),
+  );
+  const priority = [...new Set(priorityTerms.flatMap((term) => tokenize(term)))]
+    .filter((term) => terms.includes(term))
+    .slice(0, 2);
+  if (priority.length >= 2) {
+    const support = terms
+      .filter((term) => !priority.includes(term))
+      .sort((left, right) => right.length - left.length)
+      .slice(0, FTS_SUPPORT_TERM_LIMIT);
+    if (support.length) {
+      return `(${priority.join(" | ")}) & (${support.join(" | ")})`;
+    }
+  }
+  const firstTerm = terms[0] ?? "";
+  const hasMorphologicalEcho = terms.slice(1).some(
+    (term) =>
+      term === `${firstTerm}s` ||
+      term === `${firstTerm}es` ||
+      firstTerm === `${term}s` ||
+      firstTerm === `${term}es`,
+  );
+  if (
+    !priority.length &&
+    terms.length > FTS_QUERY_TERM_LIMIT &&
+    (FTS_GENERIC_LEADING_TERMS.has(firstTerm) || hasMorphologicalEcho)
+  ) {
+    const distinctive = [...terms].sort(
+      (left, right) => right.length - left.length,
+    );
+    const anchors = distinctive.slice(0, 2);
+    const support = distinctive
+      .slice(2)
+      .slice(0, FTS_SUPPORT_TERM_LIMIT);
+    if (support.length) {
+      return `(${anchors.join(" | ")}) & (${support.join(" | ")})`;
+    }
+  }
+  if (terms.length <= FTS_QUERY_TERM_LIMIT) return terms.join(" | ");
+  if (!priority.length) priority.push(terms[0]);
+  const rest = terms.filter((term) => !priority.includes(term));
+  rest.sort((left, right) => right.length - left.length);
+  return [
+    ...priority,
+    ...rest.slice(0, FTS_QUERY_TERM_LIMIT - priority.length),
+  ].join(" | ");
+}
 
 // Shared by the v16 and v17 migration blocks: databases stamped 16 by builds
 // that predate this guard lack the function, so v17 must be able to recreate
@@ -1268,10 +1355,14 @@ export class PostgresStore {
     query: string,
     limit: number,
     filter?: StoreSearchFilter,
+    priorityTerms: string[] = [],
   ): Promise<Array<{ id: string; score: number }>> {
-    const terms = [...new Set(tokenize(query))].slice(0, 16);
-    if (!terms.length) return [];
-    const params: unknown[] = [this.workspaceId, terms.join(" | ")];
+    // Ranking every OR-match requires heap access for ts_rank_cd. Keep the
+    // vocabulary bounded and group ambiguous identifiers or broad generic
+    // concepts so large-repository queries cannot rank 50k matching rows.
+    const ftsQuery = buildFtsQuery(query, priorityTerms);
+    if (!ftsQuery) return [];
+    const params: unknown[] = [this.workspaceId, ftsQuery];
     const where = this.filterSql(params, filter, "c");
     params.push(limit);
     const result = await this.query<{ id: string; score: number }>(
@@ -1305,31 +1396,38 @@ export class PostgresStore {
       `WITH hints(name) AS (
          SELECT unnest($2::text[])
        ), matches AS (
-         SELECT s.chunk_id AS id, hints.name,
-           MAX(
-             CASE
-               WHEN s.name_lower = hints.name THEN 3.0
-               WHEN starts_with(s.name_lower, hints.name) THEN 1.5
-               WHEN length(hints.name) >= 4
-                 AND position(hints.name IN s.name_lower) > 0 THEN 0.8
-               ELSE 0
-             END
-           ) AS hint_score
-         FROM ce_symbols s
-         JOIN hints ON (
-           s.name_lower = hints.name
-           OR starts_with(s.name_lower, hints.name)
-           OR (
-             length(hints.name) >= 4
-             AND position(hints.name IN s.name_lower) > 0
-           )
-         )
-         JOIN ce_chunks c
-           ON c.workspace_id = s.workspace_id AND c.id = s.chunk_id
-         WHERE s.workspace_id = $1 AND ${where}
-         GROUP BY s.chunk_id, hints.name
+         SELECT matched.id, hints.name, matched.hint_score
+         FROM hints
+         CROSS JOIN LATERAL (
+           SELECT s.chunk_id AS id,
+             MAX(
+               CASE
+                 WHEN s.name_lower = hints.name THEN 3.0
+                 WHEN starts_with(s.name_lower, hints.name) THEN 1.5
+                 ELSE 0.8
+               END
+             ) AS hint_score
+           FROM ce_symbols s
+           JOIN ce_chunks c
+             ON c.workspace_id = s.workspace_id AND c.id = s.chunk_id
+           WHERE s.workspace_id = $1 AND ${where}
+             AND (
+               (length(hints.name) < 4 AND s.name_lower = hints.name)
+               OR (
+                 length(hints.name) >= 4
+                 AND s.name_lower LIKE '%' || hints.name || '%'
+               )
+             )
+           GROUP BY s.chunk_id
+           ORDER BY hint_score DESC, MIN(length(s.name_lower)), s.chunk_id
+           LIMIT $${params.length}
+         ) matched
        )
-       SELECT id, SUM(hint_score) AS score
+       SELECT id,
+         MAX(hint_score) + LEAST(
+           1.0,
+           GREATEST(0.0, SUM(hint_score) - MAX(hint_score)) * 0.25
+         ) AS score
        FROM matches
        GROUP BY id
        ORDER BY score DESC
@@ -1337,6 +1435,41 @@ export class PostgresStore {
       params,
     );
     return result.rows.map((row) => ({ id: row.id, score: Number(row.score) }));
+  }
+
+  async searchExactSymbols(
+    names: string[],
+    limit: number,
+    filter?: StoreSearchFilter,
+  ): Promise<Array<{ id: string; score: number }>> {
+    const normalized = [
+      ...new Set(
+        names
+          .map((name) => name.trim().toLowerCase())
+          .filter((name) => name.length >= 2),
+      ),
+    ].slice(0, 32);
+    if (!normalized.length) return [];
+    const params: unknown[] = [this.workspaceId, normalized];
+    const where = this.filterSql(params, filter, "c");
+    params.push(limit);
+    const result = await this.query<{ id: string; score: number }>(
+      `SELECT s.chunk_id AS id, 3.0 AS score
+       FROM ce_symbols s
+       JOIN ce_chunks c
+         ON c.workspace_id = s.workspace_id AND c.id = s.chunk_id
+       WHERE s.workspace_id = $1
+         AND s.name_lower = ANY($2::text[])
+         AND ${where}
+       GROUP BY s.chunk_id
+       ORDER BY MIN(s.start_line), s.chunk_id
+       LIMIT $${params.length}`,
+      params,
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      score: Number(row.score),
+    }));
   }
 
   async searchByPathHints(
@@ -1348,27 +1481,45 @@ export class PostgresStore {
     if (!normalized.length) return [];
     const patterns = normalized.map((h) => `%${h.replace(/[\\%_]/g, "\\$&")}%`);
     const params: unknown[] = [this.workspaceId, patterns, normalized];
-    const where = this.filterSql(params, filter, "c");
+    const where = this.filterSql(params, filter, "f");
     params.push(limit * 2);
     const result = await this.query<{ id: string; path: string; hint: string }>(
-      `SELECT c.id, c.path, h.hint
+      `SELECT c.id, f.path, h.hint
        FROM unnest($2::text[], $3::text[]) AS h(pattern, hint)
        CROSS JOIN LATERAL (
-         SELECT c.id, c.path
-         FROM ce_chunks c
-         WHERE ${where} AND lower(c.path) LIKE h.pattern ESCAPE '\\'
-         ORDER BY length(c.path), c.path
+         SELECT f.path
+         FROM ce_files f
+         WHERE ${where} AND lower(f.path) LIKE h.pattern ESCAPE '\\'
+         ORDER BY length(f.path), f.path
          LIMIT $${params.length}
+       ) f
+       CROSS JOIN LATERAL (
+         SELECT c.id
+         FROM ce_chunks c
+         WHERE c.workspace_id = $1 AND c.path = f.path
+         ORDER BY c.start_line, c.id
+         LIMIT 1
        ) c`,
       params,
     );
-    const scores = new Map<string, number>();
+    const scores = new Map<string, Map<string, number>>();
     for (const row of result.rows) {
       const score = scorePathHint(row.path, row.hint);
-      scores.set(row.id, Math.max(scores.get(row.id) ?? 0, score));
+      const byHint = scores.get(row.id) ?? new Map<string, number>();
+      byHint.set(row.hint, Math.max(byHint.get(row.hint) ?? 0, score));
+      scores.set(row.id, byHint);
     }
     return [...scores.entries()]
-      .map(([id, score]) => ({ id, score }))
+      .map(([id, byHint]) => {
+        const values = [...byHint.values()].sort((left, right) => right - left);
+        const support = values
+          .slice(1)
+          .reduce((sum, value) => sum + value, 0);
+        return {
+          id,
+          score: values[0] + Math.min(0.8, support * 0.1),
+        };
+      })
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
   }
@@ -1456,36 +1607,46 @@ export class PostgresStore {
 
     if (symbols.size) {
       addIds(
-        await this.searchSymbols([...symbols].slice(0, 32), limit, filter),
+        await this.searchExactSymbols([...symbols], limit, filter),
       );
     }
 
     const forward = await this.query<{ target_spec: string }>(
-      `SELECT target_spec
+      `SELECT DISTINCT target_spec
        FROM ce_imports
        WHERE workspace_id = $1 AND source_path = ANY($2::text[])
        LIMIT $3`,
-      [this.workspaceId, seedPaths, Math.max(limit * 8, 32)],
+      [this.workspaceId, seedPaths, 32],
     );
     const specs = [...new Set(forward.rows.map((row) => row.target_spec))];
     if (specs.length) {
       const params: unknown[] = [this.workspaceId, specs];
-      const where = this.filterSql(params, filter, "c");
+      const where = this.filterSql(params, filter, "f");
       params.push(limit);
       const related = await this.query<{ id: string }>(
         `SELECT c.id
-         FROM ce_chunks c
-         WHERE ${where}
-           AND EXISTS (
-             SELECT 1
-             FROM unnest($2::text[]) AS spec
-             WHERE c.path = spec
-                OR c.path LIKE spec || '.%'
-                OR c.path LIKE spec || '/%'
-                OR c.path LIKE '%' || '/' || spec || '/%'
-           )
-         ORDER BY c.path, c.start_line
-         LIMIT $${params.length}`,
+         FROM (
+           SELECT f.path
+           FROM ce_files f
+           WHERE ${where}
+             AND EXISTS (
+               SELECT 1
+               FROM unnest($2::text[]) AS spec
+               WHERE lower(f.path) = lower(spec)
+                  OR lower(f.path) LIKE lower(spec) || '.%'
+                  OR lower(f.path) LIKE lower(spec) || '/%'
+                  OR lower(f.path) LIKE '%' || '/' || lower(spec) || '/%'
+             )
+           ORDER BY f.path
+           LIMIT $${params.length}
+         ) f
+         CROSS JOIN LATERAL (
+           SELECT c.id
+           FROM ce_chunks c
+           WHERE c.workspace_id = $1 AND c.path = f.path
+           ORDER BY c.start_line, c.id
+           LIMIT 1
+         ) c`,
         params,
       );
       addIds(related.rows);
@@ -3128,6 +3289,34 @@ export class PostgresStore {
                ON CONFLICT(singleton) DO UPDATE
                SET version = excluded.version, updated_at = now()`,
               [18],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        }
+        if (schemaVersion < 19) {
+          await client.query("BEGIN");
+          try {
+            // Symbol and path hints deliberately support bounded substring
+            // matching. Trigram indexes keep those channels sublinear on
+            // large monorepos instead of scanning every symbol per hint.
+            await client.query(
+              `CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public`,
+            );
+            await client.query(`
+      CREATE INDEX IF NOT EXISTS ce_symbols_name_trgm_idx
+        ON ce_symbols USING GIN (name_lower public.gin_trgm_ops);
+      CREATE INDEX IF NOT EXISTS ce_files_path_trgm_idx
+        ON ce_files USING GIN (lower(path) public.gin_trgm_ops);
+            `);
+            await client.query(
+              `INSERT INTO ce_schema_version(singleton, version)
+               VALUES (TRUE, $1)
+               ON CONFLICT(singleton) DO UPDATE
+               SET version = excluded.version, updated_at = now()`,
+              [19],
             );
             await client.query("COMMIT");
           } catch (error) {
