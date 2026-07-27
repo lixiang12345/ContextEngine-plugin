@@ -22,7 +22,9 @@
         "minNdcgAtK": 0.75,
         "minTop3": 0.8,
         "minTop5": 0.85,
-        "maxSteadyP95Ms": 1500
+        "maxSteadyP95Ms": 1500,
+        "maxColdP95Ms": 8000,
+        "minQueryThroughputPerSecond": 0.5
       },
       "hybrid": {
         "minRecallAtK": 0.9,
@@ -31,7 +33,9 @@
         "minTop3": 0.9,
         "minTop5": 0.9,
         "maxSteadyP95Ms": 2500,
-        "maxRemoteVramGb": 10.5
+        "maxRemoteVramGb": 10.5,
+        "maxColdP95Ms": 10000,
+        "minQueryThroughputPerSecond": 0.2
       },
       "neural": {
         "minRecallAtK": 0.9,
@@ -40,7 +44,9 @@
         "minTop3": 0.9,
         "minTop5": 0.9,
         "maxSteadyP95Ms": 4000,
-        "maxRemoteVramGb": 10.5
+        "maxRemoteVramGb": 10.5,
+        "maxColdP95Ms": 12000,
+        "minQueryThroughputPerSecond": 0.15
       }
     }
   },

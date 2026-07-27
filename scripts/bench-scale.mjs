@@ -27,6 +27,7 @@ import {
   summarizeRetrievalCases,
   validateGoldCases,
 } from "./lib/benchmark-metrics.mjs";
+import { validateScaleManifestSchema } from "./lib/benchmark-manifest.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -474,9 +475,7 @@ function writeModeCheckpoint(suiteResult, mode) {
 }
 
 function validateManifest(value) {
-  if (!value || value.version !== 1 || !Array.isArray(value.suites)) {
-    throw new Error("scale manifest must have version=1 and suites[]");
-  }
+  validateScaleManifestSchema(value);
   const ids = new Set();
   for (const suite of value.suites) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(suite.id || "") || ids.has(suite.id)) {
@@ -801,7 +800,18 @@ async function runSearchMode({
   const latency = summarizeLatency(latencySamples);
   latency.samplesMs = latencySamples;
   let coldCli = null;
-  if (includeColdCli) coldCli = runColdCli(root, cases[0], mode);
+  if (includeColdCli) {
+    const rows = cases.map((entry) => ({
+      id: entry.id,
+      ...runColdCli(root, entry, mode),
+    }));
+    const durations = rows.map((row) => row.durationMs);
+    coldCli = {
+      ...summarizeLatency(durations),
+      samplesMs: durations,
+      cases: rows,
+    };
+  }
   return {
     retrieval: summarizeRetrievalCases(caseRows),
     latency,

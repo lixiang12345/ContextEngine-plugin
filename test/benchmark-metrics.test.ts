@@ -229,4 +229,23 @@ describe("benchmark metrics", () => {
     assert.equal(result.passed, false);
     assert.deepEqual(result.failures, ["Top3 0.8000 < 0.9000"]);
   });
+
+  it("enforces cold CLI and steady throughput budgets", async () => {
+    const { evaluateModeThresholds } = await metrics;
+    const result = evaluateModeThresholds(
+      {
+        retrieval: {},
+        latency: {},
+        coldCli: { p95Ms: 2_500 },
+        throughputQueriesPerSecond: 0.4,
+        resources: {},
+      },
+      { maxColdP95Ms: 2_000, minQueryThroughputPerSecond: 0.5 },
+    );
+    assert.equal(result.passed, false);
+    assert.deepEqual(result.failures, [
+      "cold CLI P95 ms 2500.00 > 2000.00",
+      "query throughput/s 0.4000 < 0.5000",
+    ]);
+  });
 });

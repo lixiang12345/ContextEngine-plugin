@@ -237,6 +237,12 @@ export function evaluateModeThresholds(result, thresholds) {
     "hard-negative Top1 rate",
   );
   checkMax(result.latency?.p95Ms, thresholds.maxSteadyP95Ms, "steady P95 ms");
+  checkMax(result.coldCli?.p95Ms, thresholds.maxColdP95Ms, "cold CLI P95 ms");
+  checkMin(
+    result.throughputQueriesPerSecond,
+    thresholds.minQueryThroughputPerSecond,
+    "query throughput/s",
+  );
   if (result.index && !result.index.reused) {
     checkMin(
       result.index.chunksPerSecond,
