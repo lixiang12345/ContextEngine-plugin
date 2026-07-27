@@ -70,6 +70,50 @@ describe("remote model providers", () => {
     ]);
   });
 
+  it("length-buckets embedding batches without changing result order", async () => {
+    const received: string[][] = [];
+    const vectors: Record<string, number[]> = {
+      aaaa: [1, 0, 0, 0],
+      b: [0, 1, 0, 0],
+      ccc: [0, 0, 1, 0],
+      dd: [0, 0, 0, 1],
+    };
+    const origin = await listen((req, res) => {
+      let raw = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => {
+        raw += chunk;
+      });
+      req.on("end", () => {
+        const input = JSON.parse(raw).input as string[];
+        received.push(input);
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            data: input
+              .map((text, index) => ({ index, embedding: vectors[text] }))
+              .reverse(),
+          }),
+        );
+      });
+    });
+    const provider = new OpenAICompatibleEmbeddings(
+      { baseUrl: origin, model: "test-embedding" },
+      { batchSize: 2 },
+    );
+
+    assert.deepEqual(await provider.embed(["aaaa", "b", "ccc", "dd"]), [
+      [1, 0, 0, 0],
+      [0, 1, 0, 0],
+      [0, 0, 1, 0],
+      [0, 0, 0, 1],
+    ]);
+    assert.deepEqual(received, [
+      ["b", "dd"],
+      ["ccc", "aaaa"],
+    ]);
+  });
+
   it("can send Qwen v2 input types when enabled", async () => {
     const previous = process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE;
     process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE = "1";

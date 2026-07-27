@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added Apple Silicon support to the reference Qwen embedding/rerank server:
+  it auto-selects MPS after CUDA, accepts an explicit fail-fast
+  `CE_DEVICE=cpu|cuda|mps`, uses fp16 on accelerators, and reports MPS allocated
+  memory through the existing health metric. Remote embedding requests now
+  length-bucket a bounded missing-chunk window before sending the unchanged
+  texts in OOM-adaptive API batches, then restore vectors to exact caller
+  order; `CONTEXTENGINE_EMBED_WINDOW` controls the 32–512 chunk window. This
+  reduces dynamic-padding waste without changing model inputs, stored vectors,
+  or chunk mappings.
+
 - Hardened BM25 fallback and file-level ranking across the canonical eight-
   repository small/medium/large suite. PostgreSQL and SQLite path hints now
   select files before representative chunks; exact strong identifiers use a

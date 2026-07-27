@@ -32,7 +32,31 @@ from pydantic import BaseModel, Field
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "").strip()
 CE_API_KEY = os.environ.get("CE_API_KEY", "").strip()
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _mps_available() -> bool:
+    backend = getattr(torch.backends, "mps", None)
+    return bool(backend is not None and backend.is_available())
+
+
+def _select_device() -> str:
+    requested = os.environ.get("CE_DEVICE", "").strip().lower()
+    if requested:
+        if requested not in {"cpu", "cuda", "mps"}:
+            raise RuntimeError("CE_DEVICE must be one of: cpu, cuda, mps")
+        if requested == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CE_DEVICE=cuda requested, but CUDA is unavailable")
+        if requested == "mps" and not _mps_available():
+            raise RuntimeError("CE_DEVICE=mps requested, but Apple MPS is unavailable")
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    if _mps_available():
+        return "mps"
+    return "cpu"
+
+
+DEVICE = _select_device()
 MAX_EMBED_CHARS = int(os.environ.get("CE_MAX_EMBED_CHARS", "8000"))
 MAX_EMBED_BATCH = int(os.environ.get("CE_MAX_EMBED_BATCH", "64"))
 MAX_RERANK_DOCS = int(os.environ.get("CE_MAX_RERANK_DOCS", "64"))
@@ -68,10 +92,15 @@ def _check_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def _vram_alloc_gb() -> float | None:
-    if not torch.cuda.is_available():
-        return None
-    return round(torch.cuda.memory_allocated() / (1024**3), 2)
+def _accelerator_alloc_gb() -> float | None:
+    if DEVICE == "cuda":
+        return round(torch.cuda.memory_allocated() / (1024**3), 2)
+    if DEVICE == "mps":
+        try:
+            return round(torch.mps.current_allocated_memory() / (1024**3), 2)
+        except (AttributeError, RuntimeError):
+            return None
+    return None
 
 
 @app.on_event("startup")
@@ -81,12 +110,14 @@ def load_models() -> None:
     from sentence_transformers import CrossEncoder, SentenceTransformer
 
     print(f"[ce-server] loading embedder: {EMBED_MODEL} on {DEVICE}", flush=True)
-    _embedder = SentenceTransformer(
-        EMBED_MODEL,
-        device=DEVICE,
-        revision=EMBED_REVISION or None,
-        local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1",
-    )
+    embed_kwargs: dict[str, Any] = {
+        "device": DEVICE,
+        "revision": EMBED_REVISION or None,
+        "local_files_only": os.environ.get("HF_HUB_OFFLINE") == "1",
+    }
+    if DEVICE == "mps":
+        embed_kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+    _embedder = SentenceTransformer(EMBED_MODEL, **embed_kwargs)
     _embed_id = os.path.basename(EMBED_MODEL.rstrip("/")) or EMBED_MODEL
     if "Qwen3-Embedding" in EMBED_MODEL or "qwen3-embedding" in EMBED_MODEL.lower():
         _embed_id = "Qwen/Qwen3-Embedding-0.6B"
@@ -104,7 +135,9 @@ def load_models() -> None:
             prompts={"code_retrieval": RERANK_INSTRUCTION},
             default_prompt_name="code_retrieval",
             model_kwargs={
-                "torch_dtype": torch.float16 if DEVICE == "cuda" else torch.float32,
+                "torch_dtype": (
+                    torch.float16 if DEVICE in {"cuda", "mps"} else torch.float32
+                ),
             },
         )
         _rerank_id = os.path.basename(RERANK_MODEL.rstrip("/")) or RERANK_MODEL
@@ -145,18 +178,20 @@ class RerankRequest(BaseModel):
 @app.get("/health")
 def health() -> dict[str, Any]:
     gpu = None
-    if torch.cuda.is_available():
+    if DEVICE == "cuda":
         try:
             gpu = torch.cuda.get_device_name(0)
         except Exception:
             gpu = "cuda"
+    elif DEVICE == "mps":
+        gpu = "Apple MPS"
     return {
         "ok": _ready,
         "device": DEVICE,
         "embed_loaded": _embedder is not None,
         "rerank_loaded": _reranker is not None,
         "gpu": gpu,
-        "vram_alloc_gb": _vram_alloc_gb(),
+        "vram_alloc_gb": _accelerator_alloc_gb(),
         "embed_model": _embed_id,
         "embed_revision": EMBED_REVISION or None,
         "rerank_model": _rerank_id if _reranker is not None else None,

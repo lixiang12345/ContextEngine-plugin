@@ -10,6 +10,12 @@ This guide reproduces the **production** setup used for multi-language semantic 
 
 Validated on: **NVIDIA RTX 3080 Ti 12GB**, Ubuntu 22.04, CUDA 12.x, PyTorch 2.9 + cu128, Python 3.12 (conda env).
 
+The reference server also auto-selects Apple MPS on Apple Silicon. Set
+`CE_DEVICE=cpu|cuda|mps` to pin a device; an unavailable explicit accelerator
+fails at startup instead of silently falling back. For MPS, run with
+`PYTORCH_ENABLE_MPS_FALLBACK=1` if the installed PyTorch build needs CPU
+fallback for an unsupported operator.
+
 ---
 
 ## 1. Machine requirements
@@ -142,6 +148,14 @@ Or run in-place without copying:
 ```bash
 export EMBED_MODEL=... RERANK_MODEL=... CE_API_KEY=ce-local-key
 python -m uvicorn scripts.embed_rerank_server:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+Apple Silicon example (keep it loopback-only):
+
+```bash
+export CE_DEVICE=mps PYTORCH_ENABLE_MPS_FALLBACK=1
+export EMBED_MODEL=... RERANK_MODEL=... CE_API_KEY=ce-local-key
+python -m uvicorn scripts.embed_rerank_server:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 Healthy response example:
 

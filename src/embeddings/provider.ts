@@ -113,18 +113,25 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
     );
     if (!Number.isFinite(maxChars) || maxChars < 100) maxChars = 4000;
     maxChars = Math.floor(maxChars);
-    const all: number[][] = [];
-    for (let i = 0; i < texts.length; ) {
-      const batch = texts
-        .slice(i, i + batchSize)
-        .map((t) => t.slice(0, maxChars));
+    // Length-bucket each provider call so dynamic-padding model servers do not
+    // repeatedly pad short chunks to the longest unrelated chunk in a batch.
+    // Preserve the caller-visible order when vectors are written back.
+    const entries = texts
+      .map((text, index) => ({ index, text: text.slice(0, maxChars) }))
+      .sort((a, b) => a.text.length - b.text.length || a.index - b.index);
+    const all = new Array<number[]>(texts.length);
+    for (let i = 0; i < entries.length; ) {
+      const batchEntries = entries.slice(i, i + batchSize);
+      const batch = batchEntries.map((entry) => entry.text);
       try {
         const vectors = await this.embedBatchOnce(
           batch,
           inputType,
           requestOptions,
         );
-        all.push(...vectors);
+        for (let index = 0; index < vectors.length; index++) {
+          all[batchEntries[index].index] = vectors[index];
+        }
         i += batchSize;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

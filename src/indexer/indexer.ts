@@ -642,7 +642,16 @@ async function embedMissing(
   let written = 0;
   let dimension: number | null = null;
   let afterId: string | undefined;
-  const batchSize = 32;
+  // Fetch a larger deterministic window than the outbound provider batch.
+  // OpenAICompatibleEmbeddings length-buckets this window before issuing its
+  // bounded requests, which avoids padding many short code chunks to unrelated
+  // long chunks without changing any input text or vector-to-chunk mapping.
+  const configuredWindow = Number(
+    process.env.CONTEXTENGINE_EMBED_WINDOW ?? 256,
+  );
+  const batchSize = Number.isFinite(configuredWindow)
+    ? Math.max(32, Math.min(512, Math.floor(configuredWindow)))
+    : 256;
   for (;;) {
     signal?.throwIfAborted();
     const batch = await store.chunksMissingEmbeddings(

@@ -221,6 +221,7 @@ Templates:
 | `CONTEXTENGINE_MCP_WATCH` | MCP watcher; enabled by default, `0`/`false` disables |
 | `CONTEXTENGINE_COMMIT_LIMIT` | Recent commits to index (default `80`, `0` = off) |
 | `CONTEXTENGINE_SEARCH_SEMANTIC_TIMEOUT_MS` / `_RERANK_TIMEOUT_MS` | Per-query model timeout budgets (default `2000` ms) |
+| `CONTEXTENGINE_EMBED_WINDOW` | Missing-chunk window used for length bucketing before API batches (default `256`, bounded `32..512`) |
 | `CONTEXTENGINE_SEARCH_BREAKER_FAILURE_THRESHOLD` / `_COOLDOWN_MS` | Model circuit threshold/cooldown (default `3` / `30000` ms) |
 | `CONTEXTENGINE_EXCLUDE` | Extra ignore globs |
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | Enable embeddings |
