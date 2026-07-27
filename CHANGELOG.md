@@ -5,7 +5,10 @@
 - Added Apple Silicon support to the reference Qwen embedding/rerank server:
   it auto-selects MPS after CUDA, accepts an explicit fail-fast
   `CE_DEVICE=cpu|cuda|mps`, uses fp16 on accelerators, and reports MPS allocated
-  memory through the existing health metric. Remote embedding requests now
+  memory through the existing health metric. CUDA embedding loads now pin fp16
+  explicitly instead of inheriting the Qwen BF16 model config (which is slow on
+  Turing GPUs such as Tesla T4), and `/health` reports the effective inference
+  dtype. Remote embedding requests now
   length-bucket a bounded missing-chunk window before sending the unchanged
   texts in OOM-adaptive API batches, then restore vectors to exact caller
   order; `CONTEXTENGINE_EMBED_WINDOW` controls the 32–512 chunk window. This

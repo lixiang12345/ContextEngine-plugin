@@ -57,6 +57,20 @@ def _select_device() -> str:
 
 
 DEVICE = _select_device()
+
+
+def _inference_dtype() -> torch.dtype:
+    """Use tensor-core-friendly fp16 on supported accelerators.
+
+    Qwen3 publishes bfloat16 in its model config. That is appropriate on newer
+    accelerators, but Turing GPUs such as the Tesla T4 do not have native BF16
+    tensor cores. Pinning CUDA and MPS to fp16 keeps the documented deployment
+    contract reproducible instead of inheriting the model config implicitly.
+    """
+    return torch.float16 if DEVICE in {"cuda", "mps"} else torch.float32
+
+
+INFERENCE_DTYPE = _inference_dtype()
 MAX_EMBED_CHARS = int(os.environ.get("CE_MAX_EMBED_CHARS", "8000"))
 MAX_EMBED_BATCH = int(os.environ.get("CE_MAX_EMBED_BATCH", "64"))
 MAX_RERANK_DOCS = int(os.environ.get("CE_MAX_RERANK_DOCS", "64"))
@@ -114,9 +128,8 @@ def load_models() -> None:
         "device": DEVICE,
         "revision": EMBED_REVISION or None,
         "local_files_only": os.environ.get("HF_HUB_OFFLINE") == "1",
+        "model_kwargs": {"torch_dtype": INFERENCE_DTYPE},
     }
-    if DEVICE == "mps":
-        embed_kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
     _embedder = SentenceTransformer(EMBED_MODEL, **embed_kwargs)
     _embed_id = os.path.basename(EMBED_MODEL.rstrip("/")) or EMBED_MODEL
     if "Qwen3-Embedding" in EMBED_MODEL or "qwen3-embedding" in EMBED_MODEL.lower():
@@ -134,11 +147,7 @@ def load_models() -> None:
             max_length=RERANK_MAX_LENGTH,
             prompts={"code_retrieval": RERANK_INSTRUCTION},
             default_prompt_name="code_retrieval",
-            model_kwargs={
-                "torch_dtype": (
-                    torch.float16 if DEVICE in {"cuda", "mps"} else torch.float32
-                ),
-            },
+            model_kwargs={"torch_dtype": INFERENCE_DTYPE},
         )
         _rerank_id = os.path.basename(RERANK_MODEL.rstrip("/")) or RERANK_MODEL
         if "Qwen3-Reranker" in RERANK_MODEL or "qwen3-reranker" in RERANK_MODEL.lower():
@@ -188,6 +197,7 @@ def health() -> dict[str, Any]:
     return {
         "ok": _ready,
         "device": DEVICE,
+        "inference_dtype": str(INFERENCE_DTYPE).removeprefix("torch."),
         "embed_loaded": _embedder is not None,
         "rerank_loaded": _reranker is not None,
         "gpu": gpu,

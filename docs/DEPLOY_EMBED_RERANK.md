@@ -14,7 +14,11 @@ The reference server also auto-selects Apple MPS on Apple Silicon. Set
 `CE_DEVICE=cpu|cuda|mps` to pin a device; an unavailable explicit accelerator
 fails at startup instead of silently falling back. For MPS, run with
 `PYTORCH_ENABLE_MPS_FALLBACK=1` if the installed PyTorch build needs CPU
-fallback for an unsupported operator.
+fallback for an unsupported operator. The Qwen model configs publish BF16, but
+the reference server explicitly loads both models as FP16 on CUDA and MPS.
+This is important on Turing GPUs such as the Tesla T4, which do not provide
+native BF16 tensor-core throughput. `/health` reports the effective
+`inference_dtype` so benchmark evidence can verify the runtime contract.
 
 ---
 
@@ -163,6 +167,7 @@ Healthy response example:
 {
   "ok": true,
   "device": "cuda",
+  "inference_dtype": "float16",
   "embed_loaded": true,
   "rerank_loaded": true,
   "gpu": "NVIDIA GeForce RTX 3080 Ti",
