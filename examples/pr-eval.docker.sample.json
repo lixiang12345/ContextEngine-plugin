@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "name": "contextengine-pr-docker-sample",
+  "repository": "..",
+  "baseRef": "HEAD",
+  "isolation": "sanitized",
+  "agent": {
+    "command": [
+      "agent-wrapper",
+      "--workspace",
+      "{workspace}",
+      "--prompt-file",
+      "{prompt_file}",
+      "--metrics-file",
+      "{metrics_file}"
+    ],
+    "sandbox": {
+      "type": "docker",
+      "image": "ghcr.io/example/pr-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "network": "none",
+      "cpus": 2,
+      "memoryMb": 2048,
+      "pidsLimit": 256,
+      "tmpfsMb": 256
+    },
+    "timeoutMs": 900000
+  },
+  "setupCommand": ["npm", "ci"],
+  "testCommand": ["npm", "test"],
+  "verifyBaseline": true,
+  "requireChanges": true,
+  "repetitions": 3,
+  "variants": [
+    {
+      "id": "baseline",
+      "context": "none"
+    },
+    {
+      "id": "contextengine",
+      "context": {
+        "mode": "packed",
+        "topK": 20,
+        "maxTokens": 12000
+      }
+    }
+  ],
+  "cases": [
+    {
+      "id": "kotlin-constructor-lambda-chunking",
+      "baseRef": "772d2f8bca0e12ead21cb4b6d9c338769ebe86a8",
+      "goldRef": "2490d91cfc36b0f0e76a409ff164aecd62caad6a",
+      "prompt": "Fix code chunking for Kotlin classes whose primary-constructor default value is a lambda. The lambda braces must not close the surrounding class, and methods declared after the constructor must remain indexed without regressing other languages.",
+      "testPatch": "../benchmarks/pr-history/patches/constructor-lambda.tests.patch",
+      "testCommand": [
+        "node",
+        "--import",
+        "tsx",
+        "--test",
+        "test/pr-history-kotlin-constructor-lambda.test.ts"
+      ],
+      "expectedChangedPaths": ["src/chunker/code-chunker.ts"]
+    }
+  ]
+}

@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  buildPrEvalDockerCommand,
   formatPrEvalReportMarkdown,
   loadPrEvalSuite,
   parsePrEvalSuite,
@@ -45,6 +46,117 @@ describe("PR evaluation harness", () => {
       ["baseline", "contextengine"],
     );
     assert.equal(suite.agent.timeoutMs, 15 * 60_000);
+    assert.equal(suite.agent.sandbox, undefined);
+
+    const digest = `sha256:${"a".repeat(64)}`;
+    const dockerSuite = parsePrEvalSuite({
+      ...manifest,
+      agent: {
+        ...manifest.agent,
+        envPass: ["OPENAI_API_KEY"],
+        sandbox: {
+          type: "docker",
+          image: `ghcr.io/example/pr-agent@${digest}`,
+        },
+      },
+    });
+    assert.deepEqual(dockerSuite.agent.sandbox, {
+      type: "docker",
+      image: `ghcr.io/example/pr-agent@${digest}`,
+      network: "none",
+      cpus: 2,
+      memoryMb: 2_048,
+      pidsLimit: 256,
+      tmpfsMb: 256,
+    });
+    assert.deepEqual(dockerSuite.agent.envPass, ["OPENAI_API_KEY"]);
+    assert.throws(
+      () =>
+        parsePrEvalSuite({
+          ...manifest,
+          agent: {
+            ...manifest.agent,
+            sandbox: { type: "docker", image: "node:22" },
+          },
+        }),
+      /immutable OCI image reference/,
+    );
+    assert.throws(
+      () =>
+        parsePrEvalSuite({
+          ...manifest,
+          agent: {
+            ...manifest.agent,
+            sandbox: {
+              type: "docker",
+              image: `ghcr.io/example/pr-agent@${digest}`,
+              network: "host",
+            },
+          },
+        }),
+      /network must be "none" or "bridge"/,
+    );
+    assert.throws(
+      () =>
+        parsePrEvalSuite({
+          ...manifest,
+          agent: {
+            ...manifest.agent,
+            sandbox: {
+              type: "docker",
+              image: `ghcr.io/example/pr-agent@${digest}`,
+              memoryMb: 32,
+            },
+          },
+        }),
+      /memoryMb must be between 64 and 262144/,
+    );
+    assert.throws(
+      () =>
+        parsePrEvalSuite({
+          ...manifest,
+          isolation: "shared-history",
+          agent: {
+            ...manifest.agent,
+            sandbox: {
+              type: "docker",
+              image: `ghcr.io/example/pr-agent@${digest}`,
+            },
+          },
+        }),
+      /requires suite\.isolation to be "sanitized"/,
+    );
+    assert.throws(
+      () =>
+        parsePrEvalSuite({
+          ...manifest,
+          agent: {
+            ...manifest.agent,
+            env: { "BAD-NAME": "secret" },
+            sandbox: {
+              type: "docker",
+              image: `ghcr.io/example/pr-agent@${digest}`,
+            },
+          },
+        }),
+      /invalid environment variable name/,
+    );
+    assert.throws(
+      () =>
+        parsePrEvalSuite({
+          ...manifest,
+          agent: { ...manifest.agent, envPass: ["TOKEN", "TOKEN"] },
+        }),
+      /must not contain duplicate names/,
+    );
+    assert.throws(
+      () =>
+        parsePrEvalSuite({
+          ...manifest,
+          agent: { ...manifest.agent, envPass: ["TOKEN"] },
+        }),
+      /envPass requires suite\.agent\.sandbox/,
+    );
 
     assert.throws(
       () =>
@@ -138,6 +250,111 @@ describe("PR evaluation harness", () => {
     assert.equal(corpus.cases.length, 3);
     assert.ok(corpus.cases.every((item) => item.goldRef?.length === 40));
     assert.ok(corpus.cases.every((item) => existsSync(item.testPatch!)));
+    const dockerSample = loadPrEvalSuite(
+      path.resolve("examples/pr-eval.docker.sample.json"),
+    );
+    assert.equal(dockerSample.agent.sandbox?.type, "docker");
+    assert.equal(dockerSample.agent.sandbox?.network, "none");
+    assert.ok(dockerSample.cases.every((item) => existsSync(item.testPatch!)));
+  });
+
+  it("builds a hardened Docker agent command without oracle mounts or secrets", () => {
+    const digest = `sha256:${"b".repeat(64)}`;
+    const workspace = "/tmp/contextengine-run/workspace";
+    const runDirectory = "/tmp/contextengine-run/run";
+    const oraclePatch = "/private/corpus/hidden-tests.patch";
+    const environmentFile = "/tmp/contextengine-run/.agent-container.env";
+    const built = buildPrEvalDockerCommand({
+      sandbox: {
+        type: "docker",
+        image: `ghcr.io/example/pr-agent@${digest}`,
+        network: "none",
+        cpus: 1.5,
+        memoryMb: 1_024,
+        pidsLimit: 128,
+        tmpfsMb: 64,
+      },
+      workspace,
+      runDirectory,
+      environmentFile,
+      containerName: "ce-pr-test-1234",
+      user: "1000:1000",
+      command: [
+        "agent-wrapper",
+        "--workspace",
+        "/workspace",
+        "--prompt-file",
+        "/run/prompt-r1.md",
+      ],
+    });
+
+    assert.deepEqual(built.reportedCommand, built.command);
+    assert.deepEqual(built.command.slice(0, 3), ["docker", "run", "--rm"]);
+    assert.ok(built.command.includes("--read-only"));
+    assert.ok(built.command.includes("ALL"));
+    assert.ok(built.command.includes("no-new-privileges"));
+    assert.ok(built.command.includes("never"));
+    assert.ok(built.command.includes("none"));
+    assert.ok(built.command.includes("1000:1000"));
+    assert.equal(
+      built.command[built.command.indexOf("--entrypoint") + 1],
+      "agent-wrapper",
+    );
+    assert.ok(
+      built.command.includes(
+        `type=bind,source=${workspace},target=/workspace`,
+      ),
+    );
+    assert.ok(
+      built.command.includes(
+        `type=bind,source=${runDirectory},target=/run`,
+      ),
+    );
+    assert.ok(built.command.includes(environmentFile));
+    assert.equal(built.command.join(" ").includes(oraclePatch), false);
+    assert.equal(built.command.join(" ").includes("secret"), false);
+    assert.equal(built.command.includes("/var/run/docker.sock"), false);
+  });
+
+  it("removes the Docker env file when command construction fails", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ce-pr-docker,cleanup-"));
+    const repository = createRepository(root, { "README.md": "fixture\n" });
+    const digest = `sha256:${"c".repeat(64)}`;
+    const suite = parsePrEvalSuite({
+      schemaVersion: 1,
+      name: "docker-env-cleanup",
+      repository,
+      agent: {
+        command: ["agent-wrapper"],
+        env: { TEST_SECRET: "must-not-remain" },
+        sandbox: {
+          type: "docker",
+          image: `ghcr.io/example/pr-agent@${digest}`,
+        },
+      },
+      testCommand: [process.execPath, "-e", "process.exit(0)"],
+      verifyBaseline: false,
+      requireChanges: false,
+      variants: [{ id: "baseline", context: "none" }],
+      cases: [{ id: "cleanup", prompt: "Inspect the fixture." }],
+    });
+
+    try {
+      const report = await runPrEvalSuite(suite, {
+        tempRoot: root,
+        keepWorktrees: true,
+      });
+      const [run] = report.runs;
+      assert.equal(run.status, "error");
+      assert.match(run.failure?.message ?? "", /bind-mount path/);
+      assert.ok(run.workspace);
+      assert.equal(
+        existsSync(path.join(path.dirname(run.workspace!), ".agent-container.env")),
+        false,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("executes argv literally and bounds captured output", async () => {

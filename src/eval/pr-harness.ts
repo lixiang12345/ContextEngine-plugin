@@ -13,11 +13,31 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { ContextEngine } from "../engine.js";
+import {
+  buildPrEvalDockerCommand,
+  createDockerContainerName,
+  dockerCleanupSucceeded,
+  dockerEnvironmentFileContent,
+  dockerInfrastructureError,
+  dockerUser,
+  parsePrEvalDockerSandbox,
+  resolvePassedEnvironment,
+  validateDockerEnvironmentNames,
+  type PrEvalDockerSandboxConfig,
+} from "./pr-docker-sandbox.js";
+
+export { buildPrEvalDockerCommand } from "./pr-docker-sandbox.js";
+export type {
+  PrEvalDockerCommand,
+  PrEvalDockerCommandInput,
+  PrEvalDockerSandboxConfig,
+} from "./pr-docker-sandbox.js";
 
 const DEFAULT_AGENT_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_OUTPUT_LIMIT_BYTES = 256 * 1024;
 const TERMINATE_GRACE_MS = 2_000;
+const DOCKER_CLEANUP_TIMEOUT_MS = 30_000;
 const DEFAULT_REPETITIONS = 1;
 const MAX_REPETITIONS = 20;
 
@@ -51,7 +71,25 @@ export interface PrEvalAgentUsage {
 export interface PrEvalAgentConfig {
   command: string[];
   env?: Record<string, string>;
+  /** Host environment variables explicitly allowed into a Docker sandbox. */
+  envPass?: string[];
   timeoutMs: number;
+  sandbox?: PrEvalDockerSandboxConfig;
+}
+
+export interface PrEvalAgentExecution {
+  type: "host" | "docker";
+  image?: string;
+  network?: "none" | "bridge";
+  cpus?: number;
+  memoryMb?: number;
+  pidsLimit?: number;
+  tmpfsMb?: number;
+  readOnlyRoot?: boolean;
+  capabilities?: "drop-all";
+  noNewPrivileges?: boolean;
+  pullPolicy?: "never";
+  passedEnvironmentVariables?: string[];
 }
 
 export interface PrEvalContextConfig {
@@ -220,6 +258,7 @@ export interface PrEvalReport {
     generatedAt: string;
     baseRef: string;
     isolation: PrEvalIsolationMode;
+    agentExecution: PrEvalAgentExecution;
     repetitions: number;
   };
   summary: {
@@ -304,18 +343,37 @@ export function parsePrEvalSuite(
   const agentRaw = objectValue(raw.agent, "suite.agent");
   assertAllowedKeys(
     agentRaw,
-    ["command", "env", "timeoutMs"],
+    ["command", "env", "envPass", "timeoutMs", "sandbox"],
     "suite.agent",
   );
   const agent: PrEvalAgentConfig = {
     command: commandValue(agentRaw.command, "suite.agent.command", true)!,
     env: environmentValue(agentRaw.env, "suite.agent.env"),
+    envPass: environmentNameArrayValue(
+      agentRaw.envPass,
+      "suite.agent.envPass",
+    ),
     timeoutMs: positiveInteger(
       agentRaw.timeoutMs,
       "suite.agent.timeoutMs",
       DEFAULT_AGENT_TIMEOUT_MS,
     ),
+    sandbox: parsePrEvalDockerSandbox(
+      agentRaw.sandbox,
+      "suite.agent.sandbox",
+    ),
   };
+  if (agent.sandbox && isolation !== "sanitized") {
+    throw new Error(
+      "suite.agent.sandbox requires suite.isolation to be \"sanitized\"",
+    );
+  }
+  if (agent.envPass?.length && !agent.sandbox) {
+    throw new Error("suite.agent.envPass requires suite.agent.sandbox");
+  }
+  if (agent.sandbox) {
+    validateDockerEnvironmentNames(agent.env, "suite.agent.env");
+  }
 
   const defaultVariants: unknown[] = [
     { id: "baseline", context: "none" },
@@ -329,6 +387,14 @@ export function parsePrEvalSuite(
     parseVariant(entry, `suite.variants[${index}]`),
   );
   assertUniqueIds(variants, "suite.variants");
+  if (agent.sandbox) {
+    variants.forEach((variant, index) =>
+      validateDockerEnvironmentNames(
+        variant.env,
+        `suite.variants[${index}].env`,
+      ),
+    );
+  }
 
   if (!Array.isArray(raw.cases) || raw.cases.length === 0) {
     throw new Error("suite.cases must be a non-empty array");
@@ -455,6 +521,7 @@ export function formatPrEvalReportMarkdown(report: PrEvalReport): string {
     `Repository: \`${escapeMarkdown(report.suite.repository)}\``,
     `Default base ref: \`${escapeMarkdown(report.suite.baseRef)}\``,
     `Isolation: \`${report.suite.isolation}\``,
+    `Agent execution: ${formatAgentExecution(report.suite.agentExecution)}`,
     `Repetitions per case/variant: ${report.suite.repetitions}`,
     "",
     "## Summary",
@@ -548,6 +615,7 @@ async function runSingleEvaluation(
   let baseCommit = "";
   let goldCommit: string | undefined;
   let sharedWorktreeCreated = false;
+  let dockerEnvironmentFile: string | undefined;
   let activeStage: NonNullable<PrEvalRunResult["failure"]>["stage"] = "setup";
   let result: PrEvalRunResult | undefined;
 
@@ -917,36 +985,128 @@ async function runSingleEvaluation(
     writeFileSync(contextFile, contextText, "utf8");
     writeFileSync(promptFile, agentPrompt, "utf8");
 
-    const command = expandCommand(
-      variant.command ?? suite.agent.command,
-      values,
-    );
+    const manifestCommand = variant.command ?? suite.agent.command;
+    const passedAgentEnvironment = suite.agent.sandbox
+      ? resolvePassedEnvironment(suite.agent.envPass)
+      : {};
+    const hostAgentEnvironment = {
+      ...suite.agent.env,
+      ...variant.env,
+      CONTEXTENGINE_PR_EVAL_CASE_ID: evalCase.id,
+      CONTEXTENGINE_PR_EVAL_VARIANT_ID: variant.id,
+      CONTEXTENGINE_PR_EVAL_REPETITION: String(repetition),
+      CONTEXTENGINE_PR_EVAL_RUN_ID: runId,
+      CONTEXTENGINE_PR_EVAL_WORKSPACE: workspace,
+      CONTEXTENGINE_PR_EVAL_PROMPT_FILE: promptFile,
+      CONTEXTENGINE_PR_EVAL_CONTEXT_FILE: contextFile,
+      CONTEXTENGINE_PR_EVAL_METRICS_FILE: values.metrics_file,
+      CONTEXTENGINE_PR_EVAL_CONTEXT_MODE: variant.context.mode,
+    };
+    let command = expandCommand(manifestCommand, values);
+    let reportedCommand: string[] | undefined;
+    let containerName: string | undefined;
+    if (suite.agent.sandbox) {
+      const containerValues = createTemplateValues({
+        workspace: "/workspace",
+        runDirectory: "/run",
+        evalCase,
+        variant,
+        repetition,
+        runId,
+      });
+      const containerEnvironment = {
+        ...passedAgentEnvironment,
+        ...suite.agent.env,
+        ...variant.env,
+        HOME: "/tmp",
+        TMPDIR: "/tmp",
+        CONTEXTENGINE_PR_EVAL_CASE_ID: evalCase.id,
+        CONTEXTENGINE_PR_EVAL_VARIANT_ID: variant.id,
+        CONTEXTENGINE_PR_EVAL_REPETITION: String(repetition),
+        CONTEXTENGINE_PR_EVAL_RUN_ID: runId,
+        CONTEXTENGINE_PR_EVAL_WORKSPACE: containerValues.workspace,
+        CONTEXTENGINE_PR_EVAL_PROMPT_FILE: containerValues.prompt_file,
+        CONTEXTENGINE_PR_EVAL_CONTEXT_FILE: containerValues.context_file,
+        CONTEXTENGINE_PR_EVAL_METRICS_FILE: containerValues.metrics_file,
+        CONTEXTENGINE_PR_EVAL_CONTEXT_MODE: variant.context.mode,
+      };
+      dockerEnvironmentFile = path.join(tempParent, ".agent-container.env");
+      writeFileSync(
+        dockerEnvironmentFile,
+        dockerEnvironmentFileContent(containerEnvironment),
+        { encoding: "utf8", mode: 0o600 },
+      );
+      containerName = createDockerContainerName(runId);
+      const dockerCommand = buildPrEvalDockerCommand({
+        sandbox: suite.agent.sandbox,
+        workspace,
+        runDirectory,
+        containerName,
+        command: expandCommand(manifestCommand, containerValues),
+        environmentFile: dockerEnvironmentFile,
+        user: dockerUser(),
+      });
+      command = dockerCommand.command;
+      reportedCommand = dockerCommand.reportedCommand;
+    }
     const agent = await runCommand(command, {
       cwd: workspace,
       timeoutMs:
         evalCase.agentTimeoutMs ?? suite.agent.timeoutMs,
       outputLimitBytes,
-      env: {
-        ...suite.agent.env,
-        ...variant.env,
-        CONTEXTENGINE_PR_EVAL_CASE_ID: evalCase.id,
-        CONTEXTENGINE_PR_EVAL_VARIANT_ID: variant.id,
-        CONTEXTENGINE_PR_EVAL_REPETITION: String(repetition),
-        CONTEXTENGINE_PR_EVAL_RUN_ID: runId,
-        CONTEXTENGINE_PR_EVAL_WORKSPACE: workspace,
-        CONTEXTENGINE_PR_EVAL_PROMPT_FILE: promptFile,
-        CONTEXTENGINE_PR_EVAL_CONTEXT_FILE: contextFile,
-        CONTEXTENGINE_PR_EVAL_METRICS_FILE: values.metrics_file,
-        CONTEXTENGINE_PR_EVAL_CONTEXT_MODE: variant.context.mode,
-      },
+      env: suite.agent.sandbox ? undefined : hostAgentEnvironment,
+      reportedCommand,
     });
+    let containerCleanup: PrEvalCommandResult | undefined;
+    if (
+      containerName &&
+      !agent.spawnError &&
+      (agent.timedOut || agent.signal !== null)
+    ) {
+      containerCleanup = await runCommand(
+        ["docker", "rm", "--force", containerName],
+        {
+          cwd: workspace,
+          timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS,
+          outputLimitBytes,
+        },
+      );
+    }
+    if (dockerEnvironmentFile) {
+      rmSync(dockerEnvironmentFile, { force: true });
+      dockerEnvironmentFile = undefined;
+    }
+    if (containerCleanup && !dockerCleanupSucceeded(containerCleanup)) {
+      result = {
+        ...baseResult(
+          suite,
+          evalCase,
+          variant,
+          baseRef,
+          baseCommit,
+          started,
+          options.keepWorktrees ? workspace : undefined,
+        ),
+        status: "error",
+        ...promptEvidence,
+        setup,
+        baselineSetup,
+        baselineTest,
+        agent,
+        failure: {
+          stage: "cleanup",
+          message: `unable to stop Docker agent container before hidden tests: ${commandFailure(containerCleanup)}`,
+        },
+      };
+      return result;
+    }
     const usage = readAgentUsage(values.metrics_file);
     const patch = await collectPatchStats(
       workspace,
       baseCommit,
       outputLimitBytes,
     );
-    if (agent.spawnError) {
+    if (agent.spawnError || dockerInfrastructureError(agent, suite.agent.sandbox)) {
       result = {
         ...baseResult(
           suite,
@@ -967,7 +1127,9 @@ async function runSingleEvaluation(
         patch,
         failure: {
           stage: "agent",
-          message: commandFailure(agent),
+          message: suite.agent.sandbox
+            ? `Docker agent infrastructure failed: ${commandFailure(agent)}`
+            : commandFailure(agent),
         },
       };
       return result;
@@ -1101,6 +1263,9 @@ async function runSingleEvaluation(
     result.failure = { stage: activeStage, message: errorMessage(error) };
     return result;
   } finally {
+    if (dockerEnvironmentFile) {
+      rmSync(dockerEnvironmentFile, { force: true });
+    }
     if (result) {
       result.runId = runId;
       result.repetition = repetition;
@@ -1186,6 +1351,7 @@ interface RunCommandOptions {
   timeoutMs: number;
   outputLimitBytes: number;
   env?: Record<string, string>;
+  reportedCommand?: string[];
 }
 
 /** Execute an argv command without a shell and with bounded output capture. */
@@ -1235,7 +1401,7 @@ async function runCommand(
       if (forceTimer) clearTimeout(forceTimer);
       if (spawnError) stderr.add(spawnError.message);
       resolve({
-        command,
+        command: options.reportedCommand ?? command,
         exitCode,
         signal,
         spawnError: spawnError?.message,
@@ -1489,6 +1655,22 @@ function environmentValue(
     throw new Error(`${label} values must all be strings`);
   }
   return Object.fromEntries(entries) as Record<string, string>;
+}
+
+function environmentNameArrayValue(
+  value: unknown,
+  label: string,
+): string[] | undefined {
+  const names = stringArrayValue(value, label);
+  if (!names) return undefined;
+  const invalid = names.find((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
+  if (invalid) {
+    throw new Error(`${label} has invalid environment variable name: ${invalid}`);
+  }
+  if (new Set(names).size !== names.length) {
+    throw new Error(`${label} must not contain duplicate names`);
+  }
+  return names;
 }
 
 function stringArrayValue(value: unknown, label: string): string[] | undefined {
@@ -1894,7 +2076,14 @@ function baseResult(
     baseCommit,
     promptSha256: sha256(evalCase.prompt),
     agentCommandSha256: sha256(
-      JSON.stringify(variant.command ?? suite.agent.command),
+      JSON.stringify(
+        suite.agent.sandbox
+          ? {
+              command: variant.command ?? suite.agent.command,
+              sandbox: suite.agent.sandbox,
+            }
+          : variant.command ?? suite.agent.command,
+      ),
     ),
     durationMs: elapsedMs(started),
     workspace,
@@ -1945,6 +2134,7 @@ function buildPrEvalReport(
       generatedAt: new Date().toISOString(),
       baseRef: suite.baseRef,
       isolation: suite.isolation,
+      agentExecution: agentExecutionReport(suite.agent),
       repetitions: suite.repetitions,
     },
     summary: {
@@ -1959,6 +2149,27 @@ function buildPrEvalReport(
       comparison: comparisons[0],
     },
     runs,
+  };
+}
+
+function agentExecutionReport(
+  agent: PrEvalAgentConfig,
+): PrEvalAgentExecution {
+  const sandbox = agent.sandbox;
+  if (!sandbox) return { type: "host" };
+  return {
+    type: "docker",
+    image: sandbox.image,
+    network: sandbox.network,
+    cpus: sandbox.cpus,
+    memoryMb: sandbox.memoryMb,
+    pidsLimit: sandbox.pidsLimit,
+    tmpfsMb: sandbox.tmpfsMb,
+    readOnlyRoot: true,
+    capabilities: "drop-all",
+    noNewPrivileges: true,
+    pullPolicy: "never",
+    passedEnvironmentVariables: [...(agent.envPass ?? [])].sort(),
   };
 }
 
@@ -2209,6 +2420,16 @@ function escapeMarkdown(value: string): string {
 
 function shortCommit(value: string): string {
   return value.slice(0, 12);
+}
+
+function formatAgentExecution(execution: PrEvalAgentExecution): string {
+  if (execution.type === "host") return "`host` (no OS-level sandbox)";
+  return [
+    "`docker`",
+    `(image \`${escapeMarkdown(execution.image ?? "unknown")}\`,`,
+    `network \`${execution.network}\`,`,
+    "read-only root, drop-all capabilities, no-new-privileges)",
+  ].join(" ");
 }
 
 function formatPercent(value: number): string {

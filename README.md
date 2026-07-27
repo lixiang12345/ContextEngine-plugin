@@ -523,8 +523,10 @@ separate sanitized workspace, so ignored artifacts cannot cross into the agent
 workspace. The corpus must run from a full Git clone and needs both PostgreSQL
 and an `agent-wrapper`. Broad public corpus results, controlled real-model runs,
 and Augment-comparable quality results have not been published yet. Its
-`testPatch` visibility rules are repository-level safeguards, not an OS security
-boundary.
+default `testPatch` visibility rules are repository-level safeguards; opt-in
+Docker agent execution adds a digest-pinned, read-only, resource-bounded OS
+boundary that mounts only the sanitized workspace and run artifacts. See the
+PR evaluation guide for its threat model and `envPass` secret allowlist.
 
 Code embedding model choices: **[docs/EMBEDDINGS.md](./docs/EMBEDDINGS.md)**.
 

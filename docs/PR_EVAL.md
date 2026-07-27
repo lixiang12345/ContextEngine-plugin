@@ -54,18 +54,54 @@ Every report records the resolved base commit and, when configured, the
 resolved gold commit. Markdown shortens those commit IDs to 12 characters for
 readability; JSON retains the full values.
 
-This is Git-history and workspace isolation, not a container, VM, macOS sandbox,
-or other OS-level security boundary. The agent command still runs with the
-permissions of the invoking user and may be able to read files outside the
-temporary repository if its own sandbox allows that. Use a separately hardened
-container or VM for adversarial or untrusted agents and manifests.
+Without `agent.sandbox`, this is Git-history and workspace isolation only. The
+agent command runs with the permissions and inherited environment of the
+invoking user and may read files outside the temporary repository. JSON and
+Markdown reports identify this execution boundary as `host`.
 
 An optional `testPatch` is applied only for baseline verification and after the
 agent patch has been captured. It is not present while the agent is running and
 is excluded from changed-file and patch statistics. This prevents accidental
-test leakage through the evaluated repository, but it does not make the patch
-file an OS-level secret: a host process with sufficient filesystem access could
-still read the original patch path.
+test leakage through the evaluated repository. In host mode it does not make
+the patch an OS-level secret: a process with the invoking user's permissions
+can still read the original patch path.
+
+### Docker agent sandbox
+
+Set `agent.sandbox.type` to `docker` when the hidden oracle must be outside the
+agent's OS-level filesystem boundary. Docker mode requires `isolation` to remain
+`sanitized` and an image pinned by immutable `@sha256` digest. The image must be
+pre-pulled: the runner uses `--pull never` so an evaluation cannot silently
+change its agent image or contact a registry.
+
+Only the fresh agent workspace (`/workspace`, read/write) and the run artifact
+directory (`/run`, read/write) are mounted. The source repository, original
+`testPatch`, env file, Docker socket, and other host paths are not mounted. The
+container runs with a read-only root filesystem, all Linux capabilities
+dropped, `no-new-privileges`, a tmpfs `/tmp`, the invoking POSIX UID/GID, and
+bounded CPU, memory, and PID resources. Network access defaults to `none`;
+choose `bridge` explicitly only when the agent must reach a model API.
+
+The exact agent executable is forced with Docker `--entrypoint`; image defaults
+cannot replace or wrap the reviewed argv. Placeholders and
+`CONTEXTENGINE_PR_EVAL_*` values use the container paths. Literal `agent.env`
+values and host variables named by `agent.envPass` are written to a mode-0600
+temporary env file outside both mounts, then deleted before hidden tests run.
+Missing `envPass` variables fail before the agent starts. Reports record the
+image digest, network, resource limits, and hardening controls, but never env
+values.
+
+An attached `docker run` returns only after the container stops. On timeout or
+abnormal signal, the runner additionally force-removes the named container
+before applying hidden tests. If it cannot prove the container stopped, the run
+fails closed as an infrastructure/cleanup error and the oracle is not executed.
+Docker CLI exit codes 125–127 are likewise infrastructure errors, not model
+failures.
+
+This boundary assumes a trusted Docker daemon, kernel, and pinned image. It is
+not equivalent to a hardened VM against kernel/container-runtime exploits.
+Setup and final test commands still run on the host; only the agent command is
+containerized, so manifests and oracle commands still require review.
 
 On POSIX, each command runs in a detached process group and timeout cleanup
 terminates the whole group. Windows uses the direct-child fallback, so a
@@ -119,6 +155,16 @@ quality lift.
   "isolation": "sanitized",
   "agent": {
     "command": ["agent-wrapper", "--workspace", "{workspace}", "--prompt-file", "{prompt_file}"],
+    "envPass": ["MODEL_API_KEY"],
+    "sandbox": {
+      "type": "docker",
+      "image": "ghcr.io/example/pr-agent@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "network": "bridge",
+      "cpus": 2,
+      "memoryMb": 2048,
+      "pidsLimit": 256,
+      "tmpfsMb": 256
+    },
     "timeoutMs": 900000
   },
   "setupCommand": ["npm", "ci"],
@@ -170,6 +216,12 @@ variables, including `CONTEXTENGINE_PR_EVAL_WORKSPACE`, `_PROMPT_FILE`,
 `_CONTEXT_FILE`, `_METRICS_FILE`, `_CASE_ID`, `_VARIANT_ID`, `_REPETITION`,
 `_RUN_ID`, and `_CONTEXT_MODE`. Prompt, context, and metrics artifact filenames
 also include the repetition number.
+
+`examples/pr-eval.docker.sample.json` is a complete Docker-mode skeleton.
+Replace its illustrative digest with a real, locally present agent image digest
+and set only the allowlisted host variables needed by that adapter. Prefer
+`network: "none"` for local/offline models; changing it to `bridge` is an
+explicit exfiltration-surface decision.
 
 ## Fixed historical corpus
 
@@ -249,8 +301,9 @@ repetition-aware paired reports across all `none x packed` variants, a small
 fixed historical corpus, and an
 optional agent metrics contract. Dynamic MCP tool-use adapters, a broad public
 PR corpus, controlled real-model trials, multiple fail-to-pass and pass-to-pass
-test groups, OS-level execution isolation, and model-specific JSONL usage
-parsers remain follow-up work.
+test groups, VM-grade isolation, and model-specific JSONL usage parsers remain
+follow-up work. Docker agent isolation is implemented and opt-in; host mode is
+retained for backwards compatibility and trusted smoke tests.
 
 No real-model PR benchmark result is published by this repository yet. Do not
 present the V1 harness itself as evidence of quality lift or as a reproduction
