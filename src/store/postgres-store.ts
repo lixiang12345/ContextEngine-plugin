@@ -1772,7 +1772,13 @@ export class PostgresStore {
         }
 
         if (schemaVersion < 1) {
-          await client.query(`CREATE EXTENSION IF NOT EXISTS vector`);
+          // pgvector is database-scoped, while ContextEngine schemas may be
+          // selected through search_path. Pin the extension to public so the
+          // first scoped migration cannot install it into a disposable test or
+          // tenant schema and make the vector type invisible elsewhere.
+          await client.query(
+            `CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public`,
+          );
           await client.query(`
       CREATE TABLE IF NOT EXISTS ce_schema_version (
         singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),

@@ -28,6 +28,13 @@ function databaseUrlForSchema(
   return parsed.toString();
 }
 
+function databaseUrlForDatabase(baseUrl: string, database: string): string {
+  const parsed = new URL(baseUrl);
+  parsed.pathname = `/${database}`;
+  parsed.searchParams.delete("options");
+  return parsed.toString();
+}
+
 function runEnsureSchemaInFreshProcess(url: string): Promise<void> {
   const storeUrl = pathToFileURL(
     `${process.cwd()}/src/store/postgres-store.ts`,
@@ -106,6 +113,52 @@ async function waitForPendingRelationLock(
 }
 
 describePostgres("PostgreSQL schema migration coordination", () => {
+  it(
+    "installs pgvector in public when a scoped schema migrates first",
+    { timeout: 30_000 },
+    async () => {
+      const suffix = randomUUID().replaceAll("-", "");
+      const database = `ce_vector_${process.pid}_${suffix}`;
+      const schema = `ce_first_${suffix}`;
+      const quotedDatabase = quoteIdentifier(database);
+      const quotedSchema = quoteIdentifier(schema);
+      const admin = new Pool({ connectionString: databaseUrl! });
+      const freshDatabaseUrl = databaseUrlForDatabase(databaseUrl!, database);
+      let freshPool: Pool | undefined;
+
+      try {
+        await admin.query(`CREATE DATABASE ${quotedDatabase}`);
+        freshPool = new Pool({ connectionString: freshDatabaseUrl });
+        await freshPool.query(`CREATE SCHEMA ${quotedSchema}`);
+        await runEnsureSchemaInFreshProcess(
+          databaseUrlForSchema(freshDatabaseUrl, schema),
+        );
+
+        const extension = await freshPool.query<{ schema: string }>(
+          `SELECT namespaces.nspname AS schema
+           FROM pg_extension AS extensions
+           JOIN pg_namespace AS namespaces
+             ON namespaces.oid = extensions.extnamespace
+           WHERE extensions.extname = 'vector'`,
+        );
+        assert.deepEqual(extension.rows, [{ schema: "public" }]);
+        const vectorType = await freshPool.query<{ type: string | null }>(
+          `SELECT to_regtype('vector')::text AS type`,
+        );
+        assert.deepEqual(vectorType.rows, [{ type: "vector" }]);
+      } finally {
+        if (freshPool) await freshPool.end();
+        try {
+          await admin.query(
+            `DROP DATABASE IF EXISTS ${quotedDatabase} WITH (FORCE)`,
+          );
+        } finally {
+          await admin.end();
+        }
+      }
+    },
+  );
+
   it(
     "migrates v1 source ownership into workspace-scoped blob grants",
     { timeout: 15_000 },
