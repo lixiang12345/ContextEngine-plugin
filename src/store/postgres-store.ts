@@ -905,6 +905,68 @@ export class PostgresStore {
     // clamp, break set_config, and silently disable every refresh.
     const requestedTimeout = Number.isFinite(timeoutMs) ? timeoutMs : 30_000;
     const boundedTimeout = Math.max(1_000, Math.min(300_000, requestedTimeout));
+    const tableNames = [
+      "ce_files",
+      "ce_chunks",
+      "ce_symbols",
+      "ce_imports",
+      "ce_embeddings",
+    ];
+    const configuredInterval = Number(
+      process.env.CONTEXTENGINE_INDEX_ANALYZE_MIN_INTERVAL_MS ?? 300_000,
+    );
+    const minIntervalMs = Number.isFinite(configuredInterval)
+      ? Math.max(0, Math.min(3_600_000, Math.floor(configuredInterval)))
+      : 300_000;
+    const configuredModifications = Number(
+      process.env.CONTEXTENGINE_INDEX_ANALYZE_MIN_MODIFICATIONS ?? 1_000,
+    );
+    const minModifications = Number.isFinite(configuredModifications)
+      ? Math.max(0, Math.min(1_000_000, Math.floor(configuredModifications)))
+      : 1_000;
+    if (minIntervalMs > 0) {
+      try {
+        const freshness = await this.query<{
+          table_count: string;
+          analyzed_count: string;
+          oldest_age_ms: string | null;
+          changes_bounded: boolean;
+        }>(
+          `SELECT COUNT(*)::text AS table_count,
+                  COUNT(last_analyze)::text AS analyzed_count,
+                  MAX(EXTRACT(EPOCH FROM (now() - last_analyze)) * 1000)::text
+                    AS oldest_age_ms,
+                  COALESCE(
+                    BOOL_AND(
+                      n_mod_since_analyze <= GREATEST(
+                        $1::bigint,
+                        CEIL(n_live_tup * 0.02)::bigint
+                      )
+                    ),
+                    false
+                  ) AS changes_bounded
+           FROM pg_stat_user_tables
+           WHERE schemaname = current_schema()
+             AND relname = ANY($2::text[])`,
+          [minModifications, tableNames],
+        );
+        const row = freshness.rows[0];
+        const oldestAgeMs = Number(row?.oldest_age_ms);
+        if (
+          Number(row?.table_count) === tableNames.length &&
+          Number(row?.analyzed_count) === tableNames.length &&
+          Number.isFinite(oldestAgeMs) &&
+          oldestAgeMs <= minIntervalMs &&
+          row?.changes_bounded === true
+        ) {
+          return true;
+        }
+      } catch {
+        // pg_stat_user_tables may be unavailable to a restricted role. Keep
+        // the previous bounded ANALYZE behavior instead of turning an
+        // observability-only optimization into a skipped refresh.
+      }
+    }
     try {
       await this.transaction(async (tx) => {
         await tx.query(
@@ -912,13 +974,7 @@ export class PostgresStore {
                   set_config('lock_timeout', $2, true)`,
           [`${boundedTimeout}ms`, `${Math.min(5_000, boundedTimeout)}ms`],
         );
-        for (const table of [
-          "ce_files",
-          "ce_chunks",
-          "ce_symbols",
-          "ce_imports",
-          "ce_embeddings",
-        ]) {
+        for (const table of tableNames) {
           await tx.query(`ANALYZE ${table}`);
         }
       });

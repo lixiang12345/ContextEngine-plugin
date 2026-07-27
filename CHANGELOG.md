@@ -30,6 +30,12 @@
   neural production eligibility still requires the separately configured
   model services.
 
+- Rate-limited PostgreSQL's post-index full-table `ANALYZE` refresh when all
+  five shared index tables already have recent statistics and only a bounded
+  number of rows changed. Large generations and stale/missing statistics still
+  force the bounded refresh; consecutive small workspaces no longer pay an
+  O(total database) scan after every generation.
+
 - Extended the task-retrieval corpus with a public-repository manifest
   (`benchmarks/task-retrieval/public-v1.json`): six real cross-module fixes
   from hono and zod, pinned by base revision with PR-style prompts and the

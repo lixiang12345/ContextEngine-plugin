@@ -6,7 +6,12 @@ import type { CodeChunk } from "../src/types.js";
 
 type CapturedQuery = { text: string; values: unknown[] };
 
-function capturingStore(): {
+function capturingStore(
+  respond: (
+    text: string,
+    values: unknown[],
+  ) => { rows: unknown[] } = () => ({ rows: [] }),
+): {
   store: PostgresStore;
   queries: CapturedQuery[];
 } {
@@ -14,7 +19,7 @@ function capturingStore(): {
   const client = {
     query: async (text: string, values: unknown[] = []) => {
       queries.push({ text, values });
-      return { rows: [] };
+      return respond(text, values);
     },
     release: () => undefined,
   };
@@ -237,11 +242,12 @@ describe("PostgresStore batched writes", () => {
 
     assert.equal(await store.refreshPlannerStatistics(12_000), true);
 
-    assert.equal(queries[0].text, "BEGIN");
-    assert.match(queries[1].text, /set_config\('statement_timeout'/);
-    assert.deepEqual(queries[1].values, ["12000ms", "5000ms"]);
+    assert.match(queries[0].text, /FROM pg_stat_user_tables/);
+    assert.equal(queries[1].text, "BEGIN");
+    assert.match(queries[2].text, /set_config\('statement_timeout'/);
+    assert.deepEqual(queries[2].values, ["12000ms", "5000ms"]);
     assert.deepEqual(
-      queries.slice(2, -1).map((query) => query.text),
+      queries.slice(3, -1).map((query) => query.text),
       [
         "ANALYZE ce_files",
         "ANALYZE ce_chunks",
@@ -250,6 +256,41 @@ describe("PostgresStore batched writes", () => {
         "ANALYZE ce_embeddings",
       ],
     );
+    assert.equal(queries.at(-1)?.text, "COMMIT");
+  });
+
+  it("skips a redundant full-table ANALYZE when shared statistics are fresh", async () => {
+    const { store, queries } = capturingStore((text) =>
+      text.includes("FROM pg_stat_user_tables")
+        ? {
+            rows: [
+              {
+                table_count: "5",
+                analyzed_count: "5",
+                oldest_age_ms: "1200",
+                changes_bounded: true,
+              },
+            ],
+          }
+        : { rows: [] },
+    );
+
+    assert.equal(await store.refreshPlannerStatistics(12_000), true);
+    assert.equal(queries.length, 1);
+    assert.match(queries[0].text, /n_mod_since_analyze/);
+    assert.deepEqual(queries[0].values[0], 1_000);
+  });
+
+  it("falls back to bounded ANALYZE when freshness statistics are unavailable", async () => {
+    const { store, queries } = capturingStore((text) => {
+      if (text.includes("FROM pg_stat_user_tables")) {
+        throw new Error("permission denied");
+      }
+      return { rows: [] };
+    });
+
+    assert.equal(await store.refreshPlannerStatistics(12_000), true);
+    assert.equal(queries[1].text, "BEGIN");
     assert.equal(queries.at(-1)?.text, "COMMIT");
   });
 });
