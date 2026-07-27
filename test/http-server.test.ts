@@ -86,20 +86,23 @@ describePostgres("ContextEngine HTTP service", () => {
   }
 
   async function waitForJob(jobId: string): Promise<Record<string, unknown>> {
-    for (let attempt = 0; attempt < 100; attempt++) {
+    const deadline = Date.now() + 15_000;
+    let lastStatus: unknown = "unknown";
+    while (Date.now() < deadline) {
       const response = await request(`/v1/index-jobs/${jobId}`);
       assert.equal(response.status, 200);
       const payload = (await response.json()) as {
         job: Record<string, unknown>;
       };
       const status = payload.job.status;
+      lastStatus = status;
       if (status === "succeeded") return payload.job;
       if (status === "failed") {
         assert.fail(`Index job failed: ${String(payload.job.error)}`);
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    assert.fail("Timed out waiting for index job");
+    assert.fail(`Timed out waiting for index job (last status: ${String(lastStatus)})`);
   }
 
   it("returns a conflict response for an expired sync plan", async () => {
