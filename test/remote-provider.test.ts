@@ -114,6 +114,45 @@ describe("remote model providers", () => {
     ]);
   });
 
+  it("pipelines bounded embedding requests and preserves caller order", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const origin = await listen((req, res) => {
+      let raw = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => {
+        raw += chunk;
+      });
+      req.on("end", () => {
+        const input = JSON.parse(raw).input as string[];
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        setTimeout(() => {
+          inFlight--;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              data: input.map((text, index) => ({
+                index,
+                embedding: text === "a" ? [1, 0] : [0, 1],
+              })),
+            }),
+          );
+        }, input[0] === "a" ? 40 : 10);
+      });
+    });
+    const provider = new OpenAICompatibleEmbeddings(
+      { baseUrl: origin, model: "test-embedding" },
+      { batchSize: 1, concurrency: 2 },
+    );
+
+    assert.deepEqual(await provider.embed(["bb", "a"]), [
+      [0, 1],
+      [1, 0],
+    ]);
+    assert.equal(maxInFlight, 2);
+  });
+
   it("can send Qwen v2 input types when enabled", async () => {
     const previous = process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE;
     process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE = "1";

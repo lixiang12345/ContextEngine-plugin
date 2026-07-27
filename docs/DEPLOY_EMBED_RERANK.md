@@ -255,6 +255,7 @@ Use the current public origin directly; ContextEngine appends `/v1` when necessa
 export CONTEXTENGINE_EMBEDDING_BASE_URL=https://YOUR_CURRENT_TUNNEL.trycloudflare.com
 export CONTEXTENGINE_EMBEDDING_API_KEY=YOUR_CURRENT_API_KEY
 export CONTEXTENGINE_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+export CONTEXTENGINE_EMBED_CONCURRENCY=1 # raise to 2 only after resource/latency validation
 export CONTEXTENGINE_EMBEDDING_INPUT_TYPE=1
 # Run the API benchmark before enabling neural rerank in production.
 # export CONTEXTENGINE_NEURAL_RERANK=1

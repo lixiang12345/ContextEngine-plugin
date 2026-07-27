@@ -11,9 +11,11 @@
   dtype. Remote embedding requests now
   length-bucket a bounded missing-chunk window before sending the unchanged
   texts in OOM-adaptive API batches, then restore vectors to exact caller
-  order; `CONTEXTENGINE_EMBED_WINDOW` controls the 32–512 chunk window. This
-  reduces dynamic-padding waste without changing model inputs, stored vectors,
-  or chunk mappings.
+  order; `CONTEXTENGINE_EMBED_WINDOW` controls the 32–512 chunk window. A new
+  bounded `CONTEXTENGINE_EMBED_CONCURRENCY` request pipeline (default 1,
+  maximum 4) can overlap remote HTTP transfer while a single-GPU server keeps
+  inference serialized. This reduces dynamic-padding and network idle time
+  without changing model inputs, stored vectors, or chunk mappings.
 
 - Hardened BM25 fallback and file-level ranking across the canonical eight-
   repository small/medium/large suite. PostgreSQL and SQLite path hints now

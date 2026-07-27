@@ -227,6 +227,7 @@ Templates:
 | `OPENAI_API_KEY` / `CONTEXTENGINE_EMBEDDING_API_KEY` | Enable embeddings |
 | `OPENAI_BASE_URL` / `CONTEXTENGINE_EMBEDDING_BASE_URL` | Embeddings API origin or `/v1` base; both forms are accepted |
 | `OPENAI_EMBEDDING_MODEL` / `CONTEXTENGINE_EMBEDDING_MODEL` | Model id |
+| `CONTEXTENGINE_EMBED_CONCURRENCY` | Bounded embedding HTTP request pipeline (default `1`, maximum `4`) |
 | `CONTEXTENGINE_EMBED_BATCH` | Chunks per embed request (default `8`; lower on OOM) |
 | `CONTEXTENGINE_EMBED_MAX_CHARS` | Truncate chunk text before embed |
 | `CONTEXTENGINE_EMBED_QUERY_INSTRUCT` | Override query instruct prefix (Qwen3-style) |

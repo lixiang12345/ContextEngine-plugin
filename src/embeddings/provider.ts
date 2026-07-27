@@ -23,6 +23,7 @@ export interface EmbeddingRequestOptions {
 
 export interface OpenAICompatibleEmbeddingsOptions {
   batchSize?: number;
+  concurrency?: number;
   maxInputChars?: number;
   sendInputType?: boolean;
   timeoutMs?: number;
@@ -45,6 +46,7 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
   private readonly queryInstruct: string;
   private readonly sendInputType: boolean;
   private readonly batchSize?: number;
+  private readonly concurrency?: number;
   private readonly maxInputChars?: number;
   private readonly timeoutMs?: number;
   private readonly retries?: number;
@@ -66,6 +68,7 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
         process.env.CONTEXTENGINE_EMBEDDING_INPUT_TYPE?.trim() || "",
       );
     this.batchSize = options.batchSize;
+    this.concurrency = options.concurrency;
     this.maxInputChars = options.maxInputChars;
     this.timeoutMs = options.timeoutMs;
     this.retries = options.retries;
@@ -106,6 +109,11 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
     );
     if (!Number.isFinite(batchSize) || batchSize < 1) batchSize = 8;
     batchSize = Math.floor(batchSize);
+    let concurrency = Number(
+      this.concurrency ?? process.env.CONTEXTENGINE_EMBED_CONCURRENCY ?? 1,
+    );
+    if (!Number.isFinite(concurrency) || concurrency < 1) concurrency = 1;
+    concurrency = Math.min(4, Math.floor(concurrency));
     let maxChars = Number(
       this.maxInputChars ??
         process.env.CONTEXTENGINE_EMBED_MAX_CHARS ??
@@ -121,27 +129,53 @@ export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
       .sort((a, b) => a.text.length - b.text.length || a.index - b.index);
     const all = new Array<number[]>(texts.length);
     for (let i = 0; i < entries.length; ) {
-      const batchEntries = entries.slice(i, i + batchSize);
-      const batch = batchEntries.map((entry) => entry.text);
-      try {
-        const vectors = await this.embedBatchOnce(
-          batch,
-          inputType,
-          requestOptions,
-        );
-        for (let index = 0; index < vectors.length; index++) {
-          all[batchEntries[index].index] = vectors[index];
-        }
-        i += batchSize;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        // Adaptive shrink on 5xx / OOM-ish failures
+      const wave: Array<typeof entries> = [];
+      let waveOffset = i;
+      while (wave.length < concurrency && waveOffset < entries.length) {
+        const batchEntries = entries.slice(waveOffset, waveOffset + batchSize);
+        wave.push(batchEntries);
+        waveOffset += batchEntries.length;
+      }
+      // Pipeline a small number of HTTP requests. A single-GPU server can keep
+      // inference serialized while receiving the next request and returning
+      // the previous JSON payload, reducing idle network gaps without changing
+      // the input text, per-request batch bound, or caller-visible ordering.
+      const settled = await Promise.allSettled(
+        wave.map((batchEntries) =>
+          this.embedBatchOnce(
+            batchEntries.map((entry) => entry.text),
+            inputType,
+            requestOptions,
+          ),
+        ),
+      );
+      const rejected = settled.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      if (rejected) {
+        const msg =
+          rejected.reason instanceof Error
+            ? rejected.reason.message
+            : String(rejected.reason);
+        // Adaptive shrink on 5xx / OOM-ish failures. Wait for the whole wave
+        // before retrying so a failed request cannot leave hidden in-flight
+        // work that exceeds the configured concurrency.
         if (batchSize > 1 && /5\d\d|OOM|memory|Internal/i.test(msg)) {
           batchSize = Math.max(1, Math.floor(batchSize / 2));
           continue;
         }
-        throw err;
+        throw rejected.reason;
       }
+      for (let batchIndex = 0; batchIndex < wave.length; batchIndex++) {
+        const batchEntries = wave[batchIndex];
+        const result = settled[batchIndex];
+        if (result.status !== "fulfilled") continue;
+        for (let index = 0; index < result.value.length; index++) {
+          all[batchEntries[index].index] = result.value[index];
+        }
+      }
+      i = waveOffset;
     }
     return all;
   }
