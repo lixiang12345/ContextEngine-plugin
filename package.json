@@ -49,6 +49,7 @@
     "bench:multilang": "node scripts/bench-multilang.mjs",
     "bench:scale": "node scripts/bench-scale.mjs",
     "eval:task-retrieval": "node scripts/eval-task-retrieval.mjs",
+    "website:check": "node scripts/validate-website.mjs",
     "release:smoke": "node scripts/release-smoke.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build"

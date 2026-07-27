@@ -1007,6 +1007,12 @@ table.compare td:first-child { color: var(--text); font-weight: 550; }
 
 @media (max-width: 640px) {
   .container { padding: 0 18px; }
+  .topbar-inner { gap: 12px; }
+  .topbar-actions > a { display: none; }
+  .docs-main code:not(pre code) {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
   .pipeline { grid-template-columns: 1fr; }
   .feature-grid { grid-template-columns: 1fr; }
   .stats-grid { grid-template-columns: 1fr 1fr; }
